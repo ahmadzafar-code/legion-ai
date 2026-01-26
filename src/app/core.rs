@@ -1,4 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+#[cfg(feature = "ai")]
+use std::collections::HashMap;
 use std::fmt;
 use std::num::NonZeroUsize;
 use std::time::Duration;
@@ -27,6 +29,9 @@ use crate::deferred_data::{CountingDeferredDataSource, DeferredDataSource, LruDe
 use crate::timestamp::{
     Interval, Timestamp, TimestampDisplay, TimestampParseError, TimestampUnits,
 };
+
+#[cfg(feature = "ai")]
+use crate::ai::{AiDataWrapper, AiHighlight};
 
 /// Overview:
 ///   ProfApp -> Context, Window *
@@ -151,6 +156,15 @@ struct SearchState {
     entry_tree: BTreeMap<u64, BTreeMap<u64, BTreeSet<u64>>>,
 }
 
+/// Type alias for the data source stack without AI features.
+#[cfg(not(feature = "ai"))]
+type DataSourceStack = CountingDeferredDataSource<LruDeferredDataSource<Box<dyn DeferredDataSource>>>;
+
+/// Type alias for the data source stack with AI features.
+/// AiDataWrapper is outside LRU cache so it sees all tile responses (including cached ones).
+#[cfg(feature = "ai")]
+type DataSourceStack = CountingDeferredDataSource<AiDataWrapper<LruDeferredDataSource<Box<dyn DeferredDataSource>>>>;
+
 struct Config {
     field_schema: FieldSchema,
 
@@ -166,7 +180,7 @@ struct Config {
     interval: Interval,
     warning_message: Option<String>,
 
-    data_source: CountingDeferredDataSource<LruDeferredDataSource<Box<dyn DeferredDataSource>>>,
+    data_source: DataSourceStack,
 
     search_state: SearchState,
 
@@ -180,6 +194,15 @@ struct Config {
     scroll_to_item_retry: Option<ItemLocator>,
 
     tile_manager: TileManager,
+
+    /// AI-detected performance highlights, keyed by entry_id only.
+    /// Highlights persist across zoom levels since they're not tied to specific tiles.
+    #[cfg(feature = "ai")]
+    ai_highlights: HashMap<EntryID, Vec<AiHighlight>>,
+
+    /// Whether to show AI highlights in the UI.
+    #[cfg(feature = "ai")]
+    ai_highlights_enabled: bool,
 }
 
 struct Window {
@@ -338,6 +361,10 @@ trait Entry {
 
     fn search(&mut self, config: &mut Config);
 
+    /// Clear all cached tiles to force re-fetch on next render.
+    #[cfg(feature = "ai")]
+    fn clear_tiles(&mut self);
+
     fn label(&mut self, ui: &mut egui::Ui, rect: Rect, cx: &Context) {
         let response = ui.allocate_rect(
             rect,
@@ -455,6 +482,12 @@ impl Entry for Summary {
 
     fn search(&mut self, _config: &mut Config) {
         unreachable!()
+    }
+
+    #[cfg(feature = "ai")]
+    fn clear_tiles(&mut self) {
+        // Clear summary tiles to force re-fetch (needed for AI analysis)
+        self.tiles.clear();
     }
 
     fn content(
@@ -700,6 +733,37 @@ impl Slot {
         // Track which item, if any, we're interacting with
         let mut interact_item = None;
 
+        // Render AI highlights FIRST (as background, behind items)
+        #[cfg(feature = "ai")]
+        if config.ai_highlights_enabled {
+            if let Some(highlights) = config.ai_highlights.get(&self.entry_id) {
+                for hl in highlights {
+                    // Map interval to normalized [0,1] within view
+                    let norm_start = cx.view_interval.unlerp(hl.interval.start).clamp(0.0, 1.0);
+                    let norm_stop = cx.view_interval.unlerp(hl.interval.stop).clamp(0.0, 1.0);
+
+                    // Skip if highlight is outside view
+                    if norm_stop <= 0.0 || norm_start >= 1.0 {
+                        continue;
+                    }
+
+                    // Full slot height rect
+                    let min = rect.lerp_inside(Vec2::new(norm_start, 0.0));
+                    let max = rect.lerp_inside(Vec2::new(norm_stop, 1.0));
+                    let hl_rect = Rect::from_min_max(min, max);
+
+                    // Semi-transparent red fill (very low opacity for background look)
+                    let fill_color = Color32::from_rgba_unmultiplied(255, 0, 0, 40);
+                    ui.painter().rect_filled(hl_rect, 0.0, fill_color);
+                    ui.painter().rect_stroke(
+                        hl_rect,
+                        0.0,
+                        Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 0, 0, 80)),
+                    );
+                }
+            }
+        }
+
         for (row, row_items) in tile.items.iter().enumerate() {
             // Need to reverse the rows because we're working in screen space
             let irow = rows - (row as u64) - 1;
@@ -773,6 +837,40 @@ impl Slot {
                 }
 
                 ui.painter().rect(item_rect, 0.0, color, Stroke::NONE);
+            }
+        }
+
+        // Handle AI highlight tooltips (rendering done above, before items)
+        #[cfg(feature = "ai")]
+        if config.ai_highlights_enabled {
+            if let Some(highlights) = config.ai_highlights.get(&self.entry_id) {
+                for hl in highlights {
+                    // Map interval to normalized [0,1] within view
+                    let norm_start = cx.view_interval.unlerp(hl.interval.start).clamp(0.0, 1.0);
+                    let norm_stop = cx.view_interval.unlerp(hl.interval.stop).clamp(0.0, 1.0);
+
+                    // Skip if highlight is outside view
+                    if norm_stop <= 0.0 || norm_start >= 1.0 {
+                        continue;
+                    }
+
+                    // Full slot height rect
+                    let min = rect.lerp_inside(Vec2::new(norm_start, 0.0));
+                    let max = rect.lerp_inside(Vec2::new(norm_stop, 1.0));
+                    let hl_rect = Rect::from_min_max(min, max);
+
+                    // Tooltip on hover
+                    if let Some(h) = hover_pos {
+                        if h.x >= min.x && h.x <= max.x && hl_rect.contains(h) {
+                            let tooltip_id = ("ai_highlight", tile_id.0.start.0, hl.interval.start.0);
+                            ui.show_tooltip_ui(tooltip_id, &hl_rect, |ui| {
+                                ui.label(RichText::new(&hl.label).strong());
+                                ui.label(format!("Interval: {}", hl.interval));
+                                ui.label(format!("Confidence: {:.0}%", hl.confidence * 100.0));
+                            });
+                        }
+                    }
+                }
             }
         }
 
@@ -902,6 +1000,13 @@ impl Entry for Slot {
         for tile_id in tile_ids {
             self.fetch_meta_tile(tile_id, config, FULL);
         }
+    }
+
+    #[cfg(feature = "ai")]
+    fn clear_tiles(&mut self) {
+        // Clear all cached slot tiles to force re-fetch
+        self.tiles.clear();
+        self.tile_metas.clear();
     }
 
     fn search(&mut self, config: &mut Config) {
@@ -1132,6 +1237,18 @@ impl<S: Entry> Entry for Panel<S> {
 
                 slot.search(config);
             }
+        }
+    }
+
+    #[cfg(feature = "ai")]
+    fn clear_tiles(&mut self) {
+        // Clear summary tiles (needed for utility processor AI analysis)
+        if let Some(summary) = &mut self.summary {
+            summary.clear_tiles();
+        }
+        // Clear tiles in all child slots
+        for slot in &mut self.slots {
+            slot.clear_tiles();
         }
     }
 
@@ -1415,6 +1532,17 @@ impl Config {
         let title_id = field_schema.insert("Title".to_owned(), true);
         let search_state = SearchState::new(title_id);
 
+        // Build the data source stack:
+        // - Without AI: Counting<LRU<raw>>
+        // - With AI: Counting<AiWrapper<LRU<raw>>>
+        // AiWrapper must be outside LRU so it sees all tile responses (including cached ones)
+        let lru_source = LruDeferredDataSource::new(data_source, NonZeroUsize::new(1024).unwrap());
+
+        #[cfg(not(feature = "ai"))]
+        let data_source_stack = CountingDeferredDataSource::new(lru_source);
+        #[cfg(feature = "ai")]
+        let data_source_stack = CountingDeferredDataSource::new(AiDataWrapper::new(lru_source));
+
         Self {
             field_schema,
             min_node: 0,
@@ -1423,15 +1551,16 @@ impl Config {
             kind_filter: BTreeSet::new(),
             interval,
             warning_message,
-            data_source: CountingDeferredDataSource::new(LruDeferredDataSource::new(
-                data_source,
-                NonZeroUsize::new(1024).unwrap(),
-            )),
+            data_source: data_source_stack,
             search_state,
             items_selected: BTreeMap::new(),
             scroll_to_item: None,
             scroll_to_item_retry: None,
             tile_manager: TileManager::new(tile_set, interval),
+            #[cfg(feature = "ai")]
+            ai_highlights: HashMap::new(),
+            #[cfg(feature = "ai")]
+            ai_highlights_enabled: true,  // Show highlights when found
         }
     }
 
@@ -1453,6 +1582,52 @@ impl Config {
                 meta: None,
                 loc: item_loc,
             });
+    }
+
+    /// Drain highlights from the AiDataWrapper and merge into ai_highlights.
+    /// Deduplicates highlights by checking for overlapping intervals.
+    #[cfg(feature = "ai")]
+    fn drain_ai_highlights(&mut self) {
+        // Stack is: Counting<AiWrapper<LRU<...>>>, so one inner_mut() gets to AiWrapper
+        let new_highlights = self
+            .data_source
+            .inner_mut()
+            .drain_highlights();
+
+        // Merge new highlights, deduplicating overlapping intervals
+        for (entry_id, highlights) in new_highlights {
+            let existing = self.ai_highlights.entry(entry_id).or_default();
+            for hl in highlights {
+                // Check if we already have a highlight that overlaps significantly
+                // Skip if ANY overlap > 25% of either interval (aggressive dedup)
+                let dominated = existing.iter().any(|e| {
+                    let overlap_start = e.interval.start.0.max(hl.interval.start.0);
+                    let overlap_stop = e.interval.stop.0.min(hl.interval.stop.0);
+                    if overlap_stop <= overlap_start {
+                        return false; // No overlap
+                    }
+                    let overlap_duration = overlap_stop - overlap_start;
+                    let hl_duration = hl.interval.duration_ns();
+                    let e_duration = e.interval.duration_ns();
+                    // Skip if overlap is significant portion of either interval
+                    (hl_duration > 0 && overlap_duration > hl_duration / 4) ||
+                    (e_duration > 0 && overlap_duration > e_duration / 4)
+                });
+                if !dominated {
+                    existing.push(hl);
+                }
+            }
+        }
+    }
+
+    /// Enable AI analysis. Call when "Scan for Issues" is clicked.
+    #[cfg(feature = "ai")]
+    fn enable_ai_analysis(&mut self) {
+        // Clear previous highlights and start fresh
+        self.ai_highlights.clear();
+        self.data_source.inner_mut().clear_cache();
+        // Pass kinds to the wrapper since get_infos() was already called before the wrapper existed
+        self.data_source.inner_mut().enable_analysis_with_kinds(self.kinds.clone());
     }
 }
 
@@ -1485,6 +1660,16 @@ impl Window {
         // Use the panel version directly to avoid a mutability conflict
         let slot = self.panel.find_slot_mut(entry_id, 0).unwrap();
         slot.inflate_meta(&mut self.config, cx);
+    }
+
+    /// Trigger AI scan by enabling analysis and forcing tile re-fetch.
+    #[cfg(feature = "ai")]
+    fn trigger_ai_scan(&mut self, _cx: &mut Context) {
+        // Enable analysis mode (clears previous highlights)
+        self.config.enable_ai_analysis();
+        // Clear all cached tiles in visible slots to force re-fetch
+        // The next render frame will re-fetch them with analysis enabled
+        self.panel.clear_tiles();
     }
 
     fn find_item_irow(&self, entry_id: &EntryID, item_uid: ItemUID) -> Option<usize> {
@@ -1730,6 +1915,44 @@ impl Window {
         self.expand_collapse(ui, cx);
         ui.add_space(WIDGET_PADDING);
         self.select_interval(ui, cx);
+        #[cfg(feature = "ai")]
+        {
+            ui.add_space(WIDGET_PADDING);
+            self.ai_controls(ui, cx);
+        }
+    }
+
+    #[cfg(feature = "ai")]
+    fn ai_controls(&mut self, ui: &mut egui::Ui, cx: &mut Context) {
+        ui.label(RichText::new("AI Analysis").strong());
+
+        let highlight_count: usize = self.config.ai_highlights.values().map(|v| v.len()).sum();
+
+        ui.horizontal(|ui| {
+            if highlight_count == 0 {
+                // No highlights yet - show scan button
+                if ui.button("Scan for Issues").clicked() {
+                    self.trigger_ai_scan(cx);
+                }
+            } else {
+                // Have highlights - show toggle to show/hide them
+                let button_text = if self.config.ai_highlights_enabled {
+                    "Hide Issues"
+                } else {
+                    "Show Issues"
+                };
+                if ui.button(button_text).clicked() {
+                    self.config.ai_highlights_enabled = !self.config.ai_highlights_enabled;
+                }
+                ui.label(format!("({} found)", highlight_count));
+
+                // Option to re-scan
+                if ui.button("Re-scan").clicked() {
+                    self.config.ai_highlights.clear();
+                    self.trigger_ai_scan(cx);
+                }
+            }
+        });
     }
 
     fn search(&mut self, cx: &mut Context) {
@@ -2522,6 +2745,18 @@ impl eframe::App for ProfApp {
                     metas
                         .entry(req.tile_id)
                         .and_modify(|t| *t = Some(tile.map(|s| s.data)));
+                }
+            }
+
+            // Drain AI highlights from the wrapper into Config
+            #[cfg(feature = "ai")]
+            {
+                window.config.drain_ai_highlights();
+                // Disable analysis once we have highlights (scan complete)
+                // This prevents re-scanning on zoom/pan while keeping analysis
+                // active until initial tiles are processed
+                if !window.config.ai_highlights.is_empty() {
+                    window.config.data_source.inner_mut().disable_analysis();
                 }
             }
         }

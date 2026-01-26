@@ -20,6 +20,7 @@ duckdb = ["dep:duckdb"]
 client = ["dep:reqwest", "dep:url"]
 server = ["dep:actix-cors", "dep:actix-web"]
 nvtxw = ["dep:nvtxw"]
+ai = []  # AI-powered analysis and highlighting
 
 [dependencies]
 egui = "0.29.0"
