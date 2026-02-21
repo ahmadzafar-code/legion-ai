@@ -203,6 +203,11 @@ struct Config {
     /// Whether to show AI highlights in the UI.
     #[cfg(feature = "ai")]
     ai_highlights_enabled: bool,
+
+    /// Timeline gap selection for AI diagnosis: (entry_id, gap_interval, entry_label).
+    /// Set by Shift+click on empty space in a slot, consumed by update() to propagate to chat panel.
+    #[cfg(feature = "ai")]
+    ai_timeline_selection: Option<(EntryID, Interval, String)>,
 }
 
 struct Window {
@@ -325,6 +330,10 @@ struct Context {
     view_interval_history: IntervalState,
     #[serde(skip)]
     interval_select_state: IntervalSelectState,
+
+    #[cfg(feature = "ai")]
+    #[serde(skip)]
+    chat_panel: crate::ai::ChatPanel,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -837,6 +846,107 @@ impl Slot {
                 }
 
                 ui.painter().rect(item_rect, 0.0, color, Stroke::NONE);
+            }
+        }
+
+        // Detect Shift+click on empty gap space for AI timeline selection
+        #[cfg(feature = "ai")]
+        {
+            let pointer_in_rect = ui.rect_contains_pointer(rect);
+            if pointer_in_rect && hover_pos.is_some() {
+                // hover_pos is still Some => mouse is NOT over any item (items consume it)
+                ui.input(|i| {
+                    if i.pointer.any_click() && i.pointer.primary_released() && i.modifiers.shift {
+                        if let Some(pos) = i.pointer.hover_pos() {
+                            let norm_x =
+                                ((pos.x - rect.min.x) / rect.width()).clamp(0.0, 1.0);
+                            let click_time = cx.view_interval.lerp(norm_x as f32);
+
+                            // Find the gap containing this timestamp using row 0 items
+                            if let Some(Ok(tile_data)) =
+                                self.tiles.get(&tile_id).and_then(|t| t.as_ref())
+                            {
+                                if let Some(row) = tile_data.items.first() {
+                                    let mut gap_interval = None;
+
+                                    // Check gaps between consecutive items
+                                    for window in row.windows(2) {
+                                        let prev_end = window[0].interval.stop;
+                                        let next_start = window[1].interval.start;
+                                        if click_time >= prev_end && click_time <= next_start {
+                                            gap_interval =
+                                                Some(Interval::new(prev_end, next_start));
+                                            break;
+                                        }
+                                    }
+
+                                    // Check gap before first item
+                                    if gap_interval.is_none() {
+                                        if let Some(first) = row.first() {
+                                            if click_time < first.interval.start {
+                                                gap_interval = Some(Interval::new(
+                                                    tile_id.0.start,
+                                                    first.interval.start,
+                                                ));
+                                            }
+                                        }
+                                    }
+
+                                    // Check gap after last item
+                                    if gap_interval.is_none() {
+                                        if let Some(last) = row.last() {
+                                            if click_time > last.interval.stop {
+                                                gap_interval = Some(Interval::new(
+                                                    last.interval.stop,
+                                                    tile_id.0.stop,
+                                                ));
+                                            }
+                                        }
+                                    }
+
+                                    // Empty row — whole tile is a gap
+                                    if gap_interval.is_none() && row.is_empty() {
+                                        gap_interval = Some(tile_id.0);
+                                    }
+
+                                    if let Some(gap) = gap_interval {
+                                        config.ai_timeline_selection = Some((
+                                            self.entry_id.clone(),
+                                            gap,
+                                            self.long_name.clone(),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
+        // Render AI timeline selection highlight (blue overlay)
+        #[cfg(feature = "ai")]
+        if let Some((ref sel_entry_id, ref sel_interval, _)) = config.ai_timeline_selection {
+            if sel_entry_id == &self.entry_id {
+                let norm_start =
+                    cx.view_interval.unlerp(sel_interval.start).clamp(0.0, 1.0);
+                let norm_stop =
+                    cx.view_interval.unlerp(sel_interval.stop).clamp(0.0, 1.0);
+                if norm_stop > 0.0 && norm_start < 1.0 {
+                    let min = rect.lerp_inside(Vec2::new(norm_start, 0.0));
+                    let max = rect.lerp_inside(Vec2::new(norm_stop, 1.0));
+                    let sel_rect = Rect::from_min_max(min, max);
+                    let fill = Color32::from_rgba_unmultiplied(50, 100, 255, 30);
+                    ui.painter().rect_filled(sel_rect, 0.0, fill);
+                    ui.painter().rect_stroke(
+                        sel_rect,
+                        0.0,
+                        Stroke::new(
+                            1.5,
+                            Color32::from_rgba_unmultiplied(80, 140, 255, 150),
+                        ),
+                    );
+                }
             }
         }
 
@@ -1561,6 +1671,8 @@ impl Config {
             ai_highlights: HashMap::new(),
             #[cfg(feature = "ai")]
             ai_highlights_enabled: true,  // Show highlights when found
+            #[cfg(feature = "ai")]
+            ai_timeline_selection: None,
         }
     }
 
@@ -2759,6 +2871,24 @@ impl eframe::App for ProfApp {
                     window.config.data_source.inner_mut().disable_analysis();
                 }
             }
+
+            // Propagate timeline gap selection to the chat panel
+            #[cfg(feature = "ai")]
+            {
+                if let Some((entry_id, interval, label)) =
+                    window.config.ai_timeline_selection.take()
+                {
+                    cx.chat_panel.set_selection(crate::ai::TimelineSelection {
+                        entry_id,
+                        entry_label: label,
+                        interval,
+                    });
+                    // Auto-open chat panel when selection is made
+                    if !cx.chat_panel.visible {
+                        cx.chat_panel.visible = true;
+                    }
+                }
+            }
         }
 
         let mut _fps = 0.0;
@@ -2827,6 +2957,13 @@ impl eframe::App for ProfApp {
                         cx.show_controls = true;
                     }
 
+                    #[cfg(feature = "ai")]
+                    {
+                        if ui.button("💬 AI Chat").clicked() {
+                            cx.chat_panel.toggle();
+                        }
+                    }
+
                     ui.toggle_value(&mut cx.debug, "🛠 Debug");
 
                     #[cfg(not(target_arch = "wasm32"))]
@@ -2841,6 +2978,10 @@ impl eframe::App for ProfApp {
                 egui::warn_if_debug_build(ui);
             });
         });
+
+        // AI Chat panel — must be added BEFORE CentralPanel in egui layout
+        #[cfg(feature = "ai")]
+        cx.chat_panel.show(ctx);
 
         egui::CentralPanel::default().show(ctx, |ui| {
             // Use body font to figure out how tall to draw rectangles.
