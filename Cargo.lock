@@ -2784,6 +2784,7 @@ version = "0.6.2"
 dependencies = [
  "actix-cors",
  "actix-web",
+ "base64 0.22.1",
  "bytes",
  "ciborium",
  "clap",
@@ -2793,6 +2794,7 @@ dependencies = [
  "egui_extras",
  "env_logger",
  "getrandom 0.2.16",
+ "image",
  "itertools 0.14.0",
  "log",
  "lru",

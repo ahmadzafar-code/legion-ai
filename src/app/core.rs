@@ -31,7 +31,7 @@ use crate::timestamp::{
 };
 
 #[cfg(feature = "ai")]
-use crate::ai::{AiDataWrapper, AiHighlight};
+use crate::ai::{AiHighlight, Highlight};
 
 /// Overview:
 ///   ProfApp -> Context, Window *
@@ -156,14 +156,7 @@ struct SearchState {
     entry_tree: BTreeMap<u64, BTreeMap<u64, BTreeSet<u64>>>,
 }
 
-/// Type alias for the data source stack without AI features.
-#[cfg(not(feature = "ai"))]
 type DataSourceStack = CountingDeferredDataSource<LruDeferredDataSource<Box<dyn DeferredDataSource>>>;
-
-/// Type alias for the data source stack with AI features.
-/// AiDataWrapper is outside LRU cache so it sees all tile responses (including cached ones).
-#[cfg(feature = "ai")]
-type DataSourceStack = CountingDeferredDataSource<AiDataWrapper<LruDeferredDataSource<Box<dyn DeferredDataSource>>>>;
 
 struct Config {
     field_schema: FieldSchema,
@@ -334,6 +327,13 @@ struct Context {
     #[cfg(feature = "ai")]
     #[serde(skip)]
     chat_panel: crate::ai::ChatPanel,
+
+    /// Request ID of a pending `ViewportCommand::Screenshot` awaiting
+    /// delivery via `Event::Screenshot`. Set when the agent requests a
+    /// screenshot, consumed when the screenshot event arrives.
+    #[cfg(feature = "ai")]
+    #[serde(skip)]
+    awaiting_screenshot: Option<u64>,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -369,10 +369,6 @@ trait Entry {
     fn inflate_meta(&mut self, config: &mut Config, cx: &mut Context);
 
     fn search(&mut self, config: &mut Config);
-
-    /// Clear all cached tiles to force re-fetch on next render.
-    #[cfg(feature = "ai")]
-    fn clear_tiles(&mut self);
 
     fn label(&mut self, ui: &mut egui::Ui, rect: Rect, cx: &Context) {
         let response = ui.allocate_rect(
@@ -491,12 +487,6 @@ impl Entry for Summary {
 
     fn search(&mut self, _config: &mut Config) {
         unreachable!()
-    }
-
-    #[cfg(feature = "ai")]
-    fn clear_tiles(&mut self) {
-        // Clear summary tiles to force re-fetch (needed for AI analysis)
-        self.tiles.clear();
     }
 
     fn content(
@@ -1112,13 +1102,6 @@ impl Entry for Slot {
         }
     }
 
-    #[cfg(feature = "ai")]
-    fn clear_tiles(&mut self) {
-        // Clear all cached slot tiles to force re-fetch
-        self.tiles.clear();
-        self.tile_metas.clear();
-    }
-
     fn search(&mut self, config: &mut Config) {
         if !config.search_state.start_entry(self) {
             return;
@@ -1347,18 +1330,6 @@ impl<S: Entry> Entry for Panel<S> {
 
                 slot.search(config);
             }
-        }
-    }
-
-    #[cfg(feature = "ai")]
-    fn clear_tiles(&mut self) {
-        // Clear summary tiles (needed for utility processor AI analysis)
-        if let Some(summary) = &mut self.summary {
-            summary.clear_tiles();
-        }
-        // Clear tiles in all child slots
-        for slot in &mut self.slots {
-            slot.clear_tiles();
         }
     }
 
@@ -1629,6 +1600,155 @@ impl SearchState {
     }
 }
 
+// ── Agent highlight helpers (Phase 3) ────────────────────────────────────────
+
+/// Reproduce the slug-part algorithm from `duckdb_data::sanitize_short`:
+/// remove spaces, extract ASCII alphanumeric runs, join with `_`, lowercase.
+#[cfg(feature = "ai")]
+fn slug_part(name: &str) -> String {
+    let no_spaces: String = name.chars().filter(|c| *c != ' ').collect();
+    let mut result = String::new();
+    let mut in_word = false;
+    for c in no_spaces.chars() {
+        if c.is_ascii_alphanumeric() {
+            if !in_word && !result.is_empty() {
+                result.push('_');
+            }
+            result.push(c.to_ascii_lowercase());
+            in_word = true;
+        } else {
+            in_word = false;
+        }
+    }
+    result
+}
+
+/// Build a `slug → EntryID` map by traversing the 3-level panel hierarchy.
+/// Matches the slug generation in `duckdb_data::walk_entry_list`.
+#[cfg(feature = "ai")]
+fn build_slug_map(window: &Window) -> HashMap<String, EntryID> {
+    let mut map = HashMap::new();
+    // window.panel = Panel<Panel<Panel<Slot>>>
+    // level-1: node panels  (N0, N1, …)
+    // level-2: kind panels  (CPU, GPU, Utility, …)
+    // level-3: slot entries (C0, C1, …)
+    for node_panel in &window.panel.slots {
+        let node_slug = slug_part(&node_panel.short_name);
+        map.insert(node_slug.clone(), node_panel.entry_id.clone());
+
+        for kind_panel in &node_panel.slots {
+            let kind_slug =
+                format!("{}_{}", node_slug, slug_part(&kind_panel.short_name));
+            map.insert(kind_slug.clone(), kind_panel.entry_id.clone());
+
+            for slot in &kind_panel.slots {
+                let slot_slug =
+                    format!("{}_{}", kind_slug, slug_part(&slot.short_name));
+                map.insert(slot_slug.clone(), slot.entry_id.clone());
+            }
+        }
+    }
+    map
+}
+
+/// Convert an agent `Highlight` to the `AiHighlight` used by the renderer.
+#[cfg(feature = "ai")]
+fn highlight_to_ai(hl: &Highlight) -> AiHighlight {
+    use crate::timestamp::Timestamp;
+    let color = match hl.severity.as_str() {
+        "critical" => egui::Color32::from_rgba_unmultiplied(220, 20, 20, 55),
+        "high" => egui::Color32::from_rgba_unmultiplied(220, 100, 20, 55),
+        "medium" => egui::Color32::from_rgba_unmultiplied(220, 180, 20, 55),
+        _ => egui::Color32::from_rgba_unmultiplied(180, 0, 180, 45),
+    };
+    AiHighlight {
+        interval: Interval::new(Timestamp(hl.start_ns), Timestamp(hl.stop_ns)),
+        color,
+        label: hl.label.clone(),
+        confidence: 1.0,
+    }
+}
+
+/// Encode an egui [`ColorImage`](egui::ColorImage) as a PNG byte vector.
+///
+/// Used by the screenshot capture pipeline to convert the egui viewport
+/// screenshot into PNG format for the Claude API's vision capability.
+#[cfg(feature = "ai")]
+fn encode_screenshot_png(color_image: &egui::ColorImage) -> Vec<u8> {
+    use image::ImageEncoder;
+    let rgba: Vec<u8> = color_image
+        .pixels
+        .iter()
+        .flat_map(|p| p.to_array())
+        .collect();
+    let mut buf = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut buf)
+        .write_image(
+            &rgba,
+            color_image.size[0] as u32,
+            color_image.size[1] as u32,
+            image::ExtendedColorType::Rgba8,
+        )
+        .expect("PNG encode failed");
+    buf
+}
+
+/// Build a metadata string describing the visible time range and entry
+/// slugs in the current screenshot.  Sent alongside the PNG so Claude knows
+/// the numeric context of the image.
+#[cfg(feature = "ai")]
+fn build_screenshot_metadata(cx: &Context, windows: &[Window]) -> String {
+    let start = cx.view_interval.start.0;
+    let stop = cx.view_interval.stop.0;
+    let duration_ms = (stop - start) as f64 / 1_000_000.0;
+
+    // Collect visible entry slugs from the first window
+    let mut entry_slugs: Vec<String> = Vec::new();
+    if let Some(window) = windows.first() {
+        for node_panel in &window.panel.slots {
+            // Node filter: use same logic as is_slot_visible (level 1)
+            let node_idx = node_panel.entry_id.last_slot_index().unwrap_or(0);
+            if node_idx < window.config.min_node || node_idx > window.config.max_node {
+                continue;
+            }
+            if !node_panel.expanded {
+                continue;
+            }
+            let node_slug = slug_part(&node_panel.short_name);
+
+            for kind_panel in &node_panel.slots {
+                // Kind filter: use same logic as is_slot_visible (level 2)
+                if !window.config.kind_filter.is_empty()
+                    && !window.config.kind_filter.contains(&kind_panel.short_name)
+                {
+                    continue;
+                }
+                if !kind_panel.expanded {
+                    continue;
+                }
+                let kind_slug =
+                    format!("{}_{}", node_slug, slug_part(&kind_panel.short_name));
+
+                for slot in &kind_panel.slots {
+                    let slot_slug =
+                        format!("{}_{}", kind_slug, slug_part(&slot.short_name));
+                    entry_slugs.push(slot_slug);
+                }
+            }
+        }
+    }
+
+    format!(
+        "Screenshot captured. Visible time range: {} ns \u{2013} {} ns ({:.2} ms). \
+         Visible entries (top to bottom): {}. \
+         Use these entry_slugs and time range for follow-up queries.",
+        start,
+        stop,
+        duration_ms,
+        entry_slugs.join(", ")
+    )
+}
+
 impl Config {
     fn new(data_source: Box<dyn DeferredDataSource>, info: DataSourceInfo) -> Self {
         let max_node = info.entry_info.nodes();
@@ -1642,16 +1762,9 @@ impl Config {
         let title_id = field_schema.insert("Title".to_owned(), true);
         let search_state = SearchState::new(title_id);
 
-        // Build the data source stack:
-        // - Without AI: Counting<LRU<raw>>
-        // - With AI: Counting<AiWrapper<LRU<raw>>>
-        // AiWrapper must be outside LRU so it sees all tile responses (including cached ones)
+        // Build the data source stack: Counting<LRU<raw>>
         let lru_source = LruDeferredDataSource::new(data_source, NonZeroUsize::new(1024).unwrap());
-
-        #[cfg(not(feature = "ai"))]
         let data_source_stack = CountingDeferredDataSource::new(lru_source);
-        #[cfg(feature = "ai")]
-        let data_source_stack = CountingDeferredDataSource::new(AiDataWrapper::new(lru_source));
 
         Self {
             field_schema,
@@ -1696,51 +1809,6 @@ impl Config {
             });
     }
 
-    /// Drain highlights from the AiDataWrapper and merge into ai_highlights.
-    /// Deduplicates highlights by checking for overlapping intervals.
-    #[cfg(feature = "ai")]
-    fn drain_ai_highlights(&mut self) {
-        // Stack is: Counting<AiWrapper<LRU<...>>>, so one inner_mut() gets to AiWrapper
-        let new_highlights = self
-            .data_source
-            .inner_mut()
-            .drain_highlights();
-
-        // Merge new highlights, deduplicating overlapping intervals
-        for (entry_id, highlights) in new_highlights {
-            let existing = self.ai_highlights.entry(entry_id).or_default();
-            for hl in highlights {
-                // Check if we already have a highlight that overlaps significantly
-                // Skip if ANY overlap > 25% of either interval (aggressive dedup)
-                let dominated = existing.iter().any(|e| {
-                    let overlap_start = e.interval.start.0.max(hl.interval.start.0);
-                    let overlap_stop = e.interval.stop.0.min(hl.interval.stop.0);
-                    if overlap_stop <= overlap_start {
-                        return false; // No overlap
-                    }
-                    let overlap_duration = overlap_stop - overlap_start;
-                    let hl_duration = hl.interval.duration_ns();
-                    let e_duration = e.interval.duration_ns();
-                    // Skip if overlap is significant portion of either interval
-                    (hl_duration > 0 && overlap_duration > hl_duration / 4) ||
-                    (e_duration > 0 && overlap_duration > e_duration / 4)
-                });
-                if !dominated {
-                    existing.push(hl);
-                }
-            }
-        }
-    }
-
-    /// Enable AI analysis. Call when "Scan for Issues" is clicked.
-    #[cfg(feature = "ai")]
-    fn enable_ai_analysis(&mut self) {
-        // Clear previous highlights and start fresh
-        self.ai_highlights.clear();
-        self.data_source.inner_mut().clear_cache();
-        // Pass kinds to the wrapper since get_infos() was already called before the wrapper existed
-        self.data_source.inner_mut().enable_analysis_with_kinds(self.kinds.clone());
-    }
 }
 
 impl Window {
@@ -1772,16 +1840,6 @@ impl Window {
         // Use the panel version directly to avoid a mutability conflict
         let slot = self.panel.find_slot_mut(entry_id, 0).unwrap();
         slot.inflate_meta(&mut self.config, cx);
-    }
-
-    /// Trigger AI scan by enabling analysis and forcing tile re-fetch.
-    #[cfg(feature = "ai")]
-    fn trigger_ai_scan(&mut self, _cx: &mut Context) {
-        // Enable analysis mode (clears previous highlights)
-        self.config.enable_ai_analysis();
-        // Clear all cached tiles in visible slots to force re-fetch
-        // The next render frame will re-fetch them with analysis enabled
-        self.panel.clear_tiles();
     }
 
     fn find_item_irow(&self, entry_id: &EntryID, item_uid: ItemUID) -> Option<usize> {
@@ -2027,44 +2085,6 @@ impl Window {
         self.expand_collapse(ui, cx);
         ui.add_space(WIDGET_PADDING);
         self.select_interval(ui, cx);
-        #[cfg(feature = "ai")]
-        {
-            ui.add_space(WIDGET_PADDING);
-            self.ai_controls(ui, cx);
-        }
-    }
-
-    #[cfg(feature = "ai")]
-    fn ai_controls(&mut self, ui: &mut egui::Ui, cx: &mut Context) {
-        ui.label(RichText::new("AI Analysis").strong());
-
-        let highlight_count: usize = self.config.ai_highlights.values().map(|v| v.len()).sum();
-
-        ui.horizontal(|ui| {
-            if highlight_count == 0 {
-                // No highlights yet - show scan button
-                if ui.button("Scan for Issues").clicked() {
-                    self.trigger_ai_scan(cx);
-                }
-            } else {
-                // Have highlights - show toggle to show/hide them
-                let button_text = if self.config.ai_highlights_enabled {
-                    "Hide Issues"
-                } else {
-                    "Show Issues"
-                };
-                if ui.button(button_text).clicked() {
-                    self.config.ai_highlights_enabled = !self.config.ai_highlights_enabled;
-                }
-                ui.label(format!("({} found)", highlight_count));
-
-                // Option to re-scan
-                if ui.button("Re-scan").clicked() {
-                    self.config.ai_highlights.clear();
-                    self.trigger_ai_scan(cx);
-                }
-            }
-        });
     }
 
     fn search(&mut self, cx: &mut Context) {
@@ -2860,18 +2880,6 @@ impl eframe::App for ProfApp {
                 }
             }
 
-            // Drain AI highlights from the wrapper into Config
-            #[cfg(feature = "ai")]
-            {
-                window.config.drain_ai_highlights();
-                // Disable analysis once we have highlights (scan complete)
-                // This prevents re-scanning on zoom/pan while keeping analysis
-                // active until initial tiles are processed
-                if !window.config.ai_highlights.is_empty() {
-                    window.config.data_source.inner_mut().disable_analysis();
-                }
-            }
-
             // Propagate timeline gap selection to the chat panel
             #[cfg(feature = "ai")]
             {
@@ -2908,6 +2916,26 @@ impl eframe::App for ProfApp {
                     if ui.button("Quit").clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
+                });
+
+                // Right-aligned AI Chat toggle icon (Cursor-style)
+                #[cfg(feature = "ai")]
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let color = if cx.chat_panel.visible {
+                        egui::Color32::from_rgb(59, 130, 246) // blue accent when open
+                    } else {
+                        egui::Color32::from_rgb(160, 160, 160) // grey when closed
+                    };
+                    let btn = ui.add(
+                        egui::Button::new(
+                            egui::RichText::new("◧").size(22.0).color(color),
+                        )
+                        .frame(false),
+                    );
+                    if btn.clicked() {
+                        cx.chat_panel.toggle();
+                    }
+                    btn.on_hover_text("Toggle AI Chat");
                 });
             });
         });
@@ -2982,6 +3010,84 @@ impl eframe::App for ProfApp {
         // AI Chat panel — must be added BEFORE CentralPanel in egui layout
         #[cfg(feature = "ai")]
         cx.chat_panel.show(ctx);
+
+        // Resolve user-initiated highlight actions (from chat panel chip clicks)
+        // into timeline overlays. Optionally zoom to the first action.
+        #[cfg(feature = "ai")]
+        {
+            let actions = cx.chat_panel.take_pending_highlight_actions();
+            if !actions.is_empty() {
+                for window in windows.iter_mut() {
+                    let slug_map = build_slug_map(window);
+                    for action in &actions {
+                        if let Some(entry_id) = slug_map.get(&action.highlight.entry_slug) {
+                            let ai_hl = highlight_to_ai(&action.highlight);
+                            window
+                                .config
+                                .ai_highlights
+                                .entry(entry_id.clone())
+                                .or_default()
+                                .push(ai_hl);
+                        } else {
+                            log::warn!(
+                                "Highlight: unknown entry_slug '{}'",
+                                action.highlight.entry_slug
+                            );
+                        }
+                    }
+                    if !window.config.ai_highlights.is_empty() {
+                        window.config.ai_highlights_enabled = true;
+                    }
+                }
+                // Zoom to the first action that requests it
+                if let Some(action) = actions.iter().find(|a| a.zoom_to) {
+                    let interval = Interval::new(
+                        Timestamp(action.highlight.start_ns),
+                        Timestamp(action.highlight.stop_ns),
+                    );
+                    ProfApp::zoom(cx, interval);
+                }
+            }
+        }
+
+        // Handle screenshot capture pipeline: agent thread ←→ UI thread.
+        // Phase 1: deliver completed screenshots (from a previous frame's
+        //          ViewportCommand::Screenshot) back to the blocked agent.
+        // Phase 2: consume new screenshot/zoom requests emitted by the agent
+        //          (set by poll_events() during chat_panel.show() above).
+        #[cfg(feature = "ai")]
+        {
+            // Phase 1: Check for Event::Screenshot delivered by egui.
+            // Extract data inside ctx.input() closure, send outside to avoid
+            // capturing &mut cx across the send call.
+            let captured: Option<(u64, Vec<u8>)> = ctx.input(|i| {
+                for event in &i.events {
+                    if let egui::Event::Screenshot { image, .. } = event {
+                        if let Some(request_id) = cx.awaiting_screenshot.take() {
+                            return Some((request_id, encode_screenshot_png(image)));
+                        }
+                    }
+                }
+                None
+            });
+            if let Some((request_id, png_bytes)) = captured {
+                let metadata = build_screenshot_metadata(cx, windows);
+                cx.chat_panel.send_screenshot(request_id, png_bytes, metadata);
+            }
+
+            // Phase 2: Check for new screenshot requests from the agent thread.
+            if let Some((request_id, zoom_range)) = cx.chat_panel.take_pending_screenshot() {
+                if let Some((start_ns, stop_ns)) = zoom_range {
+                    let interval = Interval::new(
+                        Timestamp(start_ns),
+                        Timestamp(stop_ns),
+                    );
+                    ProfApp::zoom(cx, interval);
+                }
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
+                cx.awaiting_screenshot = Some(request_id);
+            }
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             // Use body font to figure out how tall to draw rectangles.

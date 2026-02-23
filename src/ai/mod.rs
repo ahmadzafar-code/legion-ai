@@ -1,15 +1,27 @@
 //! AI-powered analysis and highlighting for profiling data.
 //!
-//! This module provides automatic detection of performance issues such as
-//! idle gaps, dependency waits, and data stalls in Legion profiling traces.
-//!
-//! Gap diagnosis is handled by the Python sidecar (`sidecar/server.py`) which
-//! gives an LLM direct DuckDB query access for expert-level analysis.
+//! This module provides:
+//! - Chat panel UI (`chat_panel`)
+//! - Native Rust AI agent + direct tool calls (`agent`, `tools`)
 
-mod analyzer;
+pub mod agent;
 mod chat_panel;
-mod data_wrapper;
+pub mod tools;
 
-pub use analyzer::{get_kind_from_entry_id, AiHighlight, Analyzer, IdleGapAnalyzer};
-pub use chat_panel::{ChatMessage, ChatMessageKind, ChatPanel, TimelineSelection};
-pub use data_wrapper::AiDataWrapper;
+use crate::timestamp::Interval;
+
+/// A highlighted region on the timeline indicating a performance issue.
+#[derive(Debug, Clone)]
+pub struct AiHighlight {
+    /// The time interval this highlight covers.
+    pub interval: Interval,
+    /// Color for rendering the highlight overlay.
+    pub color: egui::Color32,
+    /// Human-readable description.
+    pub label: String,
+    /// Confidence score in [0.0, 1.0] range.
+    pub confidence: f32,
+}
+
+pub use agent::{AgentEvent, Highlight, UiCommand};
+pub use chat_panel::{ChatMessage, ChatMessageKind, ChatPanel, HighlightAction, TimelineSelection};
