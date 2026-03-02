@@ -577,12 +577,31 @@ impl AgentSession {
         // Opus benefits from a larger token budget for its thinking + response.
         let max_tokens: u32 = if use_opus { 16_000 } else { 8_000 };
 
+        // --- Prompt caching ---
+        // Wrap system prompt in the array format with cache_control so Anthropic
+        // caches the (large) system prompt across turns, saving ~77 % of input
+        // token cost after the first request.  Processing order is
+        // tools → system → messages, so we also mark the last tool.
+        let system_with_cache = serde_json::json!([{
+            "type": "text",
+            "text": self.system_prompt,
+            "cache_control": {"type": "ephemeral"}
+        }]);
+
+        let tools_with_cache = {
+            let mut tools = self.tools.clone();
+            if let Some(last) = tools.last_mut() {
+                last["cache_control"] = serde_json::json!({"type": "ephemeral"});
+            }
+            tools
+        };
+
         let mut req_body = serde_json::json!({
             "model": self.model,
             "max_tokens": max_tokens,
-            "system": self.system_prompt,
+            "system": system_with_cache,
             "messages": self.messages,
-            "tools": self.tools,
+            "tools": tools_with_cache,
         });
 
         // Extended thinking — Opus only. "enabled" forces thinking on every turn
