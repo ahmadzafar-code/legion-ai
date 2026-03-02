@@ -29,19 +29,56 @@ pub fn execute_run_query(duckdb_path: &str, sql: &str) -> Result<String, String>
     let conn = Connection::open(duckdb_path)
         .map_err(|e| format!("Failed to open DuckDB '{}': {}", duckdb_path, e))?;
 
-    // Use DuckDB's built-in JSON aggregation.
-    // to_json(t) serializes entire rows including STRUCT columns.
-    // LIMIT 50 is applied to the inner subquery.
+    // Strip trailing LIMIT clause to avoid LIMIT-inside-LIMIT syntax errors.
+    // The agent's LIMIT is respected up to our hard cap of 50 rows.
+    let sql_for_wrap = {
+        let upper = sql_trimmed.to_ascii_uppercase();
+        if let Some(pos) = upper.rfind("LIMIT") {
+            let after_limit = sql_trimmed[pos + 5..].trim();
+            if !after_limit.is_empty() && after_limit.chars().all(|c| c.is_ascii_digit()) {
+                sql_trimmed[..pos].trim()
+            } else {
+                sql_trimmed
+            }
+        } else {
+            sql_trimmed
+        }
+    };
+
     let wrapped = format!(
         "SELECT CAST(json_group_array(to_json(t)) AS VARCHAR) \
-         FROM ({} LIMIT 50) AS t",
-        sql_trimmed
+         FROM ({sql_for_wrap} LIMIT 50) AS t",
     );
 
     match conn.query_row(&wrapped, [], |row| row.get::<_, String>(0)) {
         Ok(result) if result == "null" || result.is_empty() => Ok("[]".into()),
         Ok(result) => Ok(result),
-        Err(e) => Err(format!("Query failed: {}", e)),
+        Err(e) => {
+            let err_str = e.to_string();
+            let mut msg = format!("Query failed: {}\n", err_str);
+
+            // Add contextual hints based on common error patterns
+            if err_str.contains("not found") || err_str.contains("Referenced column") {
+                msg.push_str(
+                    "\nHINT: The `items` table columns are: entry_slug, item_uid, title, \
+                     size, plus STRUCT columns (lifetime, running, waiting, deferred, delayed, \
+                     ready, scheduling_overhead, triggering_latency, operation, creator, \
+                     critical_path, previous_executing, mapper). \
+                     Access STRUCT fields with dot notation: running.start, running.duration, \
+                     critical_path.item_uid. \
+                     The `entries` table columns are: entry_slug, short_name, long_name, \
+                     parent_slug, type."
+                );
+            } else if err_str.contains("Conversion Error") || err_str.contains("Could not convert") {
+                msg.push_str(
+                    "\nHINT: All timestamp fields are BIGINT nanoseconds. \
+                     Use arithmetic: running.duration / 1e6 for milliseconds. \
+                     Use CAST() for explicit type conversions."
+                );
+            }
+
+            Err(msg)
+        }
     }
 }
 
@@ -228,15 +265,67 @@ pub fn tool_definitions(has_duckdb: bool, has_code: bool) -> Vec<serde_json::Val
             "name": "run_query",
             "description":
                 "Execute a read-only SQL query against the Legion profiling DuckDB database. \
-                 Returns up to 50 rows as JSON. All timestamps are nanoseconds. \
-                 Interval/ItemLink columns are DuckDB STRUCTs — use dot notation \
-                 (e.g. running.start, critical_path.item_uid). \
-                 Common patterns:\n\
-                 - Tasks on a processor: WHERE entry_slug = 'n0_cpu_c0'\n\
-                 - Time range overlap: WHERE running.start < $stop AND running.stop > $start\n\
-                 - Walk critical path: WHERE item_uid = (prev critical_path.item_uid)\n\
-                 - Lifecycle phases: lifetime, waiting, deferred, delayed, ready, running\n\
-                 IMPORTANT: You can call this tool multiple times per response to batch independent queries.",
+                 Returns up to 50 rows as JSON. Do NOT include a trailing semicolon.\n\n\
+                 SCHEMA REMINDER: Two tables — `entries` (entry_slug, short_name, long_name, parent_slug, type) \
+                 and `items` (entry_slug, item_uid, title, plus STRUCT columns). \
+                 All STRUCT columns use dot notation: running.start, running.duration, critical_path.item_uid, etc.\n\n\
+                 EXAMPLE QUERIES:\n\
+                 1. Per-processor utilization:\n\
+                    SELECT entry_slug, COUNT(*) AS task_count,\n\
+                      ROUND(SUM(running.duration) / 1e6, 1) AS busy_ms\n\
+                    FROM items WHERE running IS NOT NULL\n\
+                    GROUP BY entry_slug ORDER BY busy_ms DESC\n\n\
+                 2. Tasks in a time range on a specific processor:\n\
+                    SELECT item_uid, title, running.start, running.stop,\n\
+                      running.duration / 1e6 AS run_ms\n\
+                    FROM items\n\
+                    WHERE entry_slug = 'n0_gpu_g0' AND running.start < 500000000\n\
+                      AND running.stop > 400000000\n\
+                    ORDER BY running.start\n\n\
+                 3. GPU idle gaps (find gaps between consecutive tasks):\n\
+                    WITH ordered AS (\n\
+                      SELECT running.stop AS task_end,\n\
+                        LEAD(running.start) OVER (ORDER BY running.start) AS next_start\n\
+                      FROM items\n\
+                      WHERE entry_slug LIKE '%gpu%' AND running IS NOT NULL\n\
+                    )\n\
+                    SELECT (next_start - task_end) / 1e6 AS gap_ms,\n\
+                      task_end AS gap_start_ns, next_start AS gap_end_ns\n\
+                    FROM ordered WHERE next_start > task_end\n\
+                    ORDER BY gap_ms DESC LIMIT 10\n\n\
+                 4. Walk critical path from a task:\n\
+                    WITH RECURSIVE chain AS (\n\
+                      SELECT item_uid, title, entry_slug,\n\
+                        running.duration / 1e6 AS run_ms,\n\
+                        critical_path.item_uid AS cp_uid, 1 AS depth\n\
+                      FROM items WHERE item_uid = <START_UID>\n\
+                      UNION ALL\n\
+                      SELECT i.item_uid, i.title, i.entry_slug,\n\
+                        i.running.duration / 1e6, i.critical_path.item_uid, c.depth + 1\n\
+                      FROM items i JOIN chain c ON i.item_uid = c.cp_uid\n\
+                      WHERE c.cp_uid IS NOT NULL AND c.depth < 10\n\
+                    )\n\
+                    SELECT * FROM chain ORDER BY depth\n\n\
+                 5. Identify processor kinds by entry_slug pattern:\n\
+                    SELECT entry_slug FROM entries\n\
+                    WHERE type = 'slot' AND entry_slug LIKE '%gpu%'\n\
+                    ORDER BY entry_slug\n\n\
+                 6. Task lifecycle breakdown:\n\
+                    SELECT title,\n\
+                      ROUND(AVG(waiting.duration) / 1e6, 2) AS avg_wait_ms,\n\
+                      ROUND(AVG(deferred.duration) / 1e6, 2) AS avg_defer_ms,\n\
+                      ROUND(AVG(running.duration) / 1e6, 2) AS avg_run_ms\n\
+                    FROM items WHERE running IS NOT NULL\n\
+                    GROUP BY title ORDER BY avg_wait_ms DESC LIMIT 10\n\n\
+                 7. Channel copy analysis:\n\
+                    SELECT entry_slug, COUNT(*) AS copy_count,\n\
+                      ROUND(SUM(running.duration) / 1e6, 1) AS total_ms,\n\
+                      ROUND(SUM(size) / 1e6, 1) AS total_mb\n\
+                    FROM items\n\
+                    WHERE entry_slug LIKE '%chan%' AND running IS NOT NULL\n\
+                    GROUP BY entry_slug ORDER BY total_ms DESC\n\n\
+                 IMPORTANT: You can call this tool multiple times per response to batch independent queries. \
+                 Do NOT include LIMIT in your query — a hard cap of 50 rows is applied automatically.",
             "input_schema": {
                 "type": "object",
                 "properties": {
