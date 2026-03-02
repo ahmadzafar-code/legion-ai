@@ -374,7 +374,7 @@ pub struct ChatPanel {
     api_key_buffer: String,
     /// Model name: "claude-sonnet-4-20250514" or "claude-opus-4-20250514".
     model_selection: String,
-    /// Free-text application context (e.g. "Circuit simulation, 128 nodes, 8 GPUs").
+    /// Free-text application context (e.g. goals, configuration, number of nodes/GPUs).
     app_context_buffer: String,
     /// Persistent agent session (holds conversation history for follow-ups).
     agent_session: Arc<Mutex<Option<AgentSession>>>,
@@ -572,16 +572,22 @@ impl ChatPanel {
     }
 
     /// Derive the Code tool status from `code_path_buffer`.
+    ///
+    /// Accepts a directory or a single source file (e.g. `.rg`).  When a file
+    /// is given, the agent will use its parent directory as the code root.
     fn tool_status_code(&self) -> ToolStatus {
         let trimmed = self.code_path_buffer.trim();
         if trimmed.is_empty() {
             return ToolStatus::Off;
         }
         let path = std::path::Path::new(trimmed);
-        if !path.is_dir() {
-            return ToolStatus::Error("Directory not found".into());
+        if path.is_dir() {
+            return ToolStatus::Ready;
         }
-        ToolStatus::Ready
+        if path.is_file() {
+            return ToolStatus::Ready;
+        }
+        ToolStatus::Error("Path not found".into())
     }
 
     /// Visual tool status — always Ready (screenshot/zoom are built-in).
@@ -723,7 +729,18 @@ impl ChatPanel {
 
         // Tool paths from dedicated fields
         let duckdb_path = self.duckdb_path_buffer.trim().to_owned();
-        let code_path = self.code_path_buffer.trim().to_owned();
+        // If code path points to a file (e.g. a .rg file), use its parent directory.
+        let code_path = {
+            let raw = self.code_path_buffer.trim();
+            let p = std::path::Path::new(raw);
+            if !raw.is_empty() && p.is_file() {
+                p.parent()
+                    .map(|d| d.to_string_lossy().to_string())
+                    .unwrap_or_else(|| raw.to_owned())
+            } else {
+                raw.to_owned()
+            }
+        };
 
         // Self-healing: if DB is needed but not ready, guide the user (Part E)
         let db_status = self.tool_status_db();
@@ -1303,7 +1320,7 @@ impl ChatPanel {
                 ui.label("App context:");
                 ui.add(
                     egui::TextEdit::multiline(&mut self.app_context_buffer)
-                        .hint_text("e.g. 'Circuit simulation, 128 nodes, 8 GPUs'")
+                        .hint_text("e.g. goals, configuration, number of nodes/GPUs")
                         .desired_width(ui.available_width())
                         .desired_rows(2),
                 );

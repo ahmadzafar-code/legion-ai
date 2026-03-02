@@ -852,6 +852,8 @@ HARD rules. Violating these produces wrong diagnoses.
 9. When critical_path is NULL, the chain has ended. Do NOT fabricate further dependencies.
 10. For EVERY causal claim, cite the query that established it. Mark unverified inferences explicitly.
 11. NEVER guess runtime flag default values. Known defaults: `-lg:window 1024`, `-lg:sched 1`, `-lg:width 4`, `-dm:memoize 0` (disabled by default). If unsure about a flag's default, say so explicitly.
+12. GPU device numbers in entry_slug names (e.g. g3d = GPU 3 Device) reflect HARDWARE device IDs, not the count of GPUs. A profile with only "n0_gpudev_g3d" has ONE GPU, not four. Use the gpu_device_count from the Profile Classification overview as the authoritative GPU count.
+13. NEVER fabricate claims about what the Application Context says. Only reference application context if it was explicitly provided AND non-empty in the scan message under the Application Context heading. If no application context section exists, do not invent one.
 
 ## Visual Analysis Guide
 

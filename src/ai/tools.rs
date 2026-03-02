@@ -46,7 +46,7 @@ pub fn execute_run_query(duckdb_path: &str, sql: &str) -> Result<String, String>
     };
 
     let wrapped = format!(
-        "SELECT CAST(json_group_array(to_json(t)) AS VARCHAR) \
+        "SELECT COALESCE(CAST(json_group_array(to_json(t)) AS VARCHAR), '[]') \
          FROM ({sql_for_wrap} LIMIT 50) AS t",
     );
 
@@ -182,7 +182,8 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     let classification = execute_run_query(
         duckdb_path,
         "SELECT \
-         (SELECT COUNT(DISTINCT entry_slug) FROM entries WHERE entry_slug LIKE '%gpu%' AND type = 'slot') AS gpu_count, \
+         (SELECT COUNT(DISTINCT entry_slug) FROM entries WHERE entry_slug LIKE '%gpudev%' AND type = 'slot') AS gpu_device_count, \
+         (SELECT COUNT(DISTINCT entry_slug) FROM entries WHERE entry_slug LIKE '%gpuhost%' AND type = 'slot') AS gpu_host_count, \
          (SELECT COUNT(DISTINCT entry_slug) FROM entries WHERE entry_slug LIKE '%cpu%' AND type = 'slot') AS cpu_count, \
          (SELECT COUNT(DISTINCT entry_slug) FROM entries WHERE entry_slug LIKE '%util%' AND type = 'slot') AS util_count, \
          (SELECT COUNT(DISTINCT SPLIT_PART(entry_slug, '/', 1)) FROM entries WHERE type = 'panel' AND parent_slug IS NOT NULL) AS node_count",
