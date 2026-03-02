@@ -139,7 +139,77 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     // ── Sample item ───────────────────────────────────────────────────────────
     let sample = execute_run_query(duckdb_path, "SELECT * FROM items LIMIT 1")
         .unwrap_or_else(|e| format!("[{{\"error\": {:?}}}]", e));
-    out.push_str(&format!("## Sample Item Row\n{sample}\n"));
+    out.push_str(&format!("## Sample Item Row\n{sample}\n\n"));
+
+    // ── Profile classification ────────────────────────────────────────────────
+    let classification = execute_run_query(
+        duckdb_path,
+        "SELECT \
+         (SELECT COUNT(DISTINCT entry_slug) FROM entries WHERE entry_slug LIKE '%gpu%' AND type = 'slot') AS gpu_count, \
+         (SELECT COUNT(DISTINCT entry_slug) FROM entries WHERE entry_slug LIKE '%cpu%' AND type = 'slot') AS cpu_count, \
+         (SELECT COUNT(DISTINCT entry_slug) FROM entries WHERE entry_slug LIKE '%util%' AND type = 'slot') AS util_count, \
+         (SELECT COUNT(DISTINCT SPLIT_PART(entry_slug, '/', 1)) FROM entries WHERE type = 'panel' AND parent_slug IS NOT NULL) AS node_count",
+    )
+    .unwrap_or_else(|e| format!("[{{\"error\": {:?}}}]", e));
+    out.push_str(&format!("## Profile Classification\n{classification}\n\n"));
+
+    // ── Tracing detection ─────────────────────────────────────────────────────
+    let tracing = execute_run_query(
+        duckdb_path,
+        "SELECT \
+         COUNT(*) FILTER (WHERE title LIKE '%Replay Physical Trace%') AS replay_trace_count, \
+         COUNT(*) FILTER (WHERE title LIKE '%map_task%' OR title LIKE '%select_task_options%') AS mapper_call_count, \
+         COUNT(*) FILTER (WHERE entry_slug LIKE '%util%') AS total_util_items \
+         FROM items",
+    )
+    .unwrap_or_else(|e| format!("[{{\"error\": {:?}}}]", e));
+    out.push_str(&format!("## Tracing Status\n{tracing}\n\n"));
+
+    // ── Per-kind utilization ──────────────────────────────────────────────────
+    let utilization = execute_run_query(
+        duckdb_path,
+        "WITH bounds AS ( \
+           SELECT MIN(lifetime.start) AS t_start, MAX(lifetime.stop) AS t_stop \
+           FROM items \
+         ), \
+         kind_busy AS ( \
+           SELECT \
+             CASE \
+               WHEN entry_slug LIKE '%gpu%' THEN 'GPU' \
+               WHEN entry_slug LIKE '%cpu%' AND entry_slug NOT LIKE '%util%' THEN 'CPU' \
+               WHEN entry_slug LIKE '%util%' THEN 'Utility' \
+               WHEN entry_slug LIKE '%channel%' THEN 'Channel' \
+               ELSE 'Other' \
+             END AS kind, \
+             entry_slug, \
+             SUM(running.duration) AS busy_ns \
+           FROM items \
+           WHERE running IS NOT NULL \
+           GROUP BY kind, entry_slug \
+         ) \
+         SELECT kb.kind, \
+                COUNT(DISTINCT kb.entry_slug) AS proc_count, \
+                ROUND(AVG(kb.busy_ns * 100.0 / (b.t_stop - b.t_start)), 1) AS avg_util_pct, \
+                ROUND(MAX(kb.busy_ns * 100.0 / (b.t_stop - b.t_start)), 1) AS max_util_pct \
+         FROM kind_busy kb CROSS JOIN bounds b \
+         GROUP BY kb.kind \
+         ORDER BY kb.kind",
+    )
+    .unwrap_or_else(|e| format!("[{{\"error\": {:?}}}]", e));
+    out.push_str(&format!("## Per-Kind Utilization\n{utilization}\n\n"));
+
+    // ── Deferred health ───────────────────────────────────────────────────────
+    let deferred = execute_run_query(
+        duckdb_path,
+        "SELECT \
+         ROUND(AVG(deferred.duration) / 1e6, 2) AS avg_deferred_ms, \
+         ROUND(PERCENTILE_CONT(0.1) WITHIN GROUP (ORDER BY deferred.duration) / 1e6, 2) AS p10_deferred_ms, \
+         ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY deferred.duration) / 1e6, 2) AS p50_deferred_ms, \
+         COUNT(*) FILTER (WHERE deferred.duration < 100000) AS items_under_100us \
+         FROM items WHERE deferred IS NOT NULL AND deferred.duration IS NOT NULL",
+    )
+    .unwrap_or_else(|e| format!("[{{\"error\": {:?}}}]", e));
+    out.push_str(&format!("## Deferred Health (runtime run-ahead)\n{deferred}\n\n"));
 
     Ok(out)
 }
