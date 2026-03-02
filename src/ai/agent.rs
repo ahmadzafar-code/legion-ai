@@ -103,8 +103,12 @@ pub struct AgentSession {
     pub model: String,
     /// Path to the Legion DuckDB file.
     pub duckdb_path: String,
-    /// Optional path to application source code root.
+    /// Path to application source code root directory.
+    /// Always a directory — if the user provided a file, this is its parent.
     pub code_path: String,
+    /// If the user pointed at a specific source file, its path is stored here
+    /// for direct pre-loading in the scan message.
+    code_file: Option<String>,
     /// Free-text application context from the user (e.g. goals, configuration).
     pub app_context: String,
     /// Maximum agent turns before forcing a summary response.
@@ -140,7 +144,22 @@ impl AgentSession {
         let has_code = !code_path.is_empty();
         let tools = super::tools::tool_definitions(has_duckdb, has_code);
 
-        let system_prompt = build_system_prompt(&model); 
+        let system_prompt = build_system_prompt(&model);
+
+        // If code_path is a file, resolve to parent directory and store the
+        // file path separately for direct pre-loading in build_scan_message().
+        let (code_path, code_file) = {
+            let p = std::path::Path::new(&code_path);
+            if !code_path.is_empty() && p.is_file() {
+                let parent = p
+                    .parent()
+                    .map(|d| d.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                (parent, Some(code_path))
+            } else {
+                (code_path, None)
+            }
+        };
 
         Self {
             messages: Vec::new(),
@@ -148,6 +167,7 @@ impl AgentSession {
             model,
             duckdb_path,
             code_path,
+            code_file,
             app_context,
             max_turns: 25,
             system_prompt,
@@ -265,7 +285,7 @@ impl AgentSession {
 
     // ── Private helpers ──────────────────────────────────────────────────────
 
-    fn build_scan_message(&mut self) -> Result<String, String> {
+    fn build_scan_message(&self) -> Result<String, String> {
         let mut msg = "Find performance issues in this Legion application.\n\n".to_owned();
 
         // Include pre-computed overview when DuckDB is available
@@ -290,16 +310,18 @@ impl AgentSession {
         // the model can immediately relate profiling data to application
         // parameters (e.g. num_pieces, mapper policy) without an extra
         // round-trip through the read_code tool.
+        //
+        // code_path is ALWAYS a directory (resolved in new()). If the user
+        // pointed at a specific file, code_file holds the path for direct reading.
         if !self.code_path.is_empty() {
-            let cp = std::path::Path::new(&self.code_path);
-
-            if cp.is_file() {
+            if let Some(ref file_path) = self.code_file {
                 // ── User pointed at a specific source file — read it directly ──
-                let filename = cp
+                let fp = std::path::Path::new(file_path);
+                let filename = fp
                     .file_name()
                     .unwrap_or_default()
                     .to_string_lossy();
-                match std::fs::read_to_string(cp) {
+                match std::fs::read_to_string(fp) {
                     Ok(contents) => {
                         msg.push_str("## Application Source Code\n\n");
                         msg.push_str(&format!("### {filename}\n```\n{contents}\n```\n\n"));
@@ -308,22 +330,15 @@ impl AgentSession {
                         msg.push_str(&format!(
                             "## Application Source Code\n\n\
                              Note: Could not read `{}`: {}\n\n",
-                            self.code_path, e
+                            file_path, e
                         ));
                     }
                 }
-                // Resolve to parent directory so read_code and file listing work
-                let parent = cp
-                    .parent()
-                    .map(|d| d.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                if let Some(listing) = list_source_files(&parent) {
+                if let Some(listing) = list_source_files(&self.code_path) {
                     msg.push_str("### Other files available via `read_code` tool:\n");
                     msg.push_str(&listing);
                     msg.push('\n');
                 }
-                // Update code_path to the directory so read_code tool calls work
-                self.code_path = parent;
             } else {
                 // ── User pointed at a directory — scan for source files ──
                 let file_listing = list_source_files(&self.code_path);
