@@ -780,7 +780,7 @@ fn build_system_prompt(model: &str) -> String {
 
 **Processors.** Legion maps work to processor kinds:
 - CPU (LOC_PROC): Latency-optimized. Runs application tasks with CPU variants.
-- GPU (TOC_PROC): Throughput-optimized. Runs CUDA/HIP tasks. One per physical GPU.
+- GPU (TOC_PROC): Throughput-optimized. Runs CUDA/HIP tasks. One per physical GPU. Multiple CUDA streams can execute kernels concurrently on a single GPU, so total GPU busy time can legitimately EXCEED wall time. This is correct concurrent execution, NOT a profiler bug.
 - Utility (UTIL_PROC): Runtime meta-work ONLY — dependence analysis, mapping, scheduling, trace replay, GC. **Heavy utility activity + application processor gaps = runtime overhead bottleneck.** This is the single most important diagnostic pattern.
 - Channel: DMA copies between memory pairs (host↔device, inter-node). Each channel is a specific src→dst path.
 - IO/Python/OMP: Specialized processors for I/O, Python interop, and OpenMP tasks.
@@ -793,7 +793,7 @@ fn build_system_prompt(model: &str) -> String {
 - delayed: subset of waiting where the task was ready but Realm hadn't started it. LARGE delayed = Realm worker overload.
 
 **Tracing.** Legion can memoize repeated dependence analysis:
-- First iteration: full analysis (capture). Utility processors busy with mapper calls and dependence analysis.
+- First iteration: full analysis (capture). Utility processors busy with mapper calls and dependence analysis. THIS IS EXPECTED AND HEALTHY — the runtime must analyze dependencies once to record the trace. Do not flag the first-iteration capture phase as a performance problem.
 - Subsequent iterations: replay from memoized trace. Utility shows "Replay Physical Trace" — this is HEALTHY, not overhead.
 - Without tracing: per-task overhead ~1ms. With tracing: ~100μs.
 - Apophenia (automatic tracing, v25.09.0+) discovers traces without manual annotations.
@@ -884,7 +884,7 @@ Interpret the chain:
 
 Check in order — each check is a query:
 
-1. Utility active during gap with mapper calls, NO "Replay Physical Trace" in profile → **Missing tracing.** Fix: `-dm:memoize` or upgrade for automatic tracing.
+1. Utility active during gap with mapper calls, NO "Replay Physical Trace" in profile, AND no explicit tracing annotations in source code → **Missing tracing.** Fix: `-dm:memoize` or upgrade for automatic tracing. If trace annotations ARE present, the mapper calls may be from the first-iteration capture or init/shutdown — check their timing relative to steady-state execution.
 2. ALL GPUs on same node gap simultaneously + utility spikes → **Thread oversubscription.** Fix: `-cuda:legacysync 1` AND ensure total threads ≤ hardware threads (`-ll:cpu` + `-ll:util` + `-ll:bgwork` + OMP ≤ cores).
 3. Channel rows busy during gap, volume grows with node count → **Network congestion.** Fix: mapper placement, `-dm:same_address_space 1`.
 4. Python/CPU blocked/waiting during gap, utility idle → **Blocking Python op.** Fix: avoid `__bool__()`, `print(array)`, `.item()` in loops.
@@ -904,6 +904,35 @@ Check in priority order:
 3. Critical path length ≈ total time → **Insufficient parallelism.** Fix: more concurrent tasks, index launches, increase partition count.
 4. Memory >85% + GC tasks visible ("Free Instance", "Malloc Instance") → **Memory pressure.** Fix: increase `-ll:fsize`/`-ll:csize`, check mapper for instance leaks.
 
+## Source Code Analysis
+
+When application source code is available (pre-loaded in the scan message or via read_code), extract these diagnostic signals before making recommendations:
+
+**Tracing configuration** (check FIRST — wrong tracing advice is the most common diagnostic error):
+- Explicit tracing annotations: Regent `__demand(__trace)`, C++ `begin_trace()`/`end_trace()`, Legate automatic tracing. If present, tracing is already enabled — do NOT recommend `-dm:memoize`.
+- `-dm:memoize` only helps applications using DefaultMapper with NO explicit tracing. If the source has trace annotations or a custom mapper, `-dm:memoize` is redundant or irrelevant.
+- When tracing IS active (annotations present OR Replay Physical Trace in profile): the first iteration always shows heavy utility activity (mapper calls, dependence analysis). This is the trace capture pass and is expected, not a problem.
+
+**Mapper configuration**:
+- Custom mapper present (any file with mapper in its name, or classes inheriting from DefaultMapper/Mapping) → the application controls task placement. `-dm:memoize` only affects DefaultMapper internals — it will NOT help custom mappers.
+- No custom mapper → application uses DefaultMapper. Tracing flags like `-dm:memoize` apply.
+
+**Task structure and parallelism**:
+- Partition count (num_pieces, num_subregions, create_equal_partition, etc.) → determines maximum concurrent tasks. Cross-reference with profiled task counts.
+- Index launches vs single launches → index launches give O(1) analysis overhead for O(N) tasks.
+- Iteration count x partition count = expected total task instances. Verify against profile.
+
+**Data access patterns**:
+- Reduction operations (reduces, ReductionAccessor, DeferredReduction) → potential scalar reduction blocking if host-side. Check GPU Cause 1 in decision tree.
+- Privilege modes (READ_WRITE vs READ_ONLY, WRITE_DISCARD) → READ_WRITE prevents concurrent access. Suggesting READ_ONLY or WRITE_DISCARD where valid can increase parallelism and reduce copies.
+
+**Code generation and build hints**:
+- Regent with -fcuda/-fhip = GPU code is compiler-generated. The CUDA/HIP kernel source does not exist as a standalone file — do not attempt to read generated kernel files.
+- C++ applications compile CUDA kernels separately — these may be in .cu files.
+- Python/Legate applications wrap Legion — task implementations are in underlying C++ libraries, not visible in the Python source.
+
+**What source code CANNOT tell you**: runtime scheduling decisions, actual memory layout at execution time, NUMA placement, Realm worker thread behavior, or which physical instances were reused vs created fresh. These are runtime decisions invisible to source analysis.
+
 ## Anti-Hallucination Rules
 
 HARD rules. Violating these produces wrong diagnoses.
@@ -921,6 +950,8 @@ HARD rules. Violating these produces wrong diagnoses.
 11. NEVER guess runtime flag default values. Known defaults: `-lg:window 1024`, `-lg:sched 1`, `-lg:width 4`, `-dm:memoize 0` (disabled by default). If unsure about a flag's default, say so explicitly.
 12. GPU device numbers in entry_slug names (e.g. g3d = GPU 3 Device) reflect HARDWARE device IDs, not the count of GPUs. A profile with only "n0_gpudev_g3d" has ONE GPU, not four. Use the gpu_device_count from the Profile Classification overview as the authoritative GPU count.
 13. NEVER fabricate claims about what the Application Context says. Only reference application context if it was explicitly provided AND non-empty in the scan message under the Application Context heading. If no application context section exists, do not invent one.
+14. When source code contains explicit tracing annotations (begin_trace/end_trace, __demand(__trace), or equivalent), do NOT recommend -dm:memoize — tracing is already enabled. The first iteration showing full analysis with mapper calls is the expected trace capture pass, not a performance problem.
+15. GPU busy time exceeding wall time on a single GPU means concurrent CUDA stream execution, NOT a profiler bug. Report it as concurrent kernel execution with the effective concurrency ratio (busy_time / wall_time).
 
 ## Visual Analysis Guide
 
