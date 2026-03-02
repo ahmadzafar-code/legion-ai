@@ -291,19 +291,36 @@ impl AgentSession {
         // application parameters (e.g. num_pieces, mapper policy) without
         // needing an extra round-trip through the read_code tool.
         if !self.code_path.is_empty() {
+            // Always list available source files so the agent knows what to read
+            let file_listing = list_source_files(&self.code_path);
+
             match gather_application_code(&self.code_path) {
                 Some(code_block) => {
                     msg.push_str("## Application Source Code\n\n");
                     msg.push_str(&code_block);
                     msg.push('\n');
+                    // If there are more files than were pre-loaded, list them
+                    if let Some(listing) = &file_listing {
+                        msg.push_str("### Additional files available via `read_code` tool:\n");
+                        msg.push_str(listing);
+                        msg.push('\n');
+                    }
                 }
                 None => {
-                    // Code path set but nothing readable; fall back to tool hint
                     msg.push_str(&format!(
-                        "Application source code is available via the `read_code` tool \
-                         (root: `{}`).\n\n",
+                        "## Application Source Code\n\n\
+                         Source code directory: `{}`\n",
                         self.code_path
                     ));
+                    if let Some(listing) = &file_listing {
+                        msg.push_str("Available files (use `read_code` tool to read):\n");
+                        msg.push_str(listing);
+                    } else {
+                        msg.push_str(
+                            "No source files found. Use `read_code` tool to browse.\n"
+                        );
+                    }
+                    msg.push('\n');
                 }
             }
         }
@@ -702,6 +719,56 @@ fn gather_application_code(code_root: &str) -> Option<String> {
     }
 
     if out.is_empty() { None } else { Some(out) }
+}
+
+/// List source files in the code root directory, returning a compact listing.
+///
+/// Returns `None` if the directory is unreadable or contains no source files.
+/// Unlike `gather_application_code()` which reads file contents, this only
+/// lists filenames and sizes so the agent knows what's available for `read_code`.
+fn list_source_files(code_root: &str) -> Option<String> {
+    const SOURCE_EXTS: &[&str] = &[
+        "cc", "cpp", "c", "h", "hpp", "cu", "cuh", "py", "rs", "rg",
+        "mk", "cmake", "toml", "json", "yaml", "yml", "txt", "md",
+    ];
+
+    let root = std::path::Path::new(code_root);
+
+    let mut files: Vec<(String, u64)> = std::fs::read_dir(root)
+        .ok()?
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            if !p.is_file() {
+                return None;
+            }
+            let ext = p.extension()?.to_str()?;
+            if !SOURCE_EXTS.contains(&ext) {
+                return None;
+            }
+            let name = p.file_name()?.to_string_lossy().to_string();
+            let size = e.metadata().ok()?.len();
+            Some((name, size))
+        })
+        .collect();
+
+    if files.is_empty() {
+        return None;
+    }
+
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut out = String::new();
+    for (name, size) in &files {
+        let size_str = if *size > 1024 {
+            format!("{}KB", size / 1024)
+        } else {
+            format!("{}B", size)
+        };
+        out.push_str(&format!("- {} ({})\n", name, size_str));
+    }
+
+    Some(out)
 }
 
 // ── Highlight extraction ─────────────────────────────────────────────────────
