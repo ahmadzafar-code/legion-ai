@@ -265,7 +265,7 @@ impl AgentSession {
 
     // ── Private helpers ──────────────────────────────────────────────────────
 
-    fn build_scan_message(&self) -> Result<String, String> {
+    fn build_scan_message(&mut self) -> Result<String, String> {
         let mut msg = "Find performance issues in this Legion application.\n\n".to_owned();
 
         // Include pre-computed overview when DuckDB is available
@@ -286,41 +286,79 @@ impl AgentSession {
             }
         }
 
-        // Pre-load application source code (up to 40 KB) directly into the
-        // initial message so the model can immediately relate profiling data to
-        // application parameters (e.g. num_pieces, mapper policy) without
-        // needing an extra round-trip through the read_code tool.
+        // Pre-load application source code directly into the initial message so
+        // the model can immediately relate profiling data to application
+        // parameters (e.g. num_pieces, mapper policy) without an extra
+        // round-trip through the read_code tool.
         if !self.code_path.is_empty() {
-            // Always list available source files so the agent knows what to read
-            let file_listing = list_source_files(&self.code_path);
+            let cp = std::path::Path::new(&self.code_path);
 
-            match gather_application_code(&self.code_path) {
-                Some(code_block) => {
-                    msg.push_str("## Application Source Code\n\n");
-                    msg.push_str(&code_block);
-                    msg.push('\n');
-                    // If there are more files than were pre-loaded, list them
-                    if let Some(listing) = &file_listing {
-                        msg.push_str("### Additional files available via `read_code` tool:\n");
-                        msg.push_str(listing);
-                        msg.push('\n');
+            if cp.is_file() {
+                // ── User pointed at a specific source file — read it directly ──
+                let filename = cp
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy();
+                match std::fs::read_to_string(cp) {
+                    Ok(contents) => {
+                        msg.push_str("## Application Source Code\n\n");
+                        msg.push_str(&format!("### {filename}\n```\n{contents}\n```\n\n"));
+                    }
+                    Err(e) => {
+                        msg.push_str(&format!(
+                            "## Application Source Code\n\n\
+                             Note: Could not read `{}`: {}\n\n",
+                            self.code_path, e
+                        ));
                     }
                 }
-                None => {
-                    msg.push_str(&format!(
-                        "## Application Source Code\n\n\
-                         Source code directory: `{}`\n",
-                        self.code_path
-                    ));
-                    if let Some(listing) = &file_listing {
-                        msg.push_str("Available files (use `read_code` tool to read):\n");
-                        msg.push_str(listing);
-                    } else {
-                        msg.push_str(
-                            "No source files found. Use `read_code` tool to browse.\n"
-                        );
-                    }
+                // Resolve to parent directory so read_code and file listing work
+                let parent = cp
+                    .parent()
+                    .map(|d| d.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if let Some(listing) = list_source_files(&parent) {
+                    msg.push_str("### Other files available via `read_code` tool:\n");
+                    msg.push_str(&listing);
                     msg.push('\n');
+                }
+                // Update code_path to the directory so read_code tool calls work
+                self.code_path = parent;
+            } else {
+                // ── User pointed at a directory — scan for source files ──
+                let file_listing = list_source_files(&self.code_path);
+
+                match gather_application_code(&self.code_path) {
+                    Some(code_block) => {
+                        msg.push_str("## Application Source Code\n\n");
+                        msg.push_str(&code_block);
+                        msg.push('\n');
+                        if let Some(listing) = &file_listing {
+                            msg.push_str(
+                                "### Additional files available via `read_code` tool:\n",
+                            );
+                            msg.push_str(listing);
+                            msg.push('\n');
+                        }
+                    }
+                    None => {
+                        msg.push_str(&format!(
+                            "## Application Source Code\n\n\
+                             Source code directory: `{}`\n",
+                            self.code_path
+                        ));
+                        if let Some(listing) = &file_listing {
+                            msg.push_str(
+                                "Available files (use `read_code` tool to read):\n",
+                            );
+                            msg.push_str(listing);
+                        } else {
+                            msg.push_str(
+                                "No source files found. Use `read_code` tool to browse.\n",
+                            );
+                        }
+                        msg.push('\n');
+                    }
                 }
             }
         }
@@ -808,7 +846,7 @@ fn build_system_prompt(model: &str) -> String {
 - waiting = [create, ready]: blocked on dependencies or data.
 - ready_state = [ready, start]: waiting for a processor to become available.
 - running = [start, stop]: actual execution.
-- deferred: subset of waiting where analysis was not yet complete. LARGE deferred (tens of ms) = HEALTHY — runtime is running well ahead. SMALL deferred (<1ms) = UNHEALTHY — execution catching up with analysis, causing pipeline bubbles.
+- deferred: subset of waiting where analysis was not yet complete. LARGE deferred = HEALTHY — runtime is running well ahead of execution. Values of 5ms, 50ms, or even 500ms are all GOOD — they mean the runtime prepared the task far in advance. SMALL deferred (<1ms) = UNHEALTHY — execution is catching up with analysis, causing pipeline bubbles. NEVER flag large deferred times as a problem or "blocking call" — they are the opposite of a problem.
 - delayed: subset of waiting where the task was ready but Realm hadn't started it. LARGE delayed = Realm worker overload.
 
 **Tracing.** Legion can memoize repeated dependence analysis:
@@ -971,6 +1009,7 @@ HARD rules. Violating these produces wrong diagnoses.
 13. NEVER fabricate claims about what the Application Context says. Only reference application context if it was explicitly provided AND non-empty in the scan message under the Application Context heading. If no application context section exists, do not invent one.
 14. When source code contains explicit tracing annotations (begin_trace/end_trace, __demand(__trace), or equivalent), do NOT recommend -dm:memoize — tracing is already enabled. The first iteration showing full analysis with mapper calls is the expected trace capture pass, not a performance problem.
 15. GPU busy time exceeding wall time on a single GPU means concurrent CUDA stream execution, NOT a profiler bug. Report it as concurrent kernel execution with the effective concurrency ratio (busy_time / wall_time).
+16. If read_code fails and you cannot verify source code for tracing annotations, mapper type, or other code-level signals, you MUST qualify any tracing or mapper recommendation as uncertain. Say "if the application does not already use explicit tracing" rather than asserting tracing is absent. The overview's Tracing Status section is authoritative for whether Replay Physical Trace tasks exist — do not override it with your own queries.
 
 ## Visual Analysis Guide
 

@@ -75,6 +75,15 @@ pub fn execute_run_query(duckdb_path: &str, sql: &str) -> Result<String, String>
                      Use arithmetic: running.duration / 1e6 for milliseconds. \
                      Use CAST() for explicit type conversions."
                 );
+            } else if err_str.contains("Binder Error") || err_str.contains("No function matches") {
+                msg.push_str(
+                    "\nHINT: Type mismatch. Column types: entry_slug is TEXT, \
+                     item_uid is UBIGINT, title is TEXT, size is UBIGINT (may be NULL). \
+                     STRUCT fields (running.duration, etc.) are BIGINT. \
+                     You cannot SUM/AVG text columns. Use COUNT(*) for text, \
+                     SUM()/AVG() only on numeric columns. \
+                     For size: use COALESCE(size, 0) since it may be NULL for non-copy items."
+                );
             }
 
             Err(msg)
@@ -95,8 +104,33 @@ pub fn execute_read_code(code_root: &str, path: &str) -> Result<String, String> 
     }
 
     let full_path = Path::new(code_root).join(path);
-    std::fs::read_to_string(&full_path)
-        .map_err(|e| format!("Cannot read '{}': {}", full_path.display(), e))
+    std::fs::read_to_string(&full_path).map_err(|e| {
+        let mut msg = format!("Cannot read '{}': {}", full_path.display(), e);
+        // On file-not-found, list available files so the agent can self-correct.
+        if e.kind() == std::io::ErrorKind::NotFound {
+            if let Ok(entries) = std::fs::read_dir(code_root) {
+                let mut files: Vec<String> = entries
+                    .flatten()
+                    .filter_map(|ent| {
+                        let p = ent.path();
+                        if p.is_file() {
+                            Some(p.file_name()?.to_string_lossy().to_string())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if !files.is_empty() {
+                    files.sort();
+                    msg.push_str("\n\nAvailable files in code root:\n");
+                    for f in &files {
+                        msg.push_str(&format!("  - {f}\n"));
+                    }
+                }
+            }
+        }
+        msg
+    })
 }
 
 /// Gather a pre-computed overview of the profiling database.
@@ -178,7 +212,7 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
         .unwrap_or_else(|e| format!("[{{\"error\": {:?}}}]", e));
     out.push_str(&format!("## Sample Item Row\n{sample}\n\n"));
 
-    // ── Profile classification ────────────────────────────────────────────────
+    // ── Profile classification (human-readable) ──────────────────────────────
     let classification = execute_run_query(
         duckdb_path,
         "SELECT \
@@ -187,11 +221,34 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
          (SELECT COUNT(DISTINCT entry_slug) FROM entries WHERE entry_slug LIKE '%cpu%' AND type = 'slot') AS cpu_count, \
          (SELECT COUNT(DISTINCT entry_slug) FROM entries WHERE entry_slug LIKE '%util%' AND type = 'slot') AS util_count, \
          (SELECT COUNT(DISTINCT SPLIT_PART(entry_slug, '/', 1)) FROM entries WHERE type = 'panel' AND parent_slug IS NOT NULL) AS node_count",
-    )
-    .unwrap_or_else(|e| format!("[{{\"error\": {:?}}}]", e));
-    out.push_str(&format!("## Profile Classification\n{classification}\n\n"));
+    );
+    out.push_str("## Profile Classification\n");
+    match &classification {
+        Ok(json_str) => {
+            if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
+                if let Some(row) = parsed.first() {
+                    let gpu = row.get("gpu_device_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let cpu = row.get("cpu_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let util = row.get("util_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let nodes = row.get("node_count").and_then(|v| v.as_u64()).unwrap_or(1);
+                    let profile_type = if gpu > 0 { "GPU-present" } else { "CPU-only" };
+                    let node_str = if nodes <= 1 { "single-node".to_string() } else { format!("{}-node", nodes) };
+                    out.push_str(&format!(
+                        "- Type: {} {}\n- GPUs: {} | CPUs: {} | Utility procs: {}\n",
+                        profile_type, node_str, gpu, cpu, util
+                    ));
+                } else {
+                    out.push_str("(no data)\n");
+                }
+            } else {
+                out.push_str(&format!("{}\n", json_str));
+            }
+        }
+        Err(e) => out.push_str(&format!("(error: {})\n", e)),
+    }
+    out.push('\n');
 
-    // ── Tracing detection ─────────────────────────────────────────────────────
+    // ── Tracing detection (human-readable) ────────────────────────────────────
     let tracing = execute_run_query(
         duckdb_path,
         "SELECT \
@@ -199,11 +256,43 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
          COUNT(*) FILTER (WHERE title LIKE '%map_task%' OR title LIKE '%select_task_options%') AS mapper_call_count, \
          COUNT(*) FILTER (WHERE entry_slug LIKE '%util%') AS total_util_items \
          FROM items",
-    )
-    .unwrap_or_else(|e| format!("[{{\"error\": {:?}}}]", e));
-    out.push_str(&format!("## Tracing Status\n{tracing}\n\n"));
+    );
+    out.push_str("## Tracing Status\n");
+    match &tracing {
+        Ok(json_str) => {
+            if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
+                if let Some(row) = parsed.first() {
+                    let rpt = row.get("replay_trace_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let mapper = row.get("mapper_call_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                    if rpt > 0 {
+                        out.push_str(&format!(
+                            "- TRACING IS ACTIVE: {} Replay Physical Trace tasks found\n\
+                             - {} mapper calls also present (expected: first-iteration capture + init/shutdown)\n\
+                             - Do NOT recommend -dm:memoize — tracing is already working\n",
+                            rpt, mapper
+                        ));
+                    } else if mapper > 0 {
+                        out.push_str(&format!(
+                            "- TRACING NOT DETECTED: 0 Replay Physical Trace tasks\n\
+                             - {} mapper calls found — per-task analysis overhead likely\n\
+                             - Check source code for trace annotations before recommending -dm:memoize\n",
+                            mapper
+                        ));
+                    } else {
+                        out.push_str("- No tracing tasks and no mapper calls found (unusual)\n");
+                    }
+                } else {
+                    out.push_str("(no data)\n");
+                }
+            } else {
+                out.push_str(&format!("{}\n", json_str));
+            }
+        }
+        Err(e) => out.push_str(&format!("(error: {})\n", e)),
+    }
+    out.push('\n');
 
-    // ── Per-kind utilization ──────────────────────────────────────────────────
+    // ── Per-kind utilization (human-readable) ─────────────────────────────────
     let utilization = execute_run_query(
         duckdb_path,
         "WITH bounds AS ( \
@@ -232,11 +321,36 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
          FROM kind_busy kb CROSS JOIN bounds b \
          GROUP BY kb.kind \
          ORDER BY kb.kind",
-    )
-    .unwrap_or_else(|e| format!("[{{\"error\": {:?}}}]", e));
-    out.push_str(&format!("## Per-Kind Utilization\n{utilization}\n\n"));
+    );
+    out.push_str("## Per-Kind Utilization\n");
+    match &utilization {
+        Ok(json_str) => {
+            if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
+                for row in &parsed {
+                    let kind = row.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
+                    let count = row.get("proc_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let avg = row.get("avg_util_pct").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let max = row.get("max_util_pct").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let tier = if avg > 80.0 { "well-optimized" }
+                        else if avg > 50.0 { "room for improvement" }
+                        else { "significant issues" };
+                    out.push_str(&format!(
+                        "- {}: {} proc(s), avg {:.1}% util, max {:.1}% ({})\n",
+                        kind, count, avg, max, tier
+                    ));
+                }
+                if parsed.is_empty() {
+                    out.push_str("(no utilization data)\n");
+                }
+            } else {
+                out.push_str(&format!("{}\n", json_str));
+            }
+        }
+        Err(e) => out.push_str(&format!("(error: {})\n", e)),
+    }
+    out.push('\n');
 
-    // ── Deferred health ───────────────────────────────────────────────────────
+    // ── Deferred health (human-readable) ──────────────────────────────────────
     let deferred = execute_run_query(
         duckdb_path,
         "SELECT \
@@ -245,9 +359,35 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
          ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY deferred.duration) / 1e6, 2) AS p50_deferred_ms, \
          COUNT(*) FILTER (WHERE deferred.duration < 100000) AS items_under_100us \
          FROM items WHERE deferred IS NOT NULL AND deferred.duration IS NOT NULL",
-    )
-    .unwrap_or_else(|e| format!("[{{\"error\": {:?}}}]", e));
-    out.push_str(&format!("## Deferred Health (runtime run-ahead)\n{deferred}\n\n"));
+    );
+    out.push_str("## Deferred Health (runtime run-ahead)\n");
+    match &deferred {
+        Ok(json_str) => {
+            if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
+                if let Some(row) = parsed.first() {
+                    let avg = row.get("avg_deferred_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let p10 = row.get("p10_deferred_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let p50 = row.get("p50_deferred_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let under_100us = row.get("items_under_100us").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let health = if p10 > 1.0 { "HEALTHY — runtime is running well ahead of execution" }
+                        else if avg > 1.0 { "MIXED — some tasks have thin run-ahead" }
+                        else { "UNHEALTHY — execution is catching up with analysis" };
+                    out.push_str(&format!(
+                        "- Avg: {:.2}ms | P10: {:.2}ms | P50: {:.2}ms | Items <100us: {}\n\
+                         - Assessment: {}\n\
+                         - Remember: LARGE deferred = GOOD (runtime ahead), SMALL deferred = BAD (pipeline stall)\n",
+                        avg, p10, p50, under_100us, health
+                    ));
+                } else {
+                    out.push_str("(no deferred data)\n");
+                }
+            } else {
+                out.push_str(&format!("{}\n", json_str));
+            }
+        }
+        Err(e) => out.push_str(&format!("(error: {})\n", e)),
+    }
+    out.push('\n');
 
     Ok(out)
 }
