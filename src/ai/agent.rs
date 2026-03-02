@@ -323,8 +323,12 @@ impl AgentSession {
                     .to_string_lossy();
                 match std::fs::read_to_string(fp) {
                     Ok(contents) => {
-                        msg.push_str("## Application Source Code\n\n");
-                        msg.push_str(&format!("### {filename}\n```\n{contents}\n```\n\n"));
+                        msg.push_str("## Application Source Code (pre-loaded)\n\n");
+                        msg.push_str(&format!(
+                            "The file `{filename}` is already included below — do NOT \
+                             call `read_code` for this file.\n\n\
+                             ### {filename}\n```\n{contents}\n```\n\n"
+                        ));
                     }
                     Err(e) => {
                         msg.push_str(&format!(
@@ -335,7 +339,10 @@ impl AgentSession {
                     }
                 }
                 if let Some(listing) = list_source_files(&self.code_path) {
-                    msg.push_str("### Other files available via `read_code` tool:\n");
+                    msg.push_str(&format!(
+                        "### Other files in `{}` available via `read_code` tool:\n",
+                        self.code_path
+                    ));
                     msg.push_str(&listing);
                     msg.push('\n');
                 }
