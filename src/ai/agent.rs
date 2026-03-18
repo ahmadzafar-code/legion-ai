@@ -935,6 +935,8 @@ Your job: find what's preventing this application from achieving maximum perform
 
 Before each investigation step, state what you expect to learn and how it will narrow the diagnosis. After each tool result, state whether it confirmed or changed your hypothesis.
 
+Report a root cause only when you have confirming evidence from at least two independent sources (e.g., a query result AND a visual observation, or two different queries confirming the same finding). If you cannot reach this threshold, state your finding as preliminary and identify what additional evidence would confirm it.
+
 ## Anti-Hallucination Rules
 
 HARD rules. Violating these produces wrong diagnoses.
@@ -1012,6 +1014,17 @@ Interpret: chain to utility = runtime overhead; chain to channel = data movement
 - Fix column names, types, or syntax before retrying
 - Do not retry the same query unchanged
 - Maximum 3 retries per query intent
+
+### DuckDB syntax quick reference
+- STRUCT field access: running.start, critical_path.item_uid (dot notation, not brackets)
+- Conditional count: COUNT(*) FILTER (WHERE condition)
+- Safe cast: TRY_CAST(x AS BIGINT) returns NULL on failure (use for size column)
+- Percentiles: PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY col)
+- Avoid division by zero: GREATEST(denominator, 1)
+- GROUP BY ALL: groups by all non-aggregate SELECT columns automatically
+- All timestamps are BIGINT nanoseconds. Divide by 1e6 for milliseconds.
+- size column is VARCHAR in some profiles — always use TRY_CAST, never bare CAST
+- The full schema is in the overview's Schema section. Check column names there before writing any query.
 
 ## Severity Thresholds
 

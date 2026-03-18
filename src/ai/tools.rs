@@ -174,9 +174,21 @@ pub fn execute_list_files(code_root: &str, path: &str) -> Result<String, String>
 ///
 /// Wraps the user's SQL with DuckDB's `json_group_array(to_json(t))` to serialize
 /// all column types (including STRUCTs like Interval and ItemLink) as JSON.
-/// Returns up to 50 rows as a JSON array string.
+/// Execute a query and return the result as a markdown table (for LLM consumption).
+/// Falls back to raw JSON if table formatting fails.
 #[cfg(feature = "duckdb")]
 pub fn execute_run_query(duckdb_path: &str, sql: &str) -> Result<String, String> {
+    let json_result = execute_run_query_raw(duckdb_path, sql)?;
+    match json_array_to_markdown_table(&json_result) {
+        Some(table) => Ok(table),
+        None => Ok(json_result),
+    }
+}
+
+/// Execute a query and return raw JSON array string.
+/// Used internally by gather_overview() which parses the JSON itself.
+#[cfg(feature = "duckdb")]
+pub fn execute_run_query_raw(duckdb_path: &str, sql: &str) -> Result<String, String> {
     use duckdb::Connection;
 
     let sql_trimmed = sql.trim().trim_end_matches(';');
@@ -304,16 +316,16 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     );
 
     // ── Row counts ────────────────────────────────────────────────────────────
-    let entry_count = execute_run_query(duckdb_path, "SELECT COUNT(*) AS cnt FROM entries")
+    let entry_count = execute_run_query_raw(duckdb_path, "SELECT COUNT(*) AS cnt FROM entries")
         .unwrap_or_else(|_| "[{\"cnt\":\"?\"}]".into());
-    let item_count = execute_run_query(duckdb_path, "SELECT COUNT(*) AS cnt FROM items")
+    let item_count = execute_run_query_raw(duckdb_path, "SELECT COUNT(*) AS cnt FROM items")
         .unwrap_or_else(|_| "[{\"cnt\":\"?\"}]".into());
     out.push_str(&format!(
         "## Row Counts\nentries: {entry_count}  items: {item_count}\n\n"
     ));
 
     // ── Processor hierarchy ───────────────────────────────────────────────────
-    let hier = execute_run_query(
+    let hier = execute_run_query_raw(
         duckdb_path,
         "SELECT parent_slug, type, COUNT(*) AS cnt, \
          STRING_AGG(entry_slug, ', ' ORDER BY entry_slug) AS slugs \
@@ -323,7 +335,7 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     out.push_str(&format!("## Processor Hierarchy\n{hier}\n\n"));
 
     // ── Timeline bounds ───────────────────────────────────────────────────────
-    let bounds = execute_run_query(
+    let bounds = execute_run_query_raw(
         duckdb_path,
         "SELECT MIN(lifetime.start) AS earliest_ns, MAX(lifetime.stop) AS latest_ns, \
          ROUND((MAX(lifetime.stop) - MIN(lifetime.start)) / 1e6, 1) AS span_ms FROM items",
@@ -332,7 +344,7 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     out.push_str(&format!("## Timeline Bounds\n{bounds}\n\n"));
 
     // ── Task distribution ─────────────────────────────────────────────────────
-    let dist = execute_run_query(
+    let dist = execute_run_query_raw(
         duckdb_path,
         "SELECT title, COUNT(*) AS cnt, \
          ROUND(AVG(running.duration)/1e6, 2) AS avg_run_ms, \
@@ -344,7 +356,7 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     out.push_str(&format!("## Top Task Types (by count)\n{dist}\n\n"));
 
     // ── Slot counts by kind ───────────────────────────────────────────────────
-    let slots = execute_run_query(
+    let slots = execute_run_query_raw(
         duckdb_path,
         "SELECT parent_slug, COUNT(*) AS slot_cnt FROM entries WHERE type = 'slot' \
          GROUP BY parent_slug ORDER BY parent_slug",
@@ -353,12 +365,12 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     out.push_str(&format!("## Slots by Kind\n{slots}\n\n"));
 
     // ── Sample item ───────────────────────────────────────────────────────────
-    let sample = execute_run_query(duckdb_path, "SELECT * FROM items LIMIT 1")
+    let sample = execute_run_query_raw(duckdb_path, "SELECT * FROM items LIMIT 1")
         .unwrap_or_else(|e| format!("[{{\"error\": {:?}}}]", e));
     out.push_str(&format!("## Sample Item Row\n{sample}\n\n"));
 
     // ── Profile classification (human-readable) ──────────────────────────────
-    let classification = execute_run_query(
+    let classification = execute_run_query_raw(
         duckdb_path,
         "SELECT \
          (SELECT COUNT(DISTINCT entry_slug) FROM entries WHERE entry_slug LIKE '%gpudev%' AND type = 'slot') AS gpu_device_count, \
@@ -394,7 +406,7 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     out.push('\n');
 
     // ── Tracing detection (human-readable) ────────────────────────────────────
-    let tracing = execute_run_query(
+    let tracing = execute_run_query_raw(
         duckdb_path,
         "SELECT \
          COUNT(*) FILTER (WHERE title LIKE '%Replay Physical Trace%') AS replay_trace_count, \
@@ -438,7 +450,7 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     out.push('\n');
 
     // ── Per-kind utilization (human-readable) ─────────────────────────────────
-    let utilization = execute_run_query(
+    let utilization = execute_run_query_raw(
         duckdb_path,
         "WITH bounds AS ( \
            SELECT MIN(lifetime.start) AS t_start, MAX(lifetime.stop) AS t_stop \
@@ -496,7 +508,7 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     out.push('\n');
 
     // ── Deferred health (human-readable) ──────────────────────────────────────
-    let deferred = execute_run_query(
+    let deferred = execute_run_query_raw(
         duckdb_path,
         "SELECT \
          ROUND(AVG(deferred.duration) / 1e6, 2) AS avg_deferred_ms, \
@@ -535,7 +547,7 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     out.push('\n');
 
     // ── Utility meta-task breakdown ────────────────────────────────────────
-    let util_breakdown = execute_run_query(
+    let util_breakdown = execute_run_query_raw(
         duckdb_path,
         "WITH util_breakdown AS ( \
            SELECT \
@@ -600,7 +612,7 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     out.push('\n');
 
     // ── Mapper call analysis ───────────────────────────────────────────────
-    let mapper_calls = execute_run_query(
+    let mapper_calls = execute_run_query_raw(
         duckdb_path,
         "SELECT COUNT(*) AS call_count, \
          ROUND(AVG(running.duration) / 1e6, 2) AS avg_ms, \
@@ -643,7 +655,7 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     out.push('\n');
 
     // ── Task granularity ───────────────────────────────────────────────────
-    let granularity = execute_run_query(
+    let granularity = execute_run_query_raw(
         duckdb_path,
         "SELECT COUNT(*) AS app_task_count, \
          ROUND(AVG(running.duration) / 1e6, 3) AS avg_run_ms, \
@@ -691,7 +703,7 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     out.push('\n');
 
     // ── Channel copy patterns ──────────────────────────────────────────────
-    let copies = execute_run_query(
+    let copies = execute_run_query_raw(
         duckdb_path,
         "SELECT COUNT(*) AS copy_count, \
          ROUND(COALESCE(SUM(running.duration), 0) / 1e6, 1) AS total_copy_ms, \
@@ -726,7 +738,7 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     out.push('\n');
 
     // ── Delayed distribution (Realm pickup latency) ────────────────────────
-    let delayed = execute_run_query(
+    let delayed = execute_run_query_raw(
         duckdb_path,
         "SELECT ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY delayed.duration) / 1e6, 3) AS p50_ms, \
          ROUND(PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY delayed.duration) / 1e6, 3) AS p90_ms, \
@@ -769,7 +781,7 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     out.push('\n');
 
     // ── Triggering latency ─────────────────────────────────────────────────
-    let trig_latency = execute_run_query(
+    let trig_latency = execute_run_query_raw(
         duckdb_path,
         "SELECT ROUND(PERCENTILE_CONT(0.9) WITHIN GROUP \
          (ORDER BY triggering_latency.duration) / 1e6, 3) AS p90_ms, \
@@ -807,7 +819,7 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     out.push('\n');
 
     // ── Python/Legate detection ────────────────────────────────────────────
-    let python = execute_run_query(
+    let python = execute_run_query_raw(
         duckdb_path,
         "SELECT COUNT(*) AS py_proc_count \
          FROM entries \
@@ -840,7 +852,7 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     out.push('\n');
 
     // ── GC and instance activity ───────────────────────────────────────────
-    let gc = execute_run_query(
+    let gc = execute_run_query_raw(
         duckdb_path,
         "SELECT \
          COUNT(*) FILTER (WHERE title LIKE '%Garbage Collection%' \
@@ -889,7 +901,7 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     out.push('\n');
 
     // ── Per-node utility balance ───────────────────────────────────────────
-    let node_util = execute_run_query(
+    let node_util = execute_run_query_raw(
         duckdb_path,
         "SELECT \
          SPLIT_PART(entry_slug, '_', 1) AS node, \
@@ -956,7 +968,7 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     out.push('\n');
 
     // ── Channel direction analysis ─────────────────────────────────────────
-    let chan_dir = execute_run_query(
+    let chan_dir = execute_run_query_raw(
         duckdb_path,
         "SELECT entry_slug, COUNT(*) AS copy_count, \
          ROUND(SUM(running.duration) / 1e6, 1) AS total_ms, \
@@ -1021,7 +1033,7 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     out.push('\n');
 
     // ── Copy-to-compute ratio ──────────────────────────────────────────────
-    let copy_ratio = execute_run_query(
+    let copy_ratio = execute_run_query_raw(
         duckdb_path,
         "WITH copy_time AS ( \
            SELECT COALESCE(SUM(running.duration), 0) AS copy_ns \
@@ -1074,7 +1086,7 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     out.push('\n');
 
     // ── Scheduling overhead ────────────────────────────────────────────────
-    let sched_overhead = execute_run_query(
+    let sched_overhead = execute_run_query_raw(
         duckdb_path,
         "SELECT \
          ROUND(PERCENTILE_CONT(0.9) WITHIN GROUP \
@@ -1120,7 +1132,7 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     out.push('\n');
 
     // ── Application processor balance ──────────────────────────────────────
-    let proc_balance = execute_run_query(
+    let proc_balance = execute_run_query_raw(
         duckdb_path,
         "WITH bounds AS ( \
            SELECT MIN(lifetime.start) AS t_start, MAX(lifetime.stop) AS t_stop FROM items \
@@ -1188,7 +1200,7 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     out.push_str("## Navigation Anchors\n");
 
     // Sub-query A: Steady-state midpoint (middle 20% of profile)
-    let midpoint = execute_run_query(
+    let midpoint = execute_run_query_raw(
         duckdb_path,
         "SELECT \
          MIN(lifetime.start) + (MAX(lifetime.stop) - MIN(lifetime.start)) * 4 / 10 AS steady_start, \
@@ -1218,7 +1230,7 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     }
 
     // Sub-query B: Worst mapper call
-    let worst_mapper = execute_run_query(
+    let worst_mapper = execute_run_query_raw(
         duckdb_path,
         "SELECT entry_slug, title, running.start AS start_ns, \
          running.stop AS stop_ns, ROUND(running.duration / 1e6, 2) AS duration_ms \
@@ -1251,7 +1263,7 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     }
 
     // Sub-query C: Largest application processor gap
-    let worst_gap = execute_run_query(
+    let worst_gap = execute_run_query_raw(
         duckdb_path,
         "WITH ordered AS ( \
            SELECT entry_slug, running.stop AS task_end, \
@@ -1295,6 +1307,58 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     out.push('\n');
 
     Ok(out)
+}
+
+#[cfg(feature = "duckdb")]
+/// Convert a JSON array of objects into a markdown table.
+/// Returns None if the input is empty, not an array, or parse fails.
+fn json_array_to_markdown_table(json_str: &str) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(json_str).ok()?;
+    let arr = parsed.as_array()?;
+    if arr.is_empty() {
+        return None;
+    }
+
+    // Extract column names from first object, sorted for determinism
+    let first = arr[0].as_object()?;
+    let mut columns: Vec<&String> = first.keys().collect();
+    columns.sort();
+
+    // Build header
+    let mut out = String::new();
+    out.push('|');
+    for col in &columns {
+        out.push_str(&format!(" {} |", col));
+    }
+    out.push('\n');
+
+    // Separator
+    out.push('|');
+    for _ in &columns {
+        out.push_str("------|");
+    }
+    out.push('\n');
+
+    // Data rows
+    for row in arr {
+        out.push('|');
+        for col in &columns {
+            let val = row.get(col.as_str());
+            let cell = match val {
+                None | Some(serde_json::Value::Null) => String::new(),
+                Some(serde_json::Value::String(s)) => s.clone(),
+                Some(serde_json::Value::Number(n)) => n.to_string(),
+                Some(serde_json::Value::Bool(b)) => b.to_string(),
+                Some(v @ serde_json::Value::Object(_)) | Some(v @ serde_json::Value::Array(_)) => {
+                    serde_json::to_string(v).unwrap_or_default()
+                }
+            };
+            out.push_str(&format!(" {} |", cell));
+        }
+        out.push('\n');
+    }
+
+    Some(out)
 }
 
 #[cfg(feature = "duckdb")]
@@ -1407,7 +1471,9 @@ pub fn tool_definitions(has_duckdb: bool, has_code: bool) -> Vec<serde_json::Val
                     WHERE entry_slug LIKE '%chan%' AND running IS NOT NULL\n\
                     GROUP BY entry_slug ORDER BY total_ms DESC\n\n\
                  IMPORTANT: You can call this tool multiple times per response to batch independent queries. \
-                 Do NOT include LIMIT in your query — a hard cap of 50 rows is applied automatically.",
+                 Do NOT include LIMIT in your query — a hard cap of 50 rows is applied automatically. \
+                 Before writing a query, check the overview's Schema section for exact column names. \
+                 If a column shows 'Not available in this profile' in the overview, do NOT attempt to query it.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -1449,7 +1515,9 @@ pub fn tool_definitions(has_duckdb: bool, has_code: bool) -> Vec<serde_json::Val
             "description":
                 "Read an application source file (path relative to the configured code root). \
                  Use to understand task logic, mapper policies, and application structure. \
-                 Use list_files first to discover available files.",
+                 Use list_files first to discover available files. \
+                 Do NOT call read_code for a file that was already pre-loaded in the scan \
+                 message — check the 'Application Source Code (pre-loaded)' section above first.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -1470,7 +1538,10 @@ pub fn tool_definitions(has_duckdb: bool, has_code: bool) -> Vec<serde_json::Val
              Returns an image along with metadata showing the visible time \
              range (in nanoseconds) and the list of entry_slugs for each \
              processor row. Use this to visually inspect the timeline layout, \
-             verify idle gaps, and understand spatial patterns across processors.",
+             verify idle gaps, and understand spatial patterns across processors. \
+             Do NOT take another screenshot if you already have a recent screenshot \
+             of the same region — use the data you have. Prefer set_view over \
+             screenshot when you need to change both zoom and scroll position.",
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -1485,7 +1556,9 @@ pub fn tool_definitions(has_duckdb: bool, has_code: bool) -> Vec<serde_json::Val
              a screenshot. Returns a screenshot with metadata showing the exact \
              visible range and entry_slugs. Use after identifying a region of \
              interest via queries to see fine-grained task scheduling, verify \
-             gaps, and inspect processor utilization within the zoomed range.",
+             gaps, and inspect processor utilization within the zoomed range. \
+             Prefer set_view over zoom_to + scroll_to when you need both zoom and \
+             vertical navigation — it's one round-trip instead of two.",
         "input_schema": {
             "type": "object",
             "properties": {
