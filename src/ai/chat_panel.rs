@@ -40,6 +40,8 @@ pub struct ChatMessage {
     pub text: String,
     /// Highlights attached to this message (only for Analysis messages).
     pub highlights: Vec<Highlight>,
+    /// Full tool result content (only for System messages from ToolResult events).
+    pub expandable_content: Option<String>,
 }
 
 /// A user-initiated highlight action from a chip click.
@@ -471,6 +473,7 @@ impl ChatPanel {
                 text: "Ask me anything about this profile, or try a suggestion below."
                     .into(),
                 highlights: vec![],
+                expandable_content: None,
             }],
             input_buffer: String::new(),
             selection: None,
@@ -515,6 +518,7 @@ impl ChatPanel {
             kind,
             text: text.into(),
             highlights: vec![],
+            expandable_content: None,
         });
         self.scroll_to_bottom = true;
     }
@@ -660,11 +664,15 @@ impl ChatPanel {
                         format!("  ↳ {name}: {purpose}"),
                     );
                 }
-                AgentEvent::ToolResult { name, summary } => {
-                    self.add_message(
-                        ChatMessageKind::System,
-                        format!("  ✓ {name} ({summary})"),
-                    );
+                AgentEvent::ToolResult { name, summary, full_content } => {
+                    let has_content = !full_content.is_empty() && full_content != summary;
+                    self.messages.push(ChatMessage {
+                        kind: ChatMessageKind::System,
+                        text: format!("  ✓ {name} ({summary})"),
+                        highlights: vec![],
+                        expandable_content: if has_content { Some(full_content) } else { None },
+                    });
+                    self.scroll_to_bottom = true;
                 }
                 AgentEvent::ScreenshotRequest { request_id } => {
                     self.pending_navigation = Some(PendingNavigation::Screenshot { request_id });
@@ -713,6 +721,7 @@ impl ChatPanel {
                         kind: ChatMessageKind::Analysis,
                         text: display,
                         highlights: response.highlights,
+                        expandable_content: None,
                     });
                     self.scroll_to_bottom = true;
 
@@ -1386,6 +1395,40 @@ impl ChatPanel {
             ui.add_space(4.0);
         }
 
+        // Copy transcript button
+        if !self.messages.is_empty() && !self.pending_request {
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .small_button("Copy transcript")
+                        .on_hover_text("Copy full conversation including tool results")
+                        .clicked()
+                    {
+                        let transcript: String = self
+                            .messages
+                            .iter()
+                            .map(|m| {
+                                let prefix = match &m.kind {
+                                    ChatMessageKind::System => "[system]",
+                                    ChatMessageKind::User => "[user]",
+                                    ChatMessageKind::Analysis => "[analysis]",
+                                    ChatMessageKind::Context => "[context]",
+                                };
+                                let base = format!("{} {}", prefix, m.text);
+                                if let Some(ref content) = m.expandable_content {
+                                    format!("{}\n{}\n", base, content)
+                                } else {
+                                    format!("{}\n", base)
+                                }
+                            })
+                            .collect();
+                        ui.output_mut(|o| o.copied_text = transcript);
+                    }
+                });
+            });
+            ui.add_space(2.0);
+        }
+
         // Message scroll area — takes all available height
         egui::ScrollArea::vertical()
             .max_height(max_height)
@@ -1899,11 +1942,35 @@ impl ChatPanel {
 fn render_message(ui: &mut egui::Ui, msg: &ChatMessage, actions: &mut Vec<HighlightAction>) {
     match &msg.kind {
         ChatMessageKind::System => {
-            ui.label(
-                egui::RichText::new(&msg.text)
-                    .italics()
-                    .color(egui::Color32::from_rgb(120, 120, 120)),
-            );
+            if let Some(ref content) = msg.expandable_content {
+                let id = ui.make_persistent_id(ui.next_auto_id());
+                egui::CollapsingHeader::new(
+                    egui::RichText::new(&msg.text)
+                        .italics()
+                        .color(egui::Color32::from_rgb(120, 120, 120)),
+                )
+                .id_salt(id)
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        if ui.small_button("Copy result").clicked() {
+                            ui.output_mut(|o| o.copied_text = content.clone());
+                        }
+                    });
+                    ui.label(
+                        egui::RichText::new(content)
+                            .monospace()
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(60, 60, 60)),
+                    );
+                });
+            } else {
+                ui.label(
+                    egui::RichText::new(&msg.text)
+                        .italics()
+                        .color(egui::Color32::from_rgb(120, 120, 120)),
+                );
+            }
         }
         ChatMessageKind::User => {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {

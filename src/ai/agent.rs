@@ -61,8 +61,8 @@ struct ApiResponse {
 pub enum AgentEvent {
     /// Agent is about to execute a tool.
     ToolCall { name: String, purpose: String },
-    /// Tool returned a result (summary = first ~100 chars or row count).
-    ToolResult { name: String, summary: String },
+    /// Tool returned a result (summary = first ~100 chars, full_content = complete result).
+    ToolResult { name: String, summary: String, full_content: String },
     /// Agent needs a screenshot from the UI thread.
     ScreenshotRequest { request_id: u64 },
     /// Agent needs the UI to zoom to a time range and return a screenshot.
@@ -563,6 +563,11 @@ impl AgentSession {
                             "screenshot captured".to_owned()
                         } else if content.len() > 100 {
                             format!("{}…", &content[..100])
+                        } else {
+                            content.clone()
+                        },
+                        full_content: if content.starts_with("__IMAGE_BASE64__") {
+                            String::new()
                         } else {
                             content.clone()
                         },
