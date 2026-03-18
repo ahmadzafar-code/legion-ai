@@ -446,7 +446,13 @@ impl AgentSession {
              application processor gaps, whether gaps are synchronized or staggered. These gestalt \
              patterns are your most reliable visual observations. Now form your initial hypothesis \
              by combining the overview signals with the visual patterns. State your hypothesis \
-             explicitly before proceeding. Then use run_query to quantify what you see and walk \
+             explicitly before proceeding. Then immediately identify what signal would FALSIFY \
+             your hypothesis and check it. For example, if you suspect runtime overhead, verify \
+             that utility processors are actually busy (>30% in the overview). If they are idle, \
+             your hypothesis is wrong — revise it before proceeding. If all signals indicate a \
+             healthy profile (application processor utilization >75%, tracing active, deferred \
+             P10 >1ms, utility <50%), report that the profile is healthy. Do not search for \
+             problems that don't exist. Then use run_query to quantify what you see and walk \
              causal chains with the recursive CTE. Call run_query multiple times per response to \
              batch independent queries.",
         );
@@ -931,11 +937,18 @@ fn build_system_prompt(model: &str, record_store: &super::records::RecordStore) 
 - Screenshots of the timeline
 - Application source code
 
-Your job: find what's preventing this application from achieving maximum performance. Follow causal chains through the data. Match your findings against the known cases. Adapt the fix to the user's code.
+Your job: determine whether this application has performance issues, and if so, identify what's preventing it from achieving maximum performance. If the profile is healthy — high utilization on application processors, active tracing, healthy deferred, no saturated utility — say so. Do not manufacture problems. A healthy profile is a valid diagnosis. Follow causal chains through the data. Match your findings against the known cases. Adapt the fix to the user's code.
 
 Before each investigation step, state what you expect to learn and how it will narrow the diagnosis. After each tool result, state whether it confirmed or changed your hypothesis.
 
 Report a root cause only when you have confirming evidence from at least two independent sources (e.g., a query result AND a visual observation, or two different queries confirming the same finding). If you cannot reach this threshold, state your finding as preliminary and identify what additional evidence would confirm it.
+
+MANDATORY CROSS-VALIDATION: After forming a hypothesis, identify the single strongest signal that would FALSIFY it, and check that signal before committing to the diagnosis. Examples:
+- If you hypothesize 'runtime overhead': check utility processor utilization. If utility is below 30%, runtime overhead is NOT the cause — the runtime is idle, not overloaded. Look for application-level blocking (convergence checks, futures, barriers).
+- If you hypothesize 'missing tracing': check for Replay Physical Trace tasks in the Tracing Status section. If RPT count > 0, tracing IS active — do not recommend -dm:memoize.
+- If you hypothesize 'mapper placement bug': check channel direction. If no SYS↔FB channels exist, placement is not the issue.
+- If you hypothesize 'insufficient parallelism': check if utility is busy. If utility is saturated, the problem is runtime overhead, not lack of work.
+State the falsification check and its result explicitly in your analysis before reporting each finding.
 
 ## Anti-Hallucination Rules
 
