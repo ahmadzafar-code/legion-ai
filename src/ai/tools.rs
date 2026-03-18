@@ -9,6 +9,167 @@
 
 use std::path::Path;
 
+// ── File discovery constants ─────────────────────────────────────────────────
+
+/// Source extensions included in file listings and tree views.
+const SOURCE_EXTS: &[&str] = &[
+    "cc", "cpp", "c", "h", "hpp", "cu", "cuh", "py", "rs", "rg",
+    "mk", "cmake", "toml", "json", "yaml", "yml", "txt", "md",
+];
+
+/// Directories to skip when walking the source tree.
+const SKIP_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "build",
+    "__pycache__",
+    ".cache",
+    ".vscode",
+    ".idea",
+];
+
+// ── File tree helpers ────────────────────────────────────────────────────────
+
+/// Format a byte count as a human-readable size string.
+fn format_size(bytes: u64) -> String {
+    if bytes >= 1_048_576 {
+        format!("{:.1}MB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1024 {
+        format!("{:.1}KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{}B", bytes)
+    }
+}
+
+/// Recursively walk a directory tree, appending an indented listing to `output`.
+///
+/// Caps at `max_depth` levels and `max_files` total entries to prevent
+/// runaway scanning on large repositories.
+fn walk_dir_tree(
+    dir: &Path,
+    prefix: &str,
+    depth: usize,
+    max_depth: usize,
+    output: &mut String,
+    file_count: &mut usize,
+    max_files: usize,
+) {
+    if depth > max_depth || *file_count >= max_files {
+        return;
+    }
+
+    let mut entries: Vec<std::fs::DirEntry> = match std::fs::read_dir(dir) {
+        Ok(rd) => rd.flatten().collect(),
+        Err(_) => return,
+    };
+
+    // Sort: directories first, then files, both alphabetical
+    entries.sort_by(|a, b| {
+        let a_dir = a.path().is_dir();
+        let b_dir = b.path().is_dir();
+        match (a_dir, b_dir) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.file_name().cmp(&b.file_name()),
+        }
+    });
+
+    let indent = "  ".repeat(depth);
+
+    for entry in entries {
+        if *file_count >= max_files {
+            output.push_str(&format!("{indent}  ... (truncated at {max_files} entries)\n"));
+            return;
+        }
+
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+
+        if path.is_dir() {
+            if SKIP_DIRS.contains(&name.as_str()) {
+                continue;
+            }
+            output.push_str(&format!("{indent}{prefix}{name}/\n"));
+            walk_dir_tree(
+                &path,
+                "",
+                depth + 1,
+                max_depth,
+                output,
+                file_count,
+                max_files,
+            );
+        } else {
+            // Only list files with recognised source extensions
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
+            if !SOURCE_EXTS.contains(&ext) {
+                continue;
+            }
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            output.push_str(&format!(
+                "{indent}{prefix}{name} ({})\n",
+                format_size(size)
+            ));
+            *file_count += 1;
+        }
+    }
+}
+
+/// Build a recursive file tree listing for the given code root directory.
+///
+/// Returns a formatted string showing directories and source files with sizes,
+/// capped at 6 levels deep and 500 files. Used both in scan messages and as
+/// the `list_files` tool implementation.
+pub fn recursive_file_tree(code_root: &str) -> Result<String, String> {
+    if code_root.is_empty() {
+        return Err("Code path not configured. Set it in the Settings panel.".into());
+    }
+
+    let root = Path::new(code_root);
+    if !root.is_dir() {
+        return Err(format!("'{}' is not a directory.", code_root));
+    }
+
+    let mut output = format!("Files in `{}`:\n", code_root);
+    let mut file_count = 0usize;
+    walk_dir_tree(root, "", 0, 6, &mut output, &mut file_count, 500);
+
+    if file_count == 0 {
+        output.push_str("  (no source files found)\n");
+    }
+
+    Ok(output)
+}
+
+/// Execute the `list_files` tool: list source files in a subdirectory of the code root.
+///
+/// If `path` is empty or `"."`, lists from the code root itself.
+pub fn execute_list_files(code_root: &str, path: &str) -> Result<String, String> {
+    if code_root.is_empty() {
+        return Err("Code path not configured. Set it in the Settings panel.".into());
+    }
+
+    let target = if path.is_empty() || path == "." {
+        code_root.to_owned()
+    } else {
+        if path.contains("..") || path.starts_with('/') || path.starts_with('\\') {
+            return Err("Invalid path: must be relative with no '..' or absolute prefix.".into());
+        }
+        Path::new(code_root)
+            .join(path)
+            .to_string_lossy()
+            .to_string()
+    };
+
+    recursive_file_tree(&target)
+}
+
+// ── Query tools ──────────────────────────────────────────────────────────────
+
 /// Execute a read-only SQL query against the Legion DuckDB database.
 ///
 /// Wraps the user's SQL with DuckDB's `json_group_array(to_json(t))` to serialize
@@ -106,27 +267,11 @@ pub fn execute_read_code(code_root: &str, path: &str) -> Result<String, String> 
     let full_path = Path::new(code_root).join(path);
     std::fs::read_to_string(&full_path).map_err(|e| {
         let mut msg = format!("Cannot read '{}': {}", full_path.display(), e);
-        // On file-not-found, list available files so the agent can self-correct.
+        // On file-not-found, show the recursive file tree so the agent can self-correct.
         if e.kind() == std::io::ErrorKind::NotFound {
-            if let Ok(entries) = std::fs::read_dir(code_root) {
-                let mut files: Vec<String> = entries
-                    .flatten()
-                    .filter_map(|ent| {
-                        let p = ent.path();
-                        if p.is_file() {
-                            Some(p.file_name()?.to_string_lossy().to_string())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                if !files.is_empty() {
-                    files.sort();
-                    msg.push_str("\n\nAvailable files in code root:\n");
-                    for f in &files {
-                        msg.push_str(&format!("  - {f}\n"));
-                    }
-                }
+            if let Ok(tree) = recursive_file_tree(code_root) {
+                msg.push_str("\n\nAvailable files:\n");
+                msg.push_str(&tree);
             }
         }
         msg
@@ -389,6 +534,311 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     }
     out.push('\n');
 
+    // ── Utility meta-task breakdown ────────────────────────────────────────
+    let util_breakdown = execute_run_query(
+        duckdb_path,
+        "WITH util_breakdown AS ( \
+           SELECT \
+             CASE \
+               WHEN title LIKE '%Logical Dependence%' OR title LIKE '%Disjointness%' THEN 'analysis' \
+               WHEN title LIKE 'Mapper Call%' OR title LIKE '%MapperRuntime%' THEN 'mapper' \
+               WHEN title LIKE '%Replay Physical Trace%' THEN 'trace_replay' \
+               WHEN title LIKE '%Scheduler%' OR title LIKE '%Prepipeline%' THEN 'scheduling' \
+               ELSE 'other' \
+             END AS category, \
+             SUM(running.duration) AS total_ns \
+           FROM items \
+           WHERE entry_slug LIKE '%util%' AND running IS NOT NULL \
+           GROUP BY category \
+         ) \
+         SELECT category, \
+                ROUND(total_ns / 1e6, 1) AS total_ms, \
+                ROUND(total_ns * 100.0 / NULLIF((SELECT SUM(total_ns) FROM util_breakdown), 0), 1) AS pct \
+         FROM util_breakdown \
+         ORDER BY total_ns DESC",
+    );
+    out.push_str("## Utility Meta-Task Breakdown\n");
+    match &util_breakdown {
+        Ok(json_str) => {
+            if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
+                let mut has_trace_replay = false;
+                let mut mapper_pct = 0.0_f64;
+                for row in &parsed {
+                    let cat = row.get("category").and_then(|v| v.as_str()).unwrap_or("?");
+                    let ms = row.get("total_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let pct = row.get("pct").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let label = match cat {
+                        "analysis" => "Analysis (dependence/disjointness)",
+                        "mapper" => "Mapper calls",
+                        "trace_replay" => "Trace replay",
+                        "scheduling" => "Scheduling (scheduler/prepipeline)",
+                        _ => "Other meta-tasks",
+                    };
+                    out.push_str(&format!("- {}: {:.1}% ({:.1}ms)\n", label, pct, ms));
+                    if cat == "trace_replay" && pct > 0.0 {
+                        has_trace_replay = true;
+                    }
+                    if cat == "mapper" {
+                        mapper_pct = pct;
+                    }
+                }
+                if !has_trace_replay {
+                    out.push_str("- NOTE: NO TRACE REPLAY activity on utility — consistent with missing tracing\n");
+                }
+                if mapper_pct > 30.0 {
+                    out.push_str("- NOTE: MAPPER-DOMINATED — investigate individual mapper call durations\n");
+                }
+                if parsed.is_empty() {
+                    out.push_str("(no utility items)\n");
+                }
+            } else {
+                out.push_str(&format!("{}\n", json_str));
+            }
+        }
+        Err(e) => out.push_str(&format!("(error: {})\n", e)),
+    }
+    out.push('\n');
+
+    // ── Mapper call analysis ───────────────────────────────────────────────
+    let mapper_calls = execute_run_query(
+        duckdb_path,
+        "SELECT COUNT(*) AS call_count, \
+         ROUND(AVG(running.duration) / 1e6, 2) AS avg_ms, \
+         ROUND(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY running.duration) / 1e6, 2) AS p95_ms, \
+         ROUND(MAX(running.duration) / 1e6, 2) AS max_ms \
+         FROM items \
+         WHERE title LIKE 'Mapper Call%' AND running IS NOT NULL",
+    );
+    out.push_str("## Mapper Call Analysis\n");
+    match &mapper_calls {
+        Ok(json_str) => {
+            if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
+                if let Some(row) = parsed.first() {
+                    let count = row.get("call_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let avg = row.get("avg_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let p95 = row.get("p95_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let max = row.get("max_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    out.push_str(&format!(
+                        "- {} mapper calls | avg: {:.2}ms | P95: {:.2}ms | max: {:.2}ms\n",
+                        count, avg, p95, max
+                    ));
+                    if max > 10.0 {
+                        out.push_str(
+                            "- ANOMALOUS — individual mapper calls >10ms, \
+                             possible OS descheduling or expensive mapper logic\n",
+                        );
+                    }
+                    if count == 0 {
+                        out.push_str("- No mapper calls found (tracing may be handling all mapping)\n");
+                    }
+                } else {
+                    out.push_str("(no data)\n");
+                }
+            } else {
+                out.push_str(&format!("{}\n", json_str));
+            }
+        }
+        Err(e) => out.push_str(&format!("(error: {})\n", e)),
+    }
+    out.push('\n');
+
+    // ── Task granularity ───────────────────────────────────────────────────
+    let granularity = execute_run_query(
+        duckdb_path,
+        "SELECT COUNT(*) AS app_task_count, \
+         ROUND(AVG(running.duration) / 1e6, 3) AS avg_run_ms, \
+         ROUND(MIN(running.duration) / 1e6, 3) AS min_run_ms, \
+         ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY running.duration) / 1e6, 3) AS median_run_ms \
+         FROM items \
+         WHERE running IS NOT NULL \
+           AND entry_slug NOT LIKE '%util%' \
+           AND entry_slug NOT LIKE '%chan%' \
+           AND title NOT LIKE '%ProfTask%' \
+           AND title NOT LIKE 'top_level%'",
+    );
+    out.push_str("## Task Granularity (application tasks only)\n");
+    match &granularity {
+        Ok(json_str) => {
+            if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
+                if let Some(row) = parsed.first() {
+                    let count = row.get("app_task_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let avg = row.get("avg_run_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let min = row.get("min_run_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let median = row.get("median_run_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    out.push_str(&format!(
+                        "- {} app tasks | median: {:.3}ms | avg: {:.3}ms | min: {:.3}ms\n",
+                        count, median, avg, min
+                    ));
+                    if median < 1.0 {
+                        out.push_str(
+                            "- BELOW METG — tasks may be too fine-grained, \
+                             runtime overhead per-task becomes significant\n",
+                        );
+                    } else if median > 10.0 {
+                        out.push_str(
+                            "- Tasks are coarse-grained — per-task overhead should be negligible\n",
+                        );
+                    }
+                } else {
+                    out.push_str("(no data)\n");
+                }
+            } else {
+                out.push_str(&format!("{}\n", json_str));
+            }
+        }
+        Err(e) => out.push_str(&format!("(error: {})\n", e)),
+    }
+    out.push('\n');
+
+    // ── Channel copy patterns ──────────────────────────────────────────────
+    let copies = execute_run_query(
+        duckdb_path,
+        "SELECT COUNT(*) AS copy_count, \
+         ROUND(COALESCE(SUM(running.duration), 0) / 1e6, 1) AS total_copy_ms, \
+         ROUND(COALESCE(SUM(CAST(size AS BIGINT)), 0) / 1e6, 1) AS total_copy_mb \
+         FROM items \
+         WHERE entry_slug LIKE '%chan%' AND running IS NOT NULL",
+    );
+    out.push_str("## Channel Copy Patterns\n");
+    match &copies {
+        Ok(json_str) => {
+            if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
+                if let Some(row) = parsed.first() {
+                    let count = row.get("copy_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let ms = row.get("total_copy_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let mb = row.get("total_copy_mb").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    out.push_str(&format!(
+                        "- {} copies | total time: {:.1}ms | total volume: {:.1}MB\n",
+                        count, ms, mb
+                    ));
+                    if count == 0 {
+                        out.push_str("- No channel copies (CPU-only or no data movement)\n");
+                    }
+                } else {
+                    out.push_str("(no data)\n");
+                }
+            } else {
+                out.push_str(&format!("{}\n", json_str));
+            }
+        }
+        Err(e) => out.push_str(&format!("(error: {})\n", e)),
+    }
+    out.push('\n');
+
+    // ── Delayed distribution (Realm pickup latency) ────────────────────────
+    let delayed = execute_run_query(
+        duckdb_path,
+        "SELECT ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY delayed.duration) / 1e6, 3) AS p50_ms, \
+         ROUND(PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY delayed.duration) / 1e6, 3) AS p90_ms, \
+         ROUND(MAX(delayed.duration) / 1e6, 2) AS max_ms, \
+         COUNT(*) FILTER (WHERE delayed.duration > 1000000) AS items_over_1ms \
+         FROM items \
+         WHERE delayed IS NOT NULL AND delayed.duration IS NOT NULL",
+    );
+    out.push_str("## Delayed Distribution (Realm pickup latency)\n");
+    match &delayed {
+        Ok(json_str) => {
+            if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
+                if let Some(row) = parsed.first() {
+                    let p50 = row.get("p50_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let p90 = row.get("p90_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let max = row.get("max_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let over_1ms = row.get("items_over_1ms").and_then(|v| v.as_u64()).unwrap_or(0);
+                    out.push_str(&format!(
+                        "- P50: {:.3}ms | P90: {:.3}ms | max: {:.2}ms | items >1ms: {}\n",
+                        p50, p90, max, over_1ms
+                    ));
+                    if p90 > 1.0 {
+                        out.push_str(
+                            "- HIGH — Realm overloaded, too many ready items competing\n",
+                        );
+                    } else if p90 > 0.1 {
+                        out.push_str(
+                            "- ELEVATED — Realm is slow to pick up ready work\n",
+                        );
+                    }
+                } else {
+                    out.push_str("(no delayed data)\n");
+                }
+            } else {
+                out.push_str(&format!("{}\n", json_str));
+            }
+        }
+        Err(e) => out.push_str(&format!("(error: {})\n", e)),
+    }
+    out.push('\n');
+
+    // ── Triggering latency ─────────────────────────────────────────────────
+    let trig_latency = execute_run_query(
+        duckdb_path,
+        "SELECT ROUND(PERCENTILE_CONT(0.9) WITHIN GROUP \
+         (ORDER BY triggering_latency.duration) / 1e6, 3) AS p90_ms, \
+         ROUND(MAX(triggering_latency.duration) / 1e6, 2) AS max_ms, \
+         COUNT(*) FILTER (WHERE triggering_latency.duration > 1000000) AS items_over_1ms \
+         FROM items \
+         WHERE triggering_latency IS NOT NULL AND triggering_latency.duration IS NOT NULL",
+    );
+    out.push_str("## Triggering Latency (event propagation)\n");
+    match &trig_latency {
+        Ok(json_str) => {
+            if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
+                if let Some(row) = parsed.first() {
+                    let p90 = row.get("p90_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let max = row.get("max_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let over_1ms = row.get("items_over_1ms").and_then(|v| v.as_u64()).unwrap_or(0);
+                    out.push_str(&format!(
+                        "- P90: {:.3}ms | max: {:.2}ms | items >1ms: {}\n",
+                        p90, max, over_1ms
+                    ));
+                    if p90 > 0.1 {
+                        out.push_str(
+                            "- ELEVATED — event propagation delays may bottleneck pipeline\n",
+                        );
+                    }
+                } else {
+                    out.push_str("(no triggering latency data)\n");
+                }
+            } else {
+                out.push_str(&format!("{}\n", json_str));
+            }
+        }
+        Err(e) => out.push_str(&format!("(error: {})\n", e)),
+    }
+    out.push('\n');
+
+    // ── Python/Legate detection ────────────────────────────────────────────
+    let python = execute_run_query(
+        duckdb_path,
+        "SELECT COUNT(*) AS py_proc_count \
+         FROM entries \
+         WHERE (entry_slug LIKE '%py%' OR short_name LIKE '%Python%') AND type = 'slot'",
+    );
+    out.push_str("## Python/Legate Detection\n");
+    match &python {
+        Ok(json_str) => {
+            if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
+                if let Some(row) = parsed.first() {
+                    let count = row.get("py_proc_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                    if count > 0 {
+                        out.push_str(&format!(
+                            "- PYTHON PROCESSORS DETECTED ({}) — Legate/cuNumeric application likely\n\
+                             - Check for blocking Python operations and materialization syncs\n",
+                            count
+                        ));
+                    } else {
+                        out.push_str("- No Python processors (pure C++/Regent/CUDA application)\n");
+                    }
+                } else {
+                    out.push_str("(no data)\n");
+                }
+            } else {
+                out.push_str(&format!("{}\n", json_str));
+            }
+        }
+        Err(e) => out.push_str(&format!("(error: {})\n", e)),
+    }
+    out.push('\n');
+
     Ok(out)
 }
 
@@ -486,10 +936,29 @@ pub fn tool_definitions(has_duckdb: bool, has_code: bool) -> Vec<serde_json::Val
 
     if has_code {
         tools.push(serde_json::json!({
+            "name": "list_files",
+            "description":
+                "List source files in the code directory tree. Shows files recursively with \
+                 sizes, organized by directory. Use BEFORE read_code to discover what files \
+                 exist. Pass a subdirectory path to narrow the listing.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Subdirectory to list (relative to code root). Empty or '.' for the root."
+                    }
+                },
+                "required": []
+            }
+        }));
+
+        tools.push(serde_json::json!({
             "name": "read_code",
             "description":
                 "Read an application source file (path relative to the configured code root). \
-                 Use to understand task logic, mapper policies, and application structure.",
+                 Use to understand task logic, mapper policies, and application structure. \
+                 Use list_files first to discover available files.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -536,6 +1005,77 @@ pub fn tool_definitions(has_duckdb: bool, has_code: bool) -> Vec<serde_json::Val
                 "stop_ns": {
                     "type": "integer",
                     "description": "End of the zoom range in nanoseconds"
+                }
+            },
+            "required": ["start_ns", "stop_ns"]
+        }
+    }));
+
+    tools.push(serde_json::json!({
+        "name": "pan",
+        "description":
+            "Pan the timeline left or right by a percentage of the visible range. \
+             Returns a screenshot with metadata after panning. Use to explore \
+             adjacent time regions without changing zoom level — e.g. to see \
+             what comes after a gap or to scan across the timeline incrementally.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "direction": {
+                    "type": "string",
+                    "enum": ["left", "right"],
+                    "description": "Direction to pan: \"left\" moves earlier in time, \"right\" moves later."
+                },
+                "percent": {
+                    "type": "number",
+                    "description": "Percentage of the visible range to pan by (default 25). E.g. 50 pans half a screen width."
+                }
+            },
+            "required": ["direction"]
+        }
+    }));
+
+    tools.push(serde_json::json!({
+        "name": "scroll_to",
+        "description":
+            "Scroll the timeline vertically to bring a specific processor row \
+             into view. Identifies the processor by entry_slug (e.g. \"n0_gpu_g0\", \
+             \"n0_util_u0\"). Auto-expands the processor's parent panel if collapsed. \
+             Returns a screenshot with metadata. Use to navigate to a processor of \
+             interest — e.g. scroll to utility rows or channel rows.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "entry_slug": {
+                    "type": "string",
+                    "description": "The entry_slug of the processor to scroll to (e.g. \"n0_gpu_g0\")."
+                }
+            },
+            "required": ["entry_slug"]
+        }
+    }));
+
+    tools.push(serde_json::json!({
+        "name": "set_view",
+        "description":
+            "Combined zoom + optional scroll in one call. Zooms to the given \
+             nanosecond range and optionally scrolls to a specific processor row. \
+             More efficient than separate zoom_to + scroll_to calls. Returns a \
+             screenshot with metadata.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "start_ns": {
+                    "type": "integer",
+                    "description": "Start of the zoom range in nanoseconds"
+                },
+                "stop_ns": {
+                    "type": "integer",
+                    "description": "End of the zoom range in nanoseconds"
+                },
+                "entry_slug": {
+                    "type": "string",
+                    "description": "Optional entry_slug to scroll to after zooming."
                 }
             },
             "required": ["start_ns", "stop_ns"]
