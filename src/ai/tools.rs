@@ -1431,7 +1431,7 @@ pub fn tool_definitions(has_duckdb: bool, has_code: bool) -> Vec<serde_json::Val
                  3. GPU idle gaps (find gaps between consecutive tasks):\n\
                     WITH ordered AS (\n\
                       SELECT running.stop AS task_end,\n\
-                        LEAD(running.start) OVER (ORDER BY running.start) AS next_start\n\
+                        LEAD(running.start) OVER (PARTITION BY entry_slug ORDER BY running.start) AS next_start\n\
                       FROM items\n\
                       WHERE entry_slug LIKE '%gpu%' AND running IS NOT NULL\n\
                     )\n\
@@ -1466,10 +1466,25 @@ pub fn tool_definitions(has_duckdb: bool, has_code: bool) -> Vec<serde_json::Val
                  7. Channel copy analysis:\n\
                     SELECT entry_slug, COUNT(*) AS copy_count,\n\
                       ROUND(SUM(running.duration) / 1e6, 1) AS total_ms,\n\
-                      ROUND(SUM(size) / 1e6, 1) AS total_mb\n\
+                      ROUND(SUM(TRY_CAST(size AS BIGINT)) / 1e6, 1) AS total_mb\n\
                     FROM items\n\
                     WHERE entry_slug LIKE '%chan%' AND running IS NOT NULL\n\
                     GROUP BY entry_slug ORDER BY total_ms DESC\n\n\
+                 8. Utility activity during a time window:\n\
+                    SELECT title, COUNT(*) AS cnt,\n\
+                      ROUND(SUM(running.duration) / 1e6, 1) AS total_ms\n\
+                    FROM items\n\
+                    WHERE entry_slug LIKE '%util%' AND running IS NOT NULL\n\
+                      AND running.start < {end_ns} AND running.stop > {start_ns}\n\
+                    GROUP BY title ORDER BY total_ms DESC\n\n\
+                 9. Tasks with thin pipeline (deferred near zero):\n\
+                    SELECT entry_slug, title, item_uid,\n\
+                      ROUND(deferred.duration / 1e6, 3) AS deferred_ms,\n\
+                      ROUND(running.duration / 1e6, 2) AS run_ms\n\
+                    FROM items\n\
+                    WHERE deferred IS NOT NULL AND deferred.duration < 100000\n\
+                      AND running IS NOT NULL\n\
+                    ORDER BY running.start\n\n\
                  IMPORTANT: You can call this tool multiple times per response to batch independent queries. \
                  Do NOT include LIMIT in your query — a hard cap of 50 rows is applied automatically. \
                  Before writing a query, check the overview's Schema section for exact column names. \
