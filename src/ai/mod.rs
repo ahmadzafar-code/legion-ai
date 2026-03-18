@@ -6,6 +6,7 @@
 
 pub mod agent;
 mod chat_panel;
+pub mod records;
 pub mod tools;
 
 use crate::timestamp::Interval;
@@ -24,4 +25,4 @@ pub struct AiHighlight {
 }
 
 pub use agent::{AgentEvent, Highlight, UiCommand};
-pub use chat_panel::{ChatMessage, ChatMessageKind, ChatPanel, HighlightAction, TimelineSelection};
+pub use chat_panel::{ChatMessage, ChatMessageKind, ChatPanel, HighlightAction, PendingNavigation, TimelineSelection};
