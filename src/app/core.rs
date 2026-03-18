@@ -2292,14 +2292,23 @@ impl ProfApp {
 
         #[cfg(feature = "ai")]
         {
-            // Try multiple paths for diagnostic records (CWD varies)
-            let candidates = [
+            // Try multiple paths for diagnostic records and knowledge (CWD varies)
+            let record_candidates = [
                 std::path::PathBuf::from("diagnostic_records"),
                 std::path::PathBuf::from("prof-viewer/diagnostic_records"),
             ];
-            let knowledge_dir = std::path::Path::new("docs");
+            let knowledge_candidates = [
+                std::path::PathBuf::from("docs"),
+                std::path::PathBuf::from("../docs"),
+                std::path::PathBuf::from("prof-viewer/../docs"),
+            ];
+            let knowledge_dir = knowledge_candidates
+                .iter()
+                .find(|p| p.join("legionconcepts.md").exists())
+                .map(|p| p.as_path())
+                .unwrap_or(std::path::Path::new("docs"));
 
-            if let Some(records_dir) = candidates.iter().find(|p| p.is_dir()) {
+            if let Some(records_dir) = record_candidates.iter().find(|p| p.is_dir()) {
                 match crate::ai::RecordStore::load(records_dir, knowledge_dir) {
                     Ok(store) => {
                         eprintln!("Loaded {} diagnostic records", store.record_count());
