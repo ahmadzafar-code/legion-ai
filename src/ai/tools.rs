@@ -1575,3 +1575,4 @@ pub fn tool_definitions(has_duckdb: bool, has_code: bool) -> Vec<serde_json::Val
 
     tools
 }
+

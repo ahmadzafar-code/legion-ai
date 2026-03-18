@@ -202,4 +202,5 @@ mod tests {
         let beta_pos = store.system_context().find("beta_pattern").unwrap();
         assert!(alpha_pos < beta_pos, "Records should be sorted by id");
     }
+
 }
