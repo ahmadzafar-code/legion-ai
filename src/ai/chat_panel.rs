@@ -49,6 +49,24 @@ pub struct HighlightAction {
     pub zoom_to: bool,
 }
 
+/// A pending navigation action from the agent, consumed by core.rs.
+///
+/// Each variant carries a `request_id` so the UI can send back the screenshot
+/// response to the correct agent request.
+#[derive(Clone, Debug)]
+pub enum PendingNavigation {
+    /// Plain screenshot capture.
+    Screenshot { request_id: u64 },
+    /// Zoom to a time range, then screenshot.
+    Zoom { request_id: u64, start_ns: i64, stop_ns: i64 },
+    /// Pan left/right by a percentage, then screenshot.
+    Pan { request_id: u64, direction: String, percent: f64 },
+    /// Scroll vertically to a processor row, then screenshot.
+    ScrollTo { request_id: u64, entry_slug: String },
+    /// Zoom + optional scroll, then screenshot.
+    SetView { request_id: u64, start_ns: i64, stop_ns: i64, entry_slug: Option<String> },
+}
+
 /// A user's selection on the timeline (like selected code lines in Cursor).
 #[derive(Clone, Debug)]
 pub struct TimelineSelection {
@@ -376,6 +394,8 @@ pub struct ChatPanel {
     model_selection: String,
     /// Free-text application context (e.g. goals, configuration, number of nodes/GPUs).
     app_context_buffer: String,
+    /// Diagnostic knowledge and case records, shared with agent thread.
+    record_store: std::sync::Arc<super::records::RecordStore>,
     /// Persistent agent session (holds conversation history for follow-ups).
     agent_session: Arc<Mutex<Option<AgentSession>>>,
     /// Whether an agent request is currently in flight.
@@ -384,9 +404,9 @@ pub struct ChatPanel {
     event_rx: EventChannel,
     /// Sender for UiCommand messages back to the agent thread (screenshot data).
     ui_command_tx: Option<mpsc::Sender<UiCommand>>,
-    /// Pending screenshot request: (request_id, optional zoom range).
-    /// Set by ScreenshotRequest/ZoomRequest events, consumed by core.rs.
-    pending_screenshot: Option<(u64, Option<(i64, i64)>)>,
+    /// Pending navigation action from the agent thread, consumed by core.rs.
+    /// Set by ScreenshotRequest/ZoomRequest/PanRequest/etc events.
+    pending_navigation: Option<PendingNavigation>,
     /// User-initiated highlight actions from chip clicks, consumed by core.rs.
     pending_highlight_actions: Vec<HighlightAction>,
 }
@@ -413,11 +433,12 @@ impl Clone for ChatPanel {
             api_key_buffer: self.api_key_buffer.clone(),
             model_selection: self.model_selection.clone(),
             app_context_buffer: self.app_context_buffer.clone(),
+            record_store: Arc::clone(&self.record_store),
             agent_session: Arc::clone(&self.agent_session),
             pending_request: self.pending_request,
             event_rx: Arc::clone(&self.event_rx),
             ui_command_tx: self.ui_command_tx.clone(),
-            pending_screenshot: self.pending_screenshot,
+            pending_navigation: self.pending_navigation.clone(),
             pending_highlight_actions: self.pending_highlight_actions.clone(),
         }
     }
@@ -468,13 +489,19 @@ impl ChatPanel {
             api_key_buffer: String::new(),
             model_selection: "claude-sonnet-4-20250514".into(),
             app_context_buffer: String::new(),
+            record_store: std::sync::Arc::new(super::records::RecordStore::empty()),
             agent_session: Arc::new(Mutex::new(None)),
             pending_request: false,
             event_rx: Arc::new(Mutex::new(None)),
             ui_command_tx: None,
-            pending_screenshot: None,
+            pending_navigation: None,
             pending_highlight_actions: Vec::new(),
         }
+    }
+
+    /// Set the diagnostic record store (loaded at startup).
+    pub fn set_record_store(&mut self, store: std::sync::Arc<super::records::RecordStore>) {
+        self.record_store = store;
     }
 
     /// Toggle panel visibility.
@@ -515,13 +542,13 @@ impl ChatPanel {
         std::mem::take(&mut self.pending_highlight_actions)
     }
 
-    /// Take a pending screenshot/zoom request, if any.
+    /// Take the pending navigation action, if any.
     ///
-    /// Returns `(request_id, zoom_range)` where `zoom_range` is `None` for a
-    /// plain screenshot or `Some((start_ns, stop_ns))` for a zoom-then-capture.
     /// Called once per frame from `ProfApp::update()` in core.rs.
-    pub fn take_pending_screenshot(&mut self) -> Option<(u64, Option<(i64, i64)>)> {
-        self.pending_screenshot.take()
+    /// Core.rs applies the navigation action, captures a screenshot, and sends
+    /// the result back to the agent thread.
+    pub fn take_pending_navigation(&mut self) -> Option<PendingNavigation> {
+        self.pending_navigation.take()
     }
 
     /// Send screenshot data back to the agent thread.
@@ -640,14 +667,35 @@ impl ChatPanel {
                     );
                 }
                 AgentEvent::ScreenshotRequest { request_id } => {
-                    self.pending_screenshot = Some((request_id, None));
+                    self.pending_navigation = Some(PendingNavigation::Screenshot { request_id });
                 }
                 AgentEvent::ZoomRequest {
                     request_id,
                     start_ns,
                     stop_ns,
                 } => {
-                    self.pending_screenshot = Some((request_id, Some((start_ns, stop_ns))));
+                    self.pending_navigation = Some(PendingNavigation::Zoom { request_id, start_ns, stop_ns });
+                }
+                AgentEvent::PanRequest {
+                    request_id,
+                    direction,
+                    percent,
+                } => {
+                    self.pending_navigation = Some(PendingNavigation::Pan { request_id, direction, percent });
+                }
+                AgentEvent::ScrollToRequest {
+                    request_id,
+                    entry_slug,
+                } => {
+                    self.pending_navigation = Some(PendingNavigation::ScrollTo { request_id, entry_slug });
+                }
+                AgentEvent::SetViewRequest {
+                    request_id,
+                    start_ns,
+                    stop_ns,
+                    entry_slug,
+                } => {
+                    self.pending_navigation = Some(PendingNavigation::SetView { request_id, start_ns, stop_ns, entry_slug });
                 }
                 AgentEvent::Complete(response) => {
                     let display = if response.text.len() > 10_000 {
@@ -729,18 +777,7 @@ impl ChatPanel {
 
         // Tool paths from dedicated fields
         let duckdb_path = self.duckdb_path_buffer.trim().to_owned();
-        // If code path points to a file (e.g. a .rg file), use its parent directory.
-        let code_path = {
-            let raw = self.code_path_buffer.trim();
-            let p = std::path::Path::new(raw);
-            if !raw.is_empty() && p.is_file() {
-                p.parent()
-                    .map(|d| d.to_string_lossy().to_string())
-                    .unwrap_or_else(|| raw.to_owned())
-            } else {
-                raw.to_owned()
-            }
-        };
+        let code_path = self.code_path_buffer.trim().to_owned();
 
         // Self-healing: if DB is needed but not ready, guide the user (Part E)
         let db_status = self.tool_status_db();
@@ -870,6 +907,7 @@ impl ChatPanel {
         let app_context = self.app_context_buffer.clone();
         let model = self.model_selection.clone();
         let session_arc = Arc::clone(&self.agent_session);
+        let record_store = Arc::clone(&self.record_store);
         let query_clone = user_query;
 
         // Create bidirectional channels for this request
@@ -900,6 +938,7 @@ impl ChatPanel {
                     app_context,
                     event_tx.clone(),
                     cmd_rx,
+                    record_store,
                 ),
             };
 

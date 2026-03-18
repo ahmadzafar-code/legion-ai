@@ -71,6 +71,24 @@ pub enum AgentEvent {
         start_ns: i64,
         stop_ns: i64,
     },
+    /// Agent wants to pan left/right and get a screenshot.
+    PanRequest {
+        request_id: u64,
+        direction: String,
+        percent: f64,
+    },
+    /// Agent wants to scroll vertically to a processor and get a screenshot.
+    ScrollToRequest {
+        request_id: u64,
+        entry_slug: String,
+    },
+    /// Agent wants to zoom + optionally scroll in one call.
+    SetViewRequest {
+        request_id: u64,
+        start_ns: i64,
+        stop_ns: i64,
+        entry_slug: Option<String>,
+    },
     /// Agentic loop finished successfully.
     Complete(AgentResponse),
     /// Agentic loop failed with an error.
@@ -117,6 +135,9 @@ pub struct AgentSession {
     // Computed once at session creation
     system_prompt: String,
     tools: Vec<Value>,
+    /// Diagnostic knowledge and case records for system prompt injection.
+    #[allow(dead_code)] // kept for prompt rebuilds (Task 5)
+    record_store: std::sync::Arc<super::records::RecordStore>,
 
     // Bidirectional channel endpoints (agent ↔ UI thread)
     event_tx: mpsc::Sender<AgentEvent>,
@@ -139,12 +160,13 @@ impl AgentSession {
         app_context: String,
         event_tx: mpsc::Sender<AgentEvent>,
         command_rx: mpsc::Receiver<UiCommand>,
+        record_store: std::sync::Arc<super::records::RecordStore>,
     ) -> Self {
         let has_duckdb = cfg!(feature = "duckdb") && !duckdb_path.is_empty();
         let has_code = !code_path.is_empty();
         let tools = super::tools::tool_definitions(has_duckdb, has_code);
 
-        let system_prompt = build_system_prompt(&model);
+        let system_prompt = build_system_prompt(&model, &record_store);
 
         // If code_path is a file, resolve to parent directory and store the
         // file path separately for direct pre-loading in build_scan_message().
@@ -172,6 +194,7 @@ impl AgentSession {
             max_turns: 25,
             system_prompt,
             tools,
+            record_store,
             event_tx,
             command_rx,
             next_request_id: 0,
@@ -242,6 +265,28 @@ impl AgentSession {
             }
         }
 
+        self.wait_for_screenshot(request_id)
+    }
+
+    /// Allocate a new request ID for navigation commands.
+    fn alloc_request_id(&mut self) -> u64 {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        id
+    }
+
+    /// Send a navigation event to the UI thread and wait for the resulting screenshot.
+    ///
+    /// The UI thread applies the navigation action, captures a screenshot, and
+    /// responds with `UiCommand::ScreenshotData`. Caller embeds `request_id`
+    /// (from `alloc_request_id()`) into the event before passing it here.
+    fn request_navigation(&mut self, request_id: u64, event: AgentEvent) -> Result<String, String> {
+        self.emit(event);
+        self.wait_for_screenshot(request_id)
+    }
+
+    /// Block until the UI thread sends back `ScreenshotData` with the given `request_id`.
+    fn wait_for_screenshot(&mut self, request_id: u64) -> Result<String, String> {
         // Wait for the UI thread to respond (timeout after 10 seconds)
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
@@ -338,28 +383,25 @@ impl AgentSession {
                         ));
                     }
                 }
-                if let Some(listing) = list_source_files(&self.code_path) {
-                    msg.push_str(&format!(
-                        "### Other files in `{}` available via `read_code` tool:\n",
-                        self.code_path
-                    ));
-                    msg.push_str(&listing);
+                if let Ok(tree) = super::tools::recursive_file_tree(&self.code_path) {
+                    msg.push_str("### Other files available via `list_files` / `read_code`:\n");
+                    msg.push_str(&tree);
                     msg.push('\n');
                 }
             } else {
                 // ── User pointed at a directory — scan for source files ──
-                let file_listing = list_source_files(&self.code_path);
+                let file_tree = super::tools::recursive_file_tree(&self.code_path).ok();
 
                 match gather_application_code(&self.code_path) {
                     Some(code_block) => {
                         msg.push_str("## Application Source Code\n\n");
                         msg.push_str(&code_block);
                         msg.push('\n');
-                        if let Some(listing) = &file_listing {
+                        if let Some(tree) = &file_tree {
                             msg.push_str(
-                                "### Additional files available via `read_code` tool:\n",
+                                "### Additional files available via `list_files` / `read_code`:\n",
                             );
-                            msg.push_str(listing);
+                            msg.push_str(tree);
                             msg.push('\n');
                         }
                     }
@@ -369,14 +411,14 @@ impl AgentSession {
                              Source code directory: `{}`\n",
                             self.code_path
                         ));
-                        if let Some(listing) = &file_listing {
+                        if let Some(tree) = &file_tree {
                             msg.push_str(
-                                "Available files (use `read_code` tool to read):\n",
+                                "Available files (use `list_files` to browse, `read_code` to read):\n",
                             );
-                            msg.push_str(listing);
+                            msg.push_str(tree);
                         } else {
                             msg.push_str(
-                                "No source files found. Use `read_code` tool to browse.\n",
+                                "No source files found. Use `list_files` tool to browse.\n",
                             );
                         }
                         msg.push('\n');
@@ -397,7 +439,9 @@ impl AgentSession {
              Use the visual patterns and metadata (color legend, per-row info) to identify \
              the most significant issue, then use `run_query` to quantify what you see. \
              Call `run_query` multiple times per response to batch independent queries. \
-             Use `zoom_to` to examine regions of interest in detail.",
+             Use `zoom_to` to examine regions of interest in detail. \
+             Use `pan` to explore adjacent time regions, `scroll_to` to navigate \
+             to specific processors, or `set_view` for combined zoom + scroll.",
         );
 
         Ok(msg)
@@ -599,6 +643,14 @@ impl AgentSession {
                 }
             }
 
+            "list_files" => {
+                let path = input
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(".");
+                super::tools::execute_list_files(&self.code_path, path)
+            }
+
             "read_code" => {
                 let path = input
                     .get("path")
@@ -619,6 +671,61 @@ impl AgentSession {
                     .and_then(|v| v.as_i64())
                     .ok_or("zoom_to requires stop_ns (integer)")?;
                 self.request_screenshot(Some((start_ns, stop_ns)))
+            }
+
+            "pan" => {
+                let direction = input
+                    .get("direction")
+                    .and_then(|v| v.as_str())
+                    .ok_or("pan requires direction (\"left\" or \"right\")")?;
+                if direction != "left" && direction != "right" {
+                    return Err("direction must be \"left\" or \"right\"".into());
+                }
+                let percent = input
+                    .get("percent")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(25.0)
+                    .clamp(1.0, 200.0);
+                let request_id = self.alloc_request_id();
+                self.request_navigation(request_id, AgentEvent::PanRequest {
+                    request_id,
+                    direction: direction.to_owned(),
+                    percent,
+                })
+            }
+
+            "scroll_to" => {
+                let entry_slug = input
+                    .get("entry_slug")
+                    .and_then(|v| v.as_str())
+                    .ok_or("scroll_to requires entry_slug (string)")?;
+                let request_id = self.alloc_request_id();
+                self.request_navigation(request_id, AgentEvent::ScrollToRequest {
+                    request_id,
+                    entry_slug: entry_slug.to_owned(),
+                })
+            }
+
+            "set_view" => {
+                let start_ns = input
+                    .get("start_ns")
+                    .and_then(|v| v.as_i64())
+                    .ok_or("set_view requires start_ns (integer)")?;
+                let stop_ns = input
+                    .get("stop_ns")
+                    .and_then(|v| v.as_i64())
+                    .ok_or("set_view requires stop_ns (integer)")?;
+                let entry_slug = input
+                    .get("entry_slug")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_owned());
+                let request_id = self.alloc_request_id();
+                self.request_navigation(request_id, AgentEvent::SetViewRequest {
+                    request_id,
+                    start_ns,
+                    stop_ns,
+                    entry_slug,
+                })
             }
 
             _ => Err(format!("Unknown tool: {name}")),
@@ -800,60 +907,10 @@ fn gather_application_code(code_root: &str) -> Option<String> {
     if out.is_empty() { None } else { Some(out) }
 }
 
-/// List source files in the code root directory, returning a compact listing.
-///
-/// Returns `None` if the directory is unreadable or contains no source files.
-/// Unlike `gather_application_code()` which reads file contents, this only
-/// lists filenames and sizes so the agent knows what's available for `read_code`.
-fn list_source_files(code_root: &str) -> Option<String> {
-    const SOURCE_EXTS: &[&str] = &[
-        "cc", "cpp", "c", "h", "hpp", "cu", "cuh", "py", "rs", "rg",
-        "mk", "cmake", "toml", "json", "yaml", "yml", "txt", "md",
-    ];
-
-    let root = std::path::Path::new(code_root);
-
-    let mut files: Vec<(String, u64)> = std::fs::read_dir(root)
-        .ok()?
-        .flatten()
-        .filter_map(|e| {
-            let p = e.path();
-            if !p.is_file() {
-                return None;
-            }
-            let ext = p.extension()?.to_str()?;
-            if !SOURCE_EXTS.contains(&ext) {
-                return None;
-            }
-            let name = p.file_name()?.to_string_lossy().to_string();
-            let size = e.metadata().ok()?.len();
-            Some((name, size))
-        })
-        .collect();
-
-    if files.is_empty() {
-        return None;
-    }
-
-    files.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let mut out = String::new();
-    for (name, size) in &files {
-        let size_str = if *size > 1024 {
-            format!("{}KB", size / 1024)
-        } else {
-            format!("{}B", size)
-        };
-        out.push_str(&format!("- {} ({})\n", name, size_str));
-    }
-
-    Some(out)
-}
-
 // ── Highlight extraction ─────────────────────────────────────────────────────
 
-fn build_system_prompt(model: &str) -> String {
-    let base = r#"You are a Legion Runtime performance diagnostician. You analyze profiling data from Legion — a task-based runtime for distributed heterogeneous HPC systems. You have access to: timeline screenshots (via screenshot/zoom_to), a DuckDB profiling database (via run_query), and application source code (via read_code).
+fn build_system_prompt(model: &str, record_store: &super::records::RecordStore) -> String {
+    let base = r#"You are a Legion Runtime performance diagnostician. You analyze profiling data from Legion — a task-based runtime for distributed heterogeneous HPC systems. You have access to: timeline screenshots (via screenshot/zoom_to/pan), navigation controls (scroll_to, set_view), a DuckDB profiling database (via run_query), and application source code (via list_files to discover files, read_code to read them).
 
 ## Legion Execution Model
 
@@ -985,7 +1042,7 @@ Check in priority order:
 
 ## Source Code Analysis
 
-When application source code is available (pre-loaded in the scan message or via read_code), extract these diagnostic signals before making recommendations:
+When application source code is available (pre-loaded in the scan message or via read_code), extract these diagnostic signals before making recommendations. Use `list_files` to discover available source files before calling `read_code` — do NOT guess filenames:
 
 **Tracing configuration** (check FIRST — wrong tracing advice is the most common diagnostic error):
 - Explicit tracing annotations: Regent `__demand(__trace)`, C++ `begin_trace()`/`end_trace()`, Legate automatic tracing. If present, tracing is already enabled — do NOT recommend `-dm:memoize`.
@@ -1094,7 +1151,25 @@ Rules:
 - `entry_slug` must match a slug from the profiling database (e.g. `n0_cpu_c0`, `n0_gpu_g0`)
 - Use RELATIVE severity thresholds above
 - Place highlights JSON as the LAST block — the parser expects it at the end
-- No issues? `{"highlights": []}`"#;
+- No issues? `{"highlights": []}`
+
+## Navigation vs Analysis
+
+Distinguish between navigation commands and analysis requests:
+
+**Navigation-only commands** — the user wants you to move the view, NOT analyze. Just execute the navigation tool, briefly describe what is now visible, and stop. Do NOT run queries or provide analysis unless asked. Examples:
+- "zoom into the utility processors" → use zoom_to/set_view to show utility rows, describe what you see visually, stop.
+- "pan right" → use pan, describe what's now visible, stop.
+- "scroll to the GPU rows" → use scroll_to, describe what's now visible, stop.
+- "show me [time range]" → use zoom_to, describe what's now visible, stop.
+
+**Analysis requests** — the user wants investigation. Run the full diagnostic protocol. Examples:
+- "why is this gap here?" → analyze with queries + screenshots.
+- "what's causing the overhead?" → full diagnostic protocol.
+- "analyze the utility processor overhead" → queries + root cause.
+- "find performance issues" → full scan.
+
+When in doubt: if the user's message is a short imperative about viewing (zoom, pan, scroll, show), treat it as navigation-only. If it asks why/what/how or mentions analysis/diagnosis/issues, treat it as an analysis request."#;
 
     // Append model-specific analysis scope
     let suffix = if model.contains("opus") {
@@ -1110,7 +1185,13 @@ Rules:
          than shallow on many."
     };
 
-    format!("{}{}", base, suffix)
+    // TODO(task5): restructure prompt sections
+    let knowledge = record_store.system_context();
+    if knowledge.is_empty() {
+        format!("{}{}", base, suffix)
+    } else {
+        format!("{}{}\n\n{}", base, suffix, knowledge)
+    }
 }
 
 /// Extract highlights from the agent's final text response.

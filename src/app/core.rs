@@ -334,6 +334,13 @@ struct Context {
     #[cfg(feature = "ai")]
     #[serde(skip)]
     awaiting_screenshot: Option<u64>,
+
+    /// Agent-requested vertical scroll target. The rendering code scrolls to
+    /// this entry's position and clears the field. Set by `ScrollToRequest`
+    /// and `SetViewRequest` navigation events.
+    #[cfg(feature = "ai")]
+    #[serde(skip)]
+    ai_scroll_to_entry: Option<crate::data::EntryID>,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -1917,6 +1924,14 @@ impl Window {
                     self.config.scroll_to_item = None;
                 }
 
+                // Agent-requested scroll to a processor row (no specific item).
+                #[cfg(feature = "ai")]
+                if let Some(ref entry_id) = cx.ai_scroll_to_entry {
+                    let prefix_height = self.panel.height(Some(entry_id), &self.config, cx);
+                    scroll_to(0, prefix_height);
+                    cx.ai_scroll_to_entry = None;
+                }
+
                 // If we're able to find the item, we do a second scroll to the item
                 let mut found_irow = None;
                 if let Some(ItemLocator {
@@ -2274,6 +2289,33 @@ impl ProfApp {
 
         result.cx.scale_factor = 1.0;
         result.cx.row_scroll_delta = 0;
+
+        #[cfg(feature = "ai")]
+        {
+            // Try multiple paths for diagnostic records (CWD varies)
+            let candidates = [
+                std::path::PathBuf::from("diagnostic_records"),
+                std::path::PathBuf::from("prof-viewer/diagnostic_records"),
+            ];
+            let knowledge_dir = std::path::Path::new("docs");
+
+            if let Some(records_dir) = candidates.iter().find(|p| p.is_dir()) {
+                match crate::ai::RecordStore::load(records_dir, knowledge_dir) {
+                    Ok(store) => {
+                        eprintln!("Loaded {} diagnostic records", store.record_count());
+                        result
+                            .cx
+                            .chat_panel
+                            .set_record_store(std::sync::Arc::new(store));
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to load diagnostic records: {e}");
+                    }
+                }
+            } else {
+                eprintln!("No diagnostic records directory found, running without case library");
+            }
+        }
 
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -3075,15 +3117,61 @@ impl eframe::App for ProfApp {
                 cx.chat_panel.send_screenshot(request_id, png_bytes, metadata);
             }
 
-            // Phase 2: Check for new screenshot requests from the agent thread.
-            if let Some((request_id, zoom_range)) = cx.chat_panel.take_pending_screenshot() {
-                if let Some((start_ns, stop_ns)) = zoom_range {
-                    let interval = Interval::new(
-                        Timestamp(start_ns),
-                        Timestamp(stop_ns),
-                    );
-                    ProfApp::zoom(cx, interval);
+            // Phase 2: Check for new navigation requests from the agent thread.
+            if let Some(nav) = cx.chat_panel.take_pending_navigation() {
+                use crate::ai::PendingNavigation;
+                let request_id = match &nav {
+                    PendingNavigation::Screenshot { request_id }
+                    | PendingNavigation::Zoom { request_id, .. }
+                    | PendingNavigation::Pan { request_id, .. }
+                    | PendingNavigation::ScrollTo { request_id, .. }
+                    | PendingNavigation::SetView { request_id, .. } => *request_id,
+                };
+
+                match nav {
+                    PendingNavigation::Screenshot { .. } => {
+                        // Plain screenshot — no navigation changes needed.
+                    }
+                    PendingNavigation::Zoom { start_ns, stop_ns, .. } => {
+                        let interval = Interval::new(Timestamp(start_ns), Timestamp(stop_ns));
+                        ProfApp::zoom(cx, interval);
+                    }
+                    PendingNavigation::Pan { direction, percent, .. } => {
+                        let pct = (percent.round() as i64).clamp(1, 200);
+                        let dir = if direction == "left" {
+                            PanDirection::Left
+                        } else {
+                            PanDirection::Right
+                        };
+                        ProfApp::pan(cx, Percentage::from(pct), dir);
+                    }
+                    PendingNavigation::ScrollTo { entry_slug, .. } => {
+                        // Resolve slug → EntryID, expand parent, set scroll target.
+                        for window in windows.iter_mut() {
+                            let slug_map = build_slug_map(window);
+                            if let Some(entry_id) = slug_map.get(&entry_slug) {
+                                window.expand_slot(entry_id);
+                                cx.ai_scroll_to_entry = Some(entry_id.clone());
+                                break;
+                            }
+                        }
+                    }
+                    PendingNavigation::SetView { start_ns, stop_ns, entry_slug, .. } => {
+                        let interval = Interval::new(Timestamp(start_ns), Timestamp(stop_ns));
+                        ProfApp::zoom(cx, interval);
+                        if let Some(slug) = entry_slug {
+                            for window in windows.iter_mut() {
+                                let slug_map = build_slug_map(window);
+                                if let Some(entry_id) = slug_map.get(&slug) {
+                                    window.expand_slot(entry_id);
+                                    cx.ai_scroll_to_entry = Some(entry_id.clone());
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
+
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
                 cx.awaiting_screenshot = Some(request_id);
             }

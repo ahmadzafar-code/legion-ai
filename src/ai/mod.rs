@@ -26,3 +26,4 @@ pub struct AiHighlight {
 
 pub use agent::{AgentEvent, Highlight, UiCommand};
 pub use chat_panel::{ChatMessage, ChatMessageKind, ChatPanel, HighlightAction, PendingNavigation, TimelineSelection};
+pub use records::RecordStore;
