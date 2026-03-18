@@ -839,7 +839,498 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     }
     out.push('\n');
 
+    // ── GC and instance activity ───────────────────────────────────────────
+    let gc = execute_run_query(
+        duckdb_path,
+        "SELECT \
+         COUNT(*) FILTER (WHERE title LIKE '%Garbage Collection%' \
+                            OR title LIKE '%Free Instance%' \
+                            OR title LIKE '%Malloc Instance%') AS gc_count, \
+         ROUND(COALESCE(SUM(running.duration) FILTER (WHERE title LIKE '%Garbage Collection%' \
+                                                        OR title LIKE '%Free Instance%' \
+                                                        OR title LIKE '%Malloc Instance%'), 0) / 1e6, 1) AS gc_total_ms, \
+         COUNT(*) FILTER (WHERE entry_slug LIKE '%system%' \
+                            OR entry_slug LIKE '%fbmem%' \
+                            OR entry_slug LIKE '%zcmem%') AS instance_items \
+         FROM items WHERE running IS NOT NULL",
+    );
+    out.push_str("## GC and Instance Activity\n");
+    match &gc {
+        Ok(json_str) => {
+            if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
+                if let Some(row) = parsed.first() {
+                    let gc_count = row.get("gc_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let gc_ms = row.get("gc_total_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let inst = row.get("instance_items").and_then(|v| v.as_u64()).unwrap_or(0);
+                    if gc_count > 0 {
+                        out.push_str(&format!(
+                            "- GC activity detected: {} events, {:.1}ms — check for memory pressure\n",
+                            gc_count, gc_ms
+                        ));
+                    } else {
+                        out.push_str("- No GC activity detected\n");
+                    }
+                    out.push_str(&format!("- Instance-related items: {}\n", inst));
+                } else {
+                    out.push_str("(no data)\n");
+                }
+            } else {
+                out.push_str(&format!("{}\n", json_str));
+            }
+        }
+        Err(e) => {
+            if e.contains("not found") {
+                out.push_str("Not available in this profile\n");
+            } else {
+                out.push_str(&format!("(error: {})\n", e));
+            }
+        }
+    }
+    out.push('\n');
+
+    // ── Per-node utility balance ───────────────────────────────────────────
+    let node_util = execute_run_query(
+        duckdb_path,
+        "SELECT \
+         SPLIT_PART(entry_slug, '_', 1) AS node, \
+         COUNT(DISTINCT entry_slug) AS util_procs, \
+         ROUND(SUM(running.duration) / 1e6, 1) AS total_busy_ms \
+         FROM items \
+         WHERE entry_slug LIKE '%util%' AND running IS NOT NULL \
+         GROUP BY node ORDER BY node",
+    );
+    out.push_str("## Per-Node Utility Balance\n");
+    match &node_util {
+        Ok(json_str) => {
+            if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
+                if parsed.len() <= 1 {
+                    out.push_str("- Single-node profile — balanced by definition\n");
+                    for row in &parsed {
+                        let node = row.get("node").and_then(|v| v.as_str()).unwrap_or("?");
+                        let ms = row.get("total_busy_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        out.push_str(&format!("- {}: {:.1}ms utility busy\n", node, ms));
+                    }
+                } else {
+                    let mut min_ms = f64::MAX;
+                    let mut max_ms = 0.0_f64;
+                    let mut min_node = "?".to_string();
+                    let mut max_node = "?".to_string();
+                    for row in &parsed {
+                        let node = row.get("node").and_then(|v| v.as_str()).unwrap_or("?");
+                        let ms = row.get("total_busy_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        out.push_str(&format!("- {}: {:.1}ms utility busy\n", node, ms));
+                        if ms < min_ms {
+                            min_ms = ms;
+                            min_node = node.to_string();
+                        }
+                        if ms > max_ms {
+                            max_ms = ms;
+                            max_node = node.to_string();
+                        }
+                    }
+                    let ratio = max_ms / min_ms.max(0.1);
+                    if ratio > 3.0 {
+                        out.push_str(&format!(
+                            "- IMBALANCED — {} has {:.1}x more utility work than {}. Check control replication.\n",
+                            max_node, ratio, min_node
+                        ));
+                    } else {
+                        out.push_str(&format!("- Balanced across {} nodes\n", parsed.len()));
+                    }
+                }
+                if parsed.is_empty() {
+                    out.push_str("(no utility data)\n");
+                }
+            } else {
+                out.push_str(&format!("{}\n", json_str));
+            }
+        }
+        Err(e) => {
+            if e.contains("not found") {
+                out.push_str("Not available in this profile\n");
+            } else {
+                out.push_str(&format!("(error: {})\n", e));
+            }
+        }
+    }
+    out.push('\n');
+
+    // ── Channel direction analysis ─────────────────────────────────────────
+    let chan_dir = execute_run_query(
+        duckdb_path,
+        "SELECT entry_slug, COUNT(*) AS copy_count, \
+         ROUND(SUM(running.duration) / 1e6, 1) AS total_ms, \
+         ROUND(COALESCE(SUM(TRY_CAST(size AS BIGINT)), 0) / 1e6, 1) AS total_mb \
+         FROM items \
+         WHERE entry_slug LIKE '%chan%' AND running IS NOT NULL \
+         GROUP BY entry_slug ORDER BY total_ms DESC",
+    );
+    out.push_str("## Channel Direction Analysis\n");
+    match &chan_dir {
+        Ok(json_str) => {
+            if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
+                let mut has_pcie = false;
+                let mut has_inter_node = false;
+                let count = parsed.len().min(5);
+                if parsed.is_empty() {
+                    out.push_str("- No channel copy activity\n");
+                } else {
+                    for row in parsed.iter().take(5) {
+                        let slug = row.get("entry_slug").and_then(|v| v.as_str()).unwrap_or("?");
+                        let copies = row.get("copy_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let ms = row.get("total_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let mb = row.get("total_mb").and_then(|v| v.as_f64()).unwrap_or(0.0);
+
+                        // Classify channel direction from slug
+                        let direction = classify_channel_slug(slug);
+                        if direction.contains("PCIe") {
+                            has_pcie = true;
+                        }
+                        if direction.contains("inter-node") {
+                            has_inter_node = true;
+                        }
+
+                        out.push_str(&format!(
+                            "- {} [{}]: {} copies, {:.1}ms, {:.1}MB\n",
+                            slug, direction, copies, ms, mb
+                        ));
+                    }
+                    if parsed.len() > 5 {
+                        out.push_str(&format!("  ... and {} more channels\n", parsed.len() - 5));
+                    }
+                    if has_pcie {
+                        out.push_str("- PCIe copies detected — check mapper memory placement\n");
+                    }
+                    if has_inter_node {
+                        out.push_str("- Inter-node copies detected — check sharding/placement\n");
+                    }
+                }
+                let _ = count; // suppress unused warning
+            } else {
+                out.push_str(&format!("{}\n", json_str));
+            }
+        }
+        Err(e) => {
+            if e.contains("not found") {
+                out.push_str("Not available in this profile\n");
+            } else {
+                out.push_str(&format!("(error: {})\n", e));
+            }
+        }
+    }
+    out.push('\n');
+
+    // ── Copy-to-compute ratio ──────────────────────────────────────────────
+    let copy_ratio = execute_run_query(
+        duckdb_path,
+        "WITH copy_time AS ( \
+           SELECT COALESCE(SUM(running.duration), 0) AS copy_ns \
+           FROM items WHERE entry_slug LIKE '%chan%' AND running IS NOT NULL \
+         ), \
+         compute_time AS ( \
+           SELECT COALESCE(SUM(running.duration), 0) AS compute_ns \
+           FROM items \
+           WHERE (entry_slug LIKE '%cpu%' OR entry_slug LIKE '%gpu%') \
+             AND entry_slug NOT LIKE '%util%' AND running IS NOT NULL \
+         ) \
+         SELECT \
+           ROUND(ct.copy_ns / 1e6, 1) AS copy_total_ms, \
+           ROUND(cm.compute_ns / 1e6, 1) AS compute_total_ms, \
+           ROUND(ct.copy_ns * 100.0 / GREATEST(ct.copy_ns + cm.compute_ns, 1), 1) AS copy_pct \
+         FROM copy_time ct, compute_time cm",
+    );
+    out.push_str("## Copy-to-Compute Ratio\n");
+    match &copy_ratio {
+        Ok(json_str) => {
+            if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
+                if let Some(row) = parsed.first() {
+                    let copy_ms = row.get("copy_total_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let compute_ms = row.get("compute_total_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let pct = row.get("copy_pct").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    out.push_str(&format!(
+                        "- Copy: {:.1}ms | Compute: {:.1}ms | Copy burden: {:.1}%\n",
+                        copy_ms, compute_ms, pct
+                    ));
+                    if pct > 30.0 {
+                        out.push_str("- Data movement DOMINATED — investigate mapper placement\n");
+                    } else if pct > 10.0 {
+                        out.push_str("- Moderate copy overhead\n");
+                    }
+                } else {
+                    out.push_str("(no data)\n");
+                }
+            } else {
+                out.push_str(&format!("{}\n", json_str));
+            }
+        }
+        Err(e) => {
+            if e.contains("not found") {
+                out.push_str("Not available in this profile\n");
+            } else {
+                out.push_str(&format!("(error: {})\n", e));
+            }
+        }
+    }
+    out.push('\n');
+
+    // ── Scheduling overhead ────────────────────────────────────────────────
+    let sched_overhead = execute_run_query(
+        duckdb_path,
+        "SELECT \
+         ROUND(PERCENTILE_CONT(0.9) WITHIN GROUP \
+           (ORDER BY scheduling_overhead.duration) / 1e6, 2) AS p90_overhead_ms, \
+         ROUND(AVG(scheduling_overhead.duration) / 1e6, 2) AS avg_overhead_ms, \
+         COUNT(*) AS items_with_overhead \
+         FROM items \
+         WHERE scheduling_overhead IS NOT NULL \
+           AND scheduling_overhead.duration IS NOT NULL",
+    );
+    out.push_str("## Scheduling Overhead\n");
+    match &sched_overhead {
+        Ok(json_str) => {
+            if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
+                if let Some(row) = parsed.first() {
+                    let p90 = row.get("p90_overhead_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let avg = row.get("avg_overhead_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let count = row.get("items_with_overhead").and_then(|v| v.as_u64()).unwrap_or(0);
+                    out.push_str(&format!(
+                        "- P90: {:.2}ms | Avg: {:.2}ms ({} items)\n",
+                        p90, avg, count
+                    ));
+                    if p90 > 1.0 {
+                        out.push_str(
+                            "- Per-task scheduling overhead >1ms at P90 — tasks may be below METG\n",
+                        );
+                    }
+                } else {
+                    out.push_str("(no scheduling overhead data)\n");
+                }
+            } else {
+                out.push_str(&format!("{}\n", json_str));
+            }
+        }
+        Err(e) => {
+            if e.contains("not found") {
+                out.push_str("Not available in this profile\n");
+            } else {
+                out.push_str(&format!("(error: {})\n", e));
+            }
+        }
+    }
+    out.push('\n');
+
+    // ── Application processor balance ──────────────────────────────────────
+    let proc_balance = execute_run_query(
+        duckdb_path,
+        "WITH bounds AS ( \
+           SELECT MIN(lifetime.start) AS t_start, MAX(lifetime.stop) AS t_stop FROM items \
+         ), \
+         per_proc AS ( \
+           SELECT entry_slug, \
+             CASE \
+               WHEN entry_slug LIKE '%gpu%' THEN 'GPU' \
+               WHEN entry_slug LIKE '%cpu%' AND entry_slug NOT LIKE '%util%' THEN 'CPU' \
+               ELSE 'Other' \
+             END AS kind, \
+             ROUND(SUM(running.duration) * 100.0 / (b.t_stop - b.t_start), 1) AS util_pct \
+           FROM items CROSS JOIN bounds b \
+           WHERE running IS NOT NULL \
+             AND (entry_slug LIKE '%gpu%' OR \
+                  (entry_slug LIKE '%cpu%' AND entry_slug NOT LIKE '%util%')) \
+           GROUP BY entry_slug, kind, b.t_stop, b.t_start \
+         ) \
+         SELECT kind, COUNT(*) AS proc_count, \
+           ROUND(MIN(util_pct), 1) AS min_util, \
+           ROUND(MAX(util_pct), 1) AS max_util, \
+           ROUND(AVG(util_pct), 1) AS avg_util \
+         FROM per_proc GROUP BY kind ORDER BY kind",
+    );
+    out.push_str("## Application Processor Balance\n");
+    match &proc_balance {
+        Ok(json_str) => {
+            if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
+                for row in &parsed {
+                    let kind = row.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
+                    let count = row.get("proc_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let min_u = row.get("min_util").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let max_u = row.get("max_util").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let avg_u = row.get("avg_util").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    out.push_str(&format!(
+                        "- {}: {} procs, min {:.1}%, max {:.1}%, avg {:.1}%\n",
+                        kind, count, min_u, max_u, avg_u
+                    ));
+                    let ratio = max_u / min_u.max(0.1);
+                    if ratio > 2.0 {
+                        out.push_str(&format!(
+                            "  IMBALANCED — {:.1}x spread across {} processors\n",
+                            ratio, kind
+                        ));
+                    }
+                }
+                if parsed.is_empty() {
+                    out.push_str("(no application processor data)\n");
+                }
+            } else {
+                out.push_str(&format!("{}\n", json_str));
+            }
+        }
+        Err(e) => {
+            if e.contains("not found") {
+                out.push_str("Not available in this profile\n");
+            } else {
+                out.push_str(&format!("(error: {})\n", e));
+            }
+        }
+    }
+    out.push('\n');
+
+    // ── Navigation anchors ─────────────────────────────────────────────────
+    out.push_str("## Navigation Anchors\n");
+
+    // Sub-query A: Steady-state midpoint (middle 20% of profile)
+    let midpoint = execute_run_query(
+        duckdb_path,
+        "SELECT \
+         MIN(lifetime.start) + (MAX(lifetime.stop) - MIN(lifetime.start)) * 4 / 10 AS steady_start, \
+         MIN(lifetime.start) + (MAX(lifetime.stop) - MIN(lifetime.start)) * 6 / 10 AS steady_end \
+         FROM items",
+    );
+    match &midpoint {
+        Ok(json_str) => {
+            if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
+                if let Some(row) = parsed.first() {
+                    let start = row.get("steady_start").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let end = row.get("steady_end").and_then(|v| v.as_i64()).unwrap_or(0);
+                    if start > 0 && end > start {
+                        out.push_str(&format!(
+                            "- Steady-state zoom (middle 20%%): [{}, {}]\n",
+                            start, end
+                        ));
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            if !e.contains("not found") {
+                out.push_str(&format!("  (midpoint error: {})\n", e));
+            }
+        }
+    }
+
+    // Sub-query B: Worst mapper call
+    let worst_mapper = execute_run_query(
+        duckdb_path,
+        "SELECT entry_slug, title, running.start AS start_ns, \
+         running.stop AS stop_ns, ROUND(running.duration / 1e6, 2) AS duration_ms \
+         FROM items \
+         WHERE title LIKE 'Mapper Call%' AND running IS NOT NULL \
+         ORDER BY running.duration DESC LIMIT 1",
+    );
+    match &worst_mapper {
+        Ok(json_str) => {
+            if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
+                if let Some(row) = parsed.first() {
+                    let slug = row.get("entry_slug").and_then(|v| v.as_str()).unwrap_or("?");
+                    let ms = row.get("duration_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let start = row.get("start_ns").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let stop = row.get("stop_ns").and_then(|v| v.as_i64()).unwrap_or(0);
+                    if ms > 0.0 {
+                        out.push_str(&format!(
+                            "- Longest mapper call: {:.2}ms at [{}, {}] on {}\n",
+                            ms, start, stop, slug
+                        ));
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            if !e.contains("not found") {
+                out.push_str(&format!("  (mapper anchor error: {})\n", e));
+            }
+        }
+    }
+
+    // Sub-query C: Largest application processor gap
+    let worst_gap = execute_run_query(
+        duckdb_path,
+        "WITH ordered AS ( \
+           SELECT entry_slug, running.stop AS task_end, \
+             LEAD(running.start) OVER (PARTITION BY entry_slug ORDER BY running.start) AS next_start \
+           FROM items \
+           WHERE running IS NOT NULL \
+             AND (entry_slug LIKE '%gpu%' OR \
+                  (entry_slug LIKE '%cpu%' AND entry_slug NOT LIKE '%util%')) \
+         ) \
+         SELECT entry_slug, task_end AS gap_start_ns, next_start AS gap_end_ns, \
+           ROUND((next_start - task_end) / 1e6, 2) AS gap_ms \
+         FROM ordered \
+         WHERE next_start > task_end \
+         ORDER BY gap_ms DESC LIMIT 1",
+    );
+    match &worst_gap {
+        Ok(json_str) => {
+            if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
+                if let Some(row) = parsed.first() {
+                    let slug = row.get("entry_slug").and_then(|v| v.as_str()).unwrap_or("?");
+                    let ms = row.get("gap_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let start = row.get("gap_start_ns").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let end = row.get("gap_end_ns").and_then(|v| v.as_i64()).unwrap_or(0);
+                    if ms > 0.0 {
+                        out.push_str(&format!(
+                            "- Largest app processor gap: {:.2}ms at [{}, {}] on {}\n",
+                            ms, start, end, slug
+                        ));
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            if !e.contains("not found") {
+                out.push_str(&format!("  (gap anchor error: {})\n", e));
+            }
+        }
+    }
+
+    out.push_str("Use zoom_to or set_view with these nanosecond ranges to navigate directly.\n");
+    out.push('\n');
+
     Ok(out)
+}
+
+#[cfg(feature = "duckdb")]
+/// Classify a channel entry_slug into a direction label.
+///
+/// Best-effort parsing:
+/// - Two different node prefixes (e.g. "n0" and "n1") → "inter-node"
+/// - Contains both 's' and 'f' components (system mem and framebuffer) → "SYS↔FB (PCIe)"
+/// - Otherwise → "local"
+fn classify_channel_slug(slug: &str) -> &'static str {
+    // Extract the part after "chan_" (e.g. "n0s0_n1s0" or "fn0s0")
+    let chan_part = slug
+        .find("chan_")
+        .map(|i| &slug[i + 4..])
+        .unwrap_or(slug);
+
+    // Check for inter-node: look for different node numbers
+    let node_numbers: Vec<&str> = chan_part
+        .split(|c: char| !c.is_ascii_digit() && c != 'n')
+        .filter(|s| s.starts_with('n') && s.len() > 1)
+        .collect();
+    if node_numbers.len() >= 2 {
+        let first = node_numbers[0];
+        if node_numbers.iter().any(|n| *n != first) {
+            return "inter-node";
+        }
+    }
+
+    // Check for SYS↔FB: presence of both 's' (system) and 'f' (framebuffer) components
+    let has_sys = chan_part.contains('s') && !chan_part.starts_with("sys");
+    let has_fb = chan_part.contains('f');
+    if has_sys && has_fb {
+        return "SYS↔FB (PCIe)";
+    }
+
+    "local"
 }
 
 /// Return Claude API tool definitions for the agent.
