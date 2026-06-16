@@ -22,21 +22,100 @@ fn file_ds(path: impl AsRef<Path>) -> Box<dyn DeferredDataSource> {
     Box::new(ParallelDeferredDataSource::new(FileDataSource::new(path)))
 }
 
+/// Look for a DuckDB database next to an opened profile/archive path.
+/// Convention: `<base>_archive` → `<base>_db`; otherwise scan the same
+/// directory for any `*_db` or `*.duckdb` file.
+#[cfg(not(target_arch = "wasm32"))]
+fn detect_sibling_duckdb(path: &str) -> Option<String> {
+    let p = Path::new(path);
+    if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+        if let Some(base) = name.strip_suffix("_archive") {
+            let cand = p.with_file_name(format!("{base}_db"));
+            if cand.is_file() {
+                return Some(cand.to_string_lossy().into_owned());
+            }
+        }
+    }
+    let dir = match p.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    };
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let ep = entry.path();
+        if ep.is_file() {
+            if let Some(n) = ep.file_name().and_then(|n| n.to_str()) {
+                if n.ends_with(".duckdb") || n.ends_with("_db") {
+                    return Some(ep.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    None
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
-    let ds: Vec<_> = std::env::args_os()
+    let args: Vec<String> = std::env::args_os()
         .skip(1)
-        .map(|arg| {
-            arg.into_string()
-                .map(|s| Url::parse(&s).map(http_ds).unwrap_or_else(|_| {
-                    println!("The argument '{}' does not appear to be a valid URL. Attempting to open it as a local file...", &s);
-                    file_ds(&s)
-                }))
-                .unwrap_or_else(file_ds)
-        })
+        .filter_map(|a| a.into_string().ok())
         .collect();
 
-    legion_prof_viewer::app::start(ds);
+    let mut ds: Vec<Box<dyn DeferredDataSource>> = Vec::new();
+    let mut file_paths: Vec<String> = Vec::new();
+    let mut duckdb_path: Option<String> = None;
+    let mut code_path: Option<String> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--duckdb" => {
+                duckdb_path = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--code" => {
+                code_path = args.get(i + 1).cloned();
+                i += 2;
+            }
+            s => {
+                match Url::parse(s) {
+                    Ok(url) => ds.push(http_ds(url)),
+                    Err(_) => {
+                        println!("The argument '{s}' is not a URL. Opening it as a local file...");
+                        ds.push(file_ds(s));
+                        file_paths.push(s.to_owned());
+                    }
+                }
+                i += 1;
+            }
+        }
+    }
+
+    // Auto-detect a sibling DuckDB next to the opened profile when not given.
+    if duckdb_path.is_none() {
+        duckdb_path = file_paths.iter().find_map(|p| detect_sibling_duckdb(p));
+    }
+    if let Some(ref db) = duckdb_path {
+        println!("Legion AI Co-Pilot DuckDB: {db}");
+    }
+
+    // Default the code root to the launch directory (like Claude Code) when no
+    // --code was given, so the Co-Pilot can read source relative to the cwd.
+    if code_path.is_none() {
+        if let Ok(cwd) = std::env::current_dir() {
+            code_path = Some(cwd.to_string_lossy().into_owned());
+        }
+    }
+    if let Some(ref code) = code_path {
+        println!("Legion AI Co-Pilot code root: {code}");
+    }
+
+    legion_prof_viewer::app::start_with_options(
+        ds,
+        legion_prof_viewer::app::StartOptions {
+            ai_duckdb_path: duckdb_path,
+            ai_code_path: code_path,
+        },
+    );
 }
 
 #[cfg(target_arch = "wasm32")]

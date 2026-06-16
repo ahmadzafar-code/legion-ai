@@ -377,7 +377,7 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
          (SELECT COUNT(DISTINCT entry_slug) FROM entries WHERE entry_slug LIKE '%gpuhost%' AND type = 'slot') AS gpu_host_count, \
          (SELECT COUNT(DISTINCT entry_slug) FROM entries WHERE entry_slug LIKE '%cpu%' AND type = 'slot') AS cpu_count, \
          (SELECT COUNT(DISTINCT entry_slug) FROM entries WHERE entry_slug LIKE '%util%' AND type = 'slot') AS util_count, \
-         (SELECT COUNT(DISTINCT SPLIT_PART(entry_slug, '/', 1)) FROM entries WHERE type = 'panel' AND parent_slug IS NOT NULL) AS node_count",
+         (SELECT COUNT(*) FROM entries WHERE type = 'panel' AND (parent_slug IS NULL OR parent_slug = '') AND entry_slug <> 'all') AS node_count",
     );
     out.push_str("## Profile Classification\n");
     match &classification {
@@ -421,23 +421,11 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
                 if let Some(row) = parsed.first() {
                     let rpt = row.get("replay_trace_count").and_then(|v| v.as_u64()).unwrap_or(0);
                     let mapper = row.get("mapper_call_count").and_then(|v| v.as_u64()).unwrap_or(0);
-                    if rpt > 0 {
-                        out.push_str(&format!(
-                            "- TRACING IS ACTIVE: {} Replay Physical Trace tasks found\n\
-                             - {} mapper calls also present (expected: first-iteration capture + init/shutdown)\n\
-                             - Do NOT recommend -dm:memoize — tracing is already working\n",
-                            rpt, mapper
-                        ));
-                    } else if mapper > 0 {
-                        out.push_str(&format!(
-                            "- TRACING NOT DETECTED: 0 Replay Physical Trace tasks\n\
-                             - {} mapper calls found — per-task analysis overhead likely\n\
-                             - Check source code for trace annotations before recommending -dm:memoize\n",
-                            mapper
-                        ));
-                    } else {
-                        out.push_str("- No tracing tasks and no mapper calls found (unusual)\n");
-                    }
+                    out.push_str(&format!(
+                        "- Replay Physical Trace tasks: {}\n\
+                         - Mapper calls: {}\n",
+                        rpt, mapper
+                    ));
                 } else {
                     out.push_str("(no data)\n");
                 }
@@ -488,12 +476,9 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
                     let count = row.get("proc_count").and_then(|v| v.as_u64()).unwrap_or(0);
                     let avg = row.get("avg_util_pct").and_then(|v| v.as_f64()).unwrap_or(0.0);
                     let max = row.get("max_util_pct").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let tier = if avg > 80.0 { "well-optimized" }
-                        else if avg > 50.0 { "room for improvement" }
-                        else { "significant issues" };
                     out.push_str(&format!(
-                        "- {}: {} proc(s), avg {:.1}% util, max {:.1}% ({})\n",
-                        kind, count, avg, max, tier
+                        "- {}: {} proc(s), avg {:.1}% util, max {:.1}%\n",
+                        kind, count, avg, max
                     ));
                 }
                 if parsed.is_empty() {
@@ -526,14 +511,9 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
                     let p10 = row.get("p10_deferred_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
                     let p50 = row.get("p50_deferred_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
                     let under_100us = row.get("items_under_100us").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let health = if p10 > 1.0 { "HEALTHY — runtime is running well ahead of execution" }
-                        else if avg > 1.0 { "MIXED — some tasks have thin run-ahead" }
-                        else { "UNHEALTHY — execution is catching up with analysis" };
                     out.push_str(&format!(
-                        "- Avg: {:.2}ms | P10: {:.2}ms | P50: {:.2}ms | Items <100us: {}\n\
-                         - Assessment: {}\n\
-                         - Remember: LARGE deferred = GOOD (runtime ahead), SMALL deferred = BAD (pipeline stall)\n",
-                        avg, p10, p50, under_100us, health
+                        "- Avg: {:.2}ms | P10: {:.2}ms | P50: {:.2}ms | Items <100us: {}\n",
+                        avg, p10, p50, under_100us
                     ));
                 } else {
                     out.push_str("(no deferred data)\n");
@@ -594,12 +574,7 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
                         mapper_pct = pct;
                     }
                 }
-                if !has_trace_replay {
-                    out.push_str("- NOTE: NO TRACE REPLAY activity on utility — consistent with missing tracing\n");
-                }
-                if mapper_pct > 30.0 {
-                    out.push_str("- NOTE: MAPPER-DOMINATED — investigate individual mapper call durations\n");
-                }
+                let _ = (has_trace_replay, mapper_pct);
                 if parsed.is_empty() {
                     out.push_str("(no utility items)\n");
                 }
@@ -681,16 +656,6 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
                         "- {} app tasks | median: {:.3}ms | avg: {:.3}ms | min: {:.3}ms\n",
                         count, median, avg, min
                     ));
-                    if median < 1.0 {
-                        out.push_str(
-                            "- BELOW METG — tasks may be too fine-grained, \
-                             runtime overhead per-task becomes significant\n",
-                        );
-                    } else if median > 10.0 {
-                        out.push_str(
-                            "- Tasks are coarse-grained — per-task overhead should be negligible\n",
-                        );
-                    }
                 } else {
                     out.push_str("(no data)\n");
                 }
@@ -760,15 +725,6 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
                         "- P50: {:.3}ms | P90: {:.3}ms | max: {:.2}ms | items >1ms: {}\n",
                         p50, p90, max, over_1ms
                     ));
-                    if p90 > 1.0 {
-                        out.push_str(
-                            "- HIGH — Realm overloaded, too many ready items competing\n",
-                        );
-                    } else if p90 > 0.1 {
-                        out.push_str(
-                            "- ELEVATED — Realm is slow to pick up ready work\n",
-                        );
-                    }
                 } else {
                     out.push_str("(no delayed data)\n");
                 }
@@ -802,11 +758,6 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
                         "- P90: {:.3}ms | max: {:.2}ms | items >1ms: {}\n",
                         p90, max, over_1ms
                     ));
-                    if p90 > 0.1 {
-                        out.push_str(
-                            "- ELEVATED — event propagation delays may bottleneck pipeline\n",
-                        );
-                    }
                 } else {
                     out.push_str("(no triggering latency data)\n");
                 }
@@ -833,12 +784,11 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
                     let count = row.get("py_proc_count").and_then(|v| v.as_u64()).unwrap_or(0);
                     if count > 0 {
                         out.push_str(&format!(
-                            "- PYTHON PROCESSORS DETECTED ({}) — Legate/cuNumeric application likely\n\
-                             - Check for blocking Python operations and materialization syncs\n",
+                            "- Python processors: {} (Legate/cuNumeric)\n",
                             count
                         ));
                     } else {
-                        out.push_str("- No Python processors (pure C++/Regent/CUDA application)\n");
+                        out.push_str("- Python processors: 0\n");
                     }
                 } else {
                     out.push_str("(no data)\n");
@@ -941,14 +891,10 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
                         }
                     }
                     let ratio = max_ms / min_ms.max(0.1);
-                    if ratio > 3.0 {
-                        out.push_str(&format!(
-                            "- IMBALANCED — {} has {:.1}x more utility work than {}. Check control replication.\n",
-                            max_node, ratio, min_node
-                        ));
-                    } else {
-                        out.push_str(&format!("- Balanced across {} nodes\n", parsed.len()));
-                    }
+                    out.push_str(&format!(
+                        "- Utility-work spread: {:.1}x (busiest {}, lightest {})\n",
+                        ratio, max_node, min_node
+                    ));
                 }
                 if parsed.is_empty() {
                     out.push_str("(no utility data)\n");
@@ -1011,10 +957,10 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
                         out.push_str(&format!("  ... and {} more channels\n", parsed.len() - 5));
                     }
                     if has_pcie {
-                        out.push_str("- PCIe copies detected — check mapper memory placement\n");
+                        out.push_str("- PCIe (SYS↔FB) copies present\n");
                     }
                     if has_inter_node {
-                        out.push_str("- Inter-node copies detected — check sharding/placement\n");
+                        out.push_str("- Inter-node copies present\n");
                     }
                 }
                 let _ = count; // suppress unused warning
@@ -1060,14 +1006,9 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
                     let compute_ms = row.get("compute_total_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
                     let pct = row.get("copy_pct").and_then(|v| v.as_f64()).unwrap_or(0.0);
                     out.push_str(&format!(
-                        "- Copy: {:.1}ms | Compute: {:.1}ms | Copy burden: {:.1}%\n",
+                        "- Copy: {:.1}ms | Compute: {:.1}ms | Copy fraction: {:.1}%\n",
                         copy_ms, compute_ms, pct
                     ));
-                    if pct > 30.0 {
-                        out.push_str("- Data movement DOMINATED — investigate mapper placement\n");
-                    } else if pct > 10.0 {
-                        out.push_str("- Moderate copy overhead\n");
-                    }
                 } else {
                     out.push_str("(no data)\n");
                 }
@@ -1109,11 +1050,6 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
                         "- P90: {:.2}ms | Avg: {:.2}ms ({} items)\n",
                         p90, avg, count
                     ));
-                    if p90 > 1.0 {
-                        out.push_str(
-                            "- Per-task scheduling overhead >1ms at P90 — tasks may be below METG\n",
-                        );
-                    }
                 } else {
                     out.push_str("(no scheduling overhead data)\n");
                 }
@@ -1172,12 +1108,7 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
                         kind, count, min_u, max_u, avg_u
                     ));
                     let ratio = max_u / min_u.max(0.1);
-                    if ratio > 2.0 {
-                        out.push_str(&format!(
-                            "  IMBALANCED — {:.1}x spread across {} processors\n",
-                            ratio, kind
-                        ));
-                    }
+                    out.push_str(&format!("  spread: {:.1}x (max/min)\n", ratio));
                 }
                 if parsed.is_empty() {
                     out.push_str("(no application processor data)\n");
@@ -1504,6 +1435,20 @@ pub fn tool_definitions(has_duckdb: bool, has_code: bool) -> Vec<serde_json::Val
                 "required": ["sql", "purpose"]
             }
         }));
+
+        tools.push(serde_json::json!({
+            "name": "overview",
+            "description":
+                "Return a precomputed structured overview of the profiling database: \
+                 schema, row counts, processor hierarchy, per-kind utilization, timeline \
+                 bounds, top task types, and other orientation signals. Takes no arguments. \
+                 Call this once at the start when you need to get oriented before writing queries.",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }));
     }
 
     if has_code {
@@ -1637,10 +1582,14 @@ pub fn tool_definitions(has_duckdb: bool, has_code: bool) -> Vec<serde_json::Val
     tools.push(serde_json::json!({
         "name": "set_view",
         "description":
-            "Combined zoom + optional scroll in one call. Zooms to the given \
-             nanosecond range and optionally scrolls to a specific processor row. \
-             More efficient than separate zoom_to + scroll_to calls. Returns a \
-             screenshot with metadata.",
+            "Combined view control in one call: zoom to a nanosecond range and \
+             optionally scroll to a processor row, restrict the view to specific \
+             processor kinds, expand/collapse kinds, and change row height. More \
+             efficient than separate calls. Returns a screenshot with metadata. \
+             Kind tokens come from the entry slugs / overview — typically \
+             \"gpudev\", \"gpuhost\", \"cpu\", \"utility\", \"io\", \"system\", \
+             \"framebuffer\", \"chan\", \"dp\". Matching is case-insensitive and \
+             by substring, so \"gpu\" selects both \"gpudev\" and \"gpuhost\".",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -1655,9 +1604,144 @@ pub fn tool_definitions(has_duckdb: bool, has_code: bool) -> Vec<serde_json::Val
                 "entry_slug": {
                     "type": "string",
                     "description": "Optional entry_slug to scroll to after zooming."
+                },
+                "filter_kinds": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Optional: show ONLY these processor kinds (others are hidden). Omit or pass [] to show all kinds."
+                },
+                "expand_kinds": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Optional: expand these processor kinds to show their rows."
+                },
+                "collapse_kinds": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Optional: collapse these processor kinds to hide their rows."
+                },
+                "vertical_scale": {
+                    "type": "number",
+                    "description": "Optional row-height multiplier in [0.25, 4.0]. >1 makes crowded rows taller/readable."
                 }
             },
             "required": ["start_ns", "stop_ns"]
+        }
+    }));
+
+    tools.push(serde_json::json!({
+        "name": "search",
+        "description":
+            "Set the timeline's search box to a string. Every task whose title \
+             matches is highlighted in place across the visible rows, and the \
+             returned screenshot metadata reports how many matched. Use this to \
+             LOCATE tasks visually by name; use run_query when you need an exact \
+             list or per-task numbers. Searching clears when you call reset_view.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Substring to search task titles for, e.g. \"calculate_new_currents\"."
+                }
+            },
+            "required": ["query"]
+        }
+    }));
+
+    tools.push(serde_json::json!({
+        "name": "reset_view",
+        "description":
+            "Reset the view to a clean slate: zoom out to the whole profile, clear \
+             any kind filter, clear the search, and reset row height to default. \
+             Use this before answering about the overall structure of the profile, \
+             or to undo a previous set_view/search.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    }));
+
+    tools.push(serde_json::json!({
+        "name": "highlight",
+        "description":
+            "Mark a region of the timeline to point the user at it (e.g. the task \
+             you identified as the blocker). Highlights appear as clickable chips in \
+             the chat and as overlays on the timeline. Use an entry_slug + the \
+             nanosecond range from your queries or screenshots.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "entry_slug": { "type": "string", "description": "Processor row, e.g. \"n0_gpu_g0\"." },
+                "start_ns": { "type": "integer", "description": "Start of the region (ns)." },
+                "stop_ns": { "type": "integer", "description": "End of the region (ns)." },
+                "severity": { "type": "string", "description": "\"critical\", \"high\", or \"medium\" (default medium)." },
+                "label": { "type": "string", "description": "Short description shown on the chip." }
+            },
+            "required": ["entry_slug", "start_ns", "stop_ns"]
+        }
+    }));
+
+    tools.push(serde_json::json!({
+        "name": "ask_user",
+        "description":
+            "Ask the user a clarifying question and wait for their answer. Use this \
+             when the request is ambiguous, when you must choose between materially \
+             different interpretations, or when you are unsure what the user wants — \
+             prefer asking over guessing. Provide 2–4 concrete options when you can.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "The question to ask the user."
+                },
+                "options": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Optional 2–4 suggested answers, shown to the user as buttons."
+                }
+            },
+            "required": ["question"]
+        }
+    }));
+
+    tools.push(serde_json::json!({
+        "name": "clear_highlights",
+        "description":
+            "Remove ALL highlight overlays from the timeline. Use this when the user \
+             asks to remove, clear, undo, or hide the highlights you added.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    }));
+
+    tools.push(serde_json::json!({
+        "name": "update_findings",
+        "description":
+            "Record durable conclusions about THIS profile (its structure, the main \
+             bottleneck, things you've ruled out) as short notes. They persist across \
+             the user's questions and are shown back to you at the start of each new \
+             question, so you don't re-derive them. Appends one bullet by default; pass \
+             replace=true with a consolidated multi-line note to rewrite the whole list \
+             (use this to correct or prune outdated notes). Keep each note to one terse \
+             sentence.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "note": {
+                    "type": "string",
+                    "description": "The finding(s). One bullet, or multiple lines when replace=true."
+                },
+                "replace": {
+                    "type": "boolean",
+                    "description": "If true, replace ALL existing findings with this note. Default false (append)."
+                }
+            },
+            "required": ["note"]
         }
     }));
 

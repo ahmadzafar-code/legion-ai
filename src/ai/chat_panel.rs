@@ -65,8 +65,21 @@ pub enum PendingNavigation {
     Pan { request_id: u64, direction: String, percent: f64 },
     /// Scroll vertically to a processor row, then screenshot.
     ScrollTo { request_id: u64, entry_slug: String },
-    /// Zoom + optional scroll, then screenshot.
-    SetView { request_id: u64, start_ns: i64, stop_ns: i64, entry_slug: Option<String> },
+    /// Zoom + optional scroll/filter/expand, then screenshot.
+    SetView {
+        request_id: u64,
+        start_ns: i64,
+        stop_ns: i64,
+        entry_slug: Option<String>,
+        filter_kinds: Option<Vec<String>>,
+        expand_kinds: Option<Vec<String>>,
+        collapse_kinds: Option<Vec<String>>,
+        vertical_scale: Option<f64>,
+    },
+    /// Set the timeline search query, then screenshot.
+    Search { request_id: u64, query: String },
+    /// Reset zoom/spacing/filters, then screenshot.
+    ResetView { request_id: u64 },
 }
 
 /// A user's selection on the timeline (like selected code lines in Cursor).
@@ -77,6 +90,17 @@ pub struct TimelineSelection {
     pub entry_label: String,
     /// The selected gap/time range
     pub interval: Interval,
+}
+
+/// A task (bar) the user selected on the timeline, surfaced to the agent as
+/// structured context so it can resolve "this task" to concrete identifiers.
+#[derive(Clone, Debug)]
+pub struct SelectedItem {
+    pub item_uid: u64,
+    pub entry_slug: Option<String>,
+    pub title: String,
+    pub start_ns: i64,
+    pub stop_ns: i64,
 }
 
 // ── @-mention context types ─────────────────────────────────────────────────
@@ -361,6 +385,8 @@ pub struct ChatPanel {
     pub messages: Vec<ChatMessage>,
     pub input_buffer: String,
     pub selection: Option<TimelineSelection>,
+    /// Task (bar) selection surfaced to the agent as structured context.
+    selected_items: Vec<SelectedItem>,
     scroll_to_bottom: bool,
     /// Whether the settings drawer is expanded.
     settings_open: bool,
@@ -396,8 +422,6 @@ pub struct ChatPanel {
     model_selection: String,
     /// Free-text application context (e.g. goals, configuration, number of nodes/GPUs).
     app_context_buffer: String,
-    /// Diagnostic knowledge and case records, shared with agent thread.
-    record_store: std::sync::Arc<super::records::RecordStore>,
     /// Persistent agent session (holds conversation history for follow-ups).
     agent_session: Arc<Mutex<Option<AgentSession>>>,
     /// Whether an agent request is currently in flight.
@@ -409,6 +433,14 @@ pub struct ChatPanel {
     /// Pending navigation action from the agent thread, consumed by core.rs.
     /// Set by ScreenshotRequest/ZoomRequest/PanRequest/etc events.
     pending_navigation: Option<PendingNavigation>,
+    /// Pending question from the agent (human-in-the-loop): (request_id, question, options).
+    /// Rendered in the composer; answered via `send_user_answer`.
+    pending_question: Option<(u64, String, Vec<String>)>,
+    /// Request to clear all timeline highlight overlays (from the Clear button or
+    /// the agent's `clear_highlights` tool), consumed by core.rs.
+    pending_clear_highlights: bool,
+    /// Request to clear the current task/region selection (✕ in the composer).
+    pending_clear_selection: bool,
     /// User-initiated highlight actions from chip clicks, consumed by core.rs.
     pending_highlight_actions: Vec<HighlightAction>,
 }
@@ -420,6 +452,7 @@ impl Clone for ChatPanel {
             messages: self.messages.clone(),
             input_buffer: self.input_buffer.clone(),
             selection: self.selection.clone(),
+            selected_items: self.selected_items.clone(),
             scroll_to_bottom: self.scroll_to_bottom,
             settings_open: self.settings_open,
             attachments: self.attachments.clone(),
@@ -435,12 +468,14 @@ impl Clone for ChatPanel {
             api_key_buffer: self.api_key_buffer.clone(),
             model_selection: self.model_selection.clone(),
             app_context_buffer: self.app_context_buffer.clone(),
-            record_store: Arc::clone(&self.record_store),
             agent_session: Arc::clone(&self.agent_session),
             pending_request: self.pending_request,
             event_rx: Arc::clone(&self.event_rx),
             ui_command_tx: self.ui_command_tx.clone(),
             pending_navigation: self.pending_navigation.clone(),
+            pending_question: self.pending_question.clone(),
+            pending_clear_highlights: self.pending_clear_highlights,
+            pending_clear_selection: self.pending_clear_selection,
             pending_highlight_actions: self.pending_highlight_actions.clone(),
         }
     }
@@ -477,6 +512,7 @@ impl ChatPanel {
             }],
             input_buffer: String::new(),
             selection: None,
+            selected_items: Vec::new(),
             scroll_to_bottom: false,
             settings_open: true,
             attachments: Vec::new(),
@@ -492,24 +528,35 @@ impl ChatPanel {
             api_key_buffer: String::new(),
             model_selection: "claude-sonnet-4-20250514".into(),
             app_context_buffer: String::new(),
-            record_store: std::sync::Arc::new(super::records::RecordStore::empty()),
             agent_session: Arc::new(Mutex::new(None)),
             pending_request: false,
             event_rx: Arc::new(Mutex::new(None)),
             ui_command_tx: None,
             pending_navigation: None,
+            pending_question: None,
+            pending_clear_highlights: false,
+            pending_clear_selection: false,
             pending_highlight_actions: Vec::new(),
         }
-    }
-
-    /// Set the diagnostic record store (loaded at startup).
-    pub fn set_record_store(&mut self, store: std::sync::Arc<super::records::RecordStore>) {
-        self.record_store = store;
     }
 
     /// Toggle panel visibility.
     pub fn toggle(&mut self) {
         self.visible = !self.visible;
+    }
+
+    /// Pre-fill the tool paths (from CLI flags / auto-detection at startup).
+    pub fn set_tool_paths(&mut self, duckdb: Option<String>, code: Option<String>) {
+        if let Some(d) = duckdb {
+            if !d.is_empty() {
+                self.duckdb_path_buffer = d;
+            }
+        }
+        if let Some(c) = code {
+            if !c.is_empty() {
+                self.code_path_buffer = c;
+            }
+        }
     }
 
     /// Add a message to the chat panel.
@@ -523,17 +570,9 @@ impl ChatPanel {
         self.scroll_to_bottom = true;
     }
 
-    /// Update the timeline selection and add a context message.
+    /// Update the timeline (region) selection. Shown live in the composer pill.
     pub fn set_selection(&mut self, sel: TimelineSelection) {
-        let context_msg = format!(
-            "Selected: {} | {} → {} ({})",
-            sel.entry_label,
-            sel.interval.start,
-            sel.interval.stop,
-            format_duration_ns(sel.interval.duration_ns()),
-        );
         self.selection = Some(sel);
-        self.add_message(ChatMessageKind::Context, context_msg);
     }
 
     /// Clear the current timeline selection.
@@ -541,9 +580,98 @@ impl ChatPanel {
         self.selection = None;
     }
 
+    /// Replace the selected-items set (task bars). Shown live in the composer pill.
+    pub fn set_item_selection(&mut self, items: Vec<SelectedItem>) {
+        self.selected_items = items;
+    }
+
+    /// Clear the task (bar) selection.
+    pub fn clear_item_selection(&mut self) {
+        self.selected_items.clear();
+    }
+
+    /// Render the current task/region selection as a live pill above the input.
+    /// Reflects select AND deselect (no stale transcript badges).
+    fn ui_selection_pill(&mut self, ui: &mut egui::Ui) {
+        if self.selected_items.is_empty() && self.selection.is_none() {
+            return;
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new("Selection:").size(11.0).weak());
+            for it in &self.selected_items {
+                let name = if it.title.is_empty() {
+                    format!("uid {}", it.item_uid)
+                } else {
+                    it.title.chars().take(28).collect::<String>()
+                };
+                let chip = match &it.entry_slug {
+                    Some(s) => format!("📍 {name} [{s}]"),
+                    None => format!("📍 {name}"),
+                };
+                ui.label(egui::RichText::new(chip).size(11.0));
+            }
+            if let Some(sel) = &self.selection {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "▭ {} ({})",
+                        sel.entry_label,
+                        format_duration_ns(sel.interval.duration_ns())
+                    ))
+                    .size(11.0),
+                );
+            }
+            if ui.small_button("✕").on_hover_text("Clear selection").clicked() {
+                self.selected_items.clear();
+                self.selection = None;
+                self.pending_clear_selection = true;
+            }
+        });
+        ui.add_space(4.0);
+    }
+
+    /// Build a structured `## Current selection` preamble for the agent message,
+    /// or an empty string if nothing is selected.
+    fn build_selection_preamble(&self) -> String {
+        if self.selected_items.is_empty() && self.selection.is_none() {
+            return String::new();
+        }
+        let mut s = String::from("## Current selection\n");
+        for it in &self.selected_items {
+            s.push_str(&format!(
+                "- item_uid={} title={:?} entry_slug={} interval=[{}, {}]\n",
+                it.item_uid,
+                it.title,
+                it.entry_slug.as_deref().unwrap_or("?"),
+                it.start_ns,
+                it.stop_ns,
+            ));
+        }
+        if let Some(sel) = &self.selection {
+            s.push_str(&format!(
+                "- region entry={} interval=[{}, {}]\n",
+                sel.entry_label, sel.interval.start.0, sel.interval.stop.0,
+            ));
+        }
+        s.push_str(
+            "(The user is asking about the selection above. Resolve \"this\"/\"that task\" \
+             to these item_uid(s)/entry_slug(s).)\n\n",
+        );
+        s
+    }
+
     /// Take pending highlight actions (user clicked a chip) for core.rs to resolve.
     pub fn take_pending_highlight_actions(&mut self) -> Vec<HighlightAction> {
         std::mem::take(&mut self.pending_highlight_actions)
+    }
+
+    /// Take the pending "clear all highlights" request, if any.
+    pub fn take_clear_highlights(&mut self) -> bool {
+        std::mem::take(&mut self.pending_clear_highlights)
+    }
+
+    /// Take the pending "clear selection" request (✕ in the composer), if any.
+    pub fn take_clear_selection(&mut self) -> bool {
+        std::mem::take(&mut self.pending_clear_selection)
     }
 
     /// Take the pending navigation action, if any.
@@ -565,6 +693,24 @@ impl ChatPanel {
                 png_bytes,
                 metadata,
             });
+        }
+    }
+
+    /// Send the user's answer to a pending `ask_user` question back to the agent.
+    fn send_user_answer(&self, request_id: u64, answer: String) {
+        if let Some(tx) = &self.ui_command_tx {
+            let _ = tx.send(UiCommand::UserAnswer { request_id, answer });
+        }
+    }
+
+    /// Submit composer text: answer a pending `ask_user` question if one is open,
+    /// otherwise start a new agent request.
+    fn submit_input(&mut self, text: String) {
+        if let Some((request_id, _, _)) = self.pending_question.take() {
+            self.send_user_answer(request_id, text.clone());
+            self.add_message(ChatMessageKind::User, text);
+        } else {
+            self.trigger_diagnosis(text);
         }
     }
 
@@ -702,8 +848,36 @@ impl ChatPanel {
                     start_ns,
                     stop_ns,
                     entry_slug,
+                    filter_kinds,
+                    expand_kinds,
+                    collapse_kinds,
+                    vertical_scale,
                 } => {
-                    self.pending_navigation = Some(PendingNavigation::SetView { request_id, start_ns, stop_ns, entry_slug });
+                    self.pending_navigation = Some(PendingNavigation::SetView {
+                        request_id,
+                        start_ns,
+                        stop_ns,
+                        entry_slug,
+                        filter_kinds,
+                        expand_kinds,
+                        collapse_kinds,
+                        vertical_scale,
+                    });
+                }
+                AgentEvent::SearchRequest { request_id, query } => {
+                    self.pending_navigation = Some(PendingNavigation::Search { request_id, query });
+                }
+                AgentEvent::ResetViewRequest { request_id } => {
+                    self.pending_navigation = Some(PendingNavigation::ResetView { request_id });
+                }
+                AgentEvent::QuestionForUser { request_id, question, options } => {
+                    self.add_message(ChatMessageKind::System, format!("❓ {question}"));
+                    self.pending_question = Some((request_id, question, options));
+                    self.visible = true;
+                }
+                AgentEvent::ClearHighlights => {
+                    self.pending_clear_highlights = true;
+                    self.add_message(ChatMessageKind::System, "Cleared timeline highlights.");
                 }
                 AgentEvent::Complete(response) => {
                     let display = if response.text.len() > 10_000 {
@@ -716,11 +890,24 @@ impl ChatPanel {
                         response.text
                     };
 
+                    let highlights = response.highlights;
+                    // Auto-apply the agent's highlights to the timeline so they
+                    // appear immediately (deduped in core) — matching the agent's
+                    // "I've highlighted…" narration. zoom_to:false because the
+                    // agent has usually navigated already; the "Zoom to all" chip
+                    // re-fits the view on demand.
+                    for hl in &highlights {
+                        self.pending_highlight_actions.push(HighlightAction {
+                            highlight: hl.clone(),
+                            zoom_to: false,
+                        });
+                    }
+
                     // Embed highlights in the Analysis message as clickable chips
                     self.messages.push(ChatMessage {
                         kind: ChatMessageKind::Analysis,
                         text: display,
-                        highlights: response.highlights,
+                        highlights,
                         expandable_content: None,
                     });
                     self.scroll_to_bottom = true;
@@ -766,7 +953,7 @@ impl ChatPanel {
     ///
     /// `user_query = None` → initial "Find Performance Issues" scan.
     /// `user_query = Some(q)` → follow-up question (session persists).
-    fn trigger_diagnosis(&mut self, user_query: Option<String>) {
+    fn trigger_diagnosis(&mut self, user_query: String) {
         let Some(api_key) = self.get_api_key() else {
             self.add_message(
                 ChatMessageKind::System,
@@ -787,30 +974,6 @@ impl ChatPanel {
         // Tool paths from dedicated fields
         let duckdb_path = self.duckdb_path_buffer.trim().to_owned();
         let code_path = self.code_path_buffer.trim().to_owned();
-
-        // Self-healing: if DB is needed but not ready, guide the user (Part E)
-        let db_status = self.tool_status_db();
-        if user_query.is_none() {
-            match &db_status {
-                ToolStatus::Off => {
-                    self.add_message(
-                        ChatMessageKind::System,
-                        "⚠ No database configured. Set the DB path in Tools Setup.",
-                    );
-                    self.tools_popover_open = true;
-                    return;
-                }
-                ToolStatus::Error(msg) => {
-                    self.add_message(
-                        ChatMessageKind::System,
-                        format!("⚠ DB path error: {msg}. Fix it in Tools Setup."),
-                    );
-                    self.tools_popover_open = true;
-                    return;
-                }
-                ToolStatus::Ready => {}
-            }
-        }
 
         // Collect inline context from @ attachments (Part D)
         let mut context_section = String::new();
@@ -898,10 +1061,7 @@ impl ChatPanel {
             }
         }
 
-        let display_text = user_query
-            .clone()
-            .unwrap_or_else(|| "Find performance issues".to_owned());
-        self.add_message(ChatMessageKind::User, &display_text);
+        self.add_message(ChatMessageKind::User, &user_query);
         let time_hint = if self.model_selection.contains("opus") {
             "Opus with extended thinking — allow 3–5 min"
         } else {
@@ -909,14 +1069,14 @@ impl ChatPanel {
         };
         self.add_message(
             ChatMessageKind::System,
-            format!("Analyzing… ({time_hint})"),
+            format!("Working… ({time_hint})"),
         );
         self.pending_request = true;
 
         let app_context = self.app_context_buffer.clone();
         let model = self.model_selection.clone();
         let session_arc = Arc::clone(&self.agent_session);
-        let record_store = Arc::clone(&self.record_store);
+        let selection_preamble = self.build_selection_preamble();
         let query_clone = user_query;
 
         // Create bidirectional channels for this request
@@ -947,23 +1107,12 @@ impl ChatPanel {
                     app_context,
                     event_tx.clone(),
                     cmd_rx,
-                    record_store,
                 ),
             };
 
-            // Run the agent — no lock held during the (potentially minutes-long) call
-            let result = match query_clone {
-                None => session.run_scan(),
-                Some(q) => {
-                    // Prepend @ context to the user question (Part D)
-                    let enriched = if context_section.is_empty() {
-                        q
-                    } else {
-                        format!("{context_section}{q}")
-                    };
-                    session.ask(&enriched)
-                }
-            };
+            // Run the agent — prepend selection context + @ attachments to the question.
+            let enriched = format!("{selection_preamble}{context_section}{query_clone}");
+            let result = session.ask(&enriched);
 
             // Put the session back (with updated conversation history)
             {
@@ -1209,20 +1358,8 @@ impl ChatPanel {
     /// Zone 1: Header bar with title, tool status chips, and action buttons.
     fn ui_header(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            // Left: title
-            ui.label(
-                egui::RichText::new("AI Analysis")
-                    .strong()
-                    .size(14.0)
-                    .color(egui::Color32::from_rgb(30, 30, 30)),
-            );
-
-            // Right-aligned buttons
+            // Right-aligned controls (no title — it's redundant with the toolbar toggle)
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // Close button
-                if ui.button("✕").clicked() {
-                    self.visible = false;
-                }
                 // Settings gear (toggles settings_open)
                 let gear_text = if self.settings_open { "⚙ ▾" } else { "⚙" };
                 if ui.button(gear_text).clicked() {
@@ -1382,7 +1519,7 @@ impl ChatPanel {
     }
 
     /// Zone 3: Message transcript scroll area.
-    fn ui_transcript(&mut self, ui: &mut egui::Ui, max_height: f32) {
+    fn ui_transcript(&mut self, ui: &mut egui::Ui) {
         // Spinner while waiting
         if self.pending_request {
             ui.horizontal(|ui| {
@@ -1429,9 +1566,9 @@ impl ChatPanel {
             ui.add_space(2.0);
         }
 
-        // Message scroll area — takes all available height
+        // Message scroll area — fills the remaining (central-panel) space.
         egui::ScrollArea::vertical()
-            .max_height(max_height)
+            .auto_shrink([false, false])
             .stick_to_bottom(true)
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -1522,11 +1659,40 @@ impl ChatPanel {
             .inner_margin(egui::Margin::same(10.0))
             .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(220, 220, 220)))
             .show(ui, |ui: &mut egui::Ui| {
+                // Human-in-the-loop: a pending question from the agent.
+                if let Some((request_id, question, options)) = self.pending_question.clone() {
+                    ui.label(egui::RichText::new(format!("❓ {question}")).strong());
+                    let mut answer: Option<String> = None;
+                    if !options.is_empty() {
+                        ui.horizontal_wrapped(|ui| {
+                            for opt in &options {
+                                if ui.button(opt).clicked() {
+                                    answer = Some(opt.clone());
+                                }
+                            }
+                        });
+                    }
+                    ui.label(
+                        egui::RichText::new("…or type your own answer below.")
+                            .size(11.0)
+                            .weak(),
+                    );
+                    if let Some(ans) = answer {
+                        self.pending_question = None;
+                        self.send_user_answer(request_id, ans.clone());
+                        self.add_message(ChatMessageKind::User, ans);
+                    }
+                    ui.add_space(6.0);
+                }
+
+                // Current selection pill (live; updates on select/deselect)
+                self.ui_selection_pill(ui);
+
                 // Attachment chips
                 self.ui_attachment_chips(ui);
 
                 // Text input (multiline, 2 rows) — use .show() for cursor access
-                let enabled = !self.pending_request;
+                let enabled = !self.pending_request || self.pending_question.is_some();
                 let output = egui::TextEdit::multiline(&mut self.input_buffer)
                     .hint_text("Ask about this profile… (@ to attach context)")
                     .desired_width(ui.available_width())
@@ -1554,11 +1720,12 @@ impl ChatPanel {
                     let idx = self.at_picker.selected_index;
                     self.accept_picker_entry(idx);
                 } else if enter_pressed && !picker_consumed && !self.at_picker.active {
-                    // Normal submit
-                    if !self.input_buffer.trim().is_empty() && !self.pending_request {
+                    // Normal submit (or answer a pending ask_user question)
+                    let can_submit = !self.pending_request || self.pending_question.is_some();
+                    if !self.input_buffer.trim().is_empty() && can_submit {
                         let text = self.input_buffer.trim().to_string();
                         self.input_buffer.clear();
-                        self.trigger_diagnosis(Some(text));
+                        self.submit_input(text);
                     }
                 }
 
@@ -1615,10 +1782,12 @@ impl ChatPanel {
                                 )
                                 .clicked()
                             {
-                                if !self.input_buffer.trim().is_empty() && !self.pending_request {
+                                let can_submit =
+                                    !self.pending_request || self.pending_question.is_some();
+                                if !self.input_buffer.trim().is_empty() && can_submit {
                                     let text = self.input_buffer.trim().to_string();
                                     self.input_buffer.clear();
-                                    self.trigger_diagnosis(Some(text));
+                                    self.submit_input(text);
                                 }
                             }
 
@@ -1878,6 +2047,10 @@ impl ChatPanel {
                 // Force dark text throughout this panel
                 ui.visuals_mut().override_text_color =
                     Some(egui::Color32::from_rgb(30, 30, 30));
+                // Slightly larger, more readable text throughout the chat panel.
+                for font_id in ui.style_mut().text_styles.values_mut() {
+                    font_id.size *= 1.1;
+                }
 
                 // Zone 1: Header bar
                 self.ui_header(ui);
@@ -1889,13 +2062,23 @@ impl ChatPanel {
                     ui.separator();
                 }
 
-                // Zone 3: Transcript (messages scroll area) — gets ALL remaining space
-                let composer_height = 80.0;
-                let available = ui.available_height() - composer_height;
-                self.ui_transcript(ui, available);
+                // Zone 4: Composer pinned to the bottom. A bottom panel auto-sizes
+                // to the composer's real height (input + buttons + selection pill +
+                // pending question), so it can never be pushed off-screen as the
+                // transcript grows.
+                egui::TopBottomPanel::bottom("ai_chat_composer")
+                    .resizable(false)
+                    .frame(egui::Frame::none())
+                    .show_inside(ui, |ui| {
+                        self.ui_composer(ui);
+                    });
 
-                // Zone 4: Composer (input + model selector at bottom)
-                self.ui_composer(ui);
+                // Zone 3: Transcript fills the remaining space and scrolls internally.
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::none())
+                    .show_inside(ui, |ui| {
+                        self.ui_transcript(ui);
+                    });
             });
 
         // Popups (rendered AFTER the panel so they overlay correctly)
@@ -1975,13 +2158,13 @@ fn render_message(ui: &mut egui::Ui, msg: &ChatMessage, actions: &mut Vec<Highli
         ChatMessageKind::User => {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
                 egui::Frame::none()
-                    .fill(egui::Color32::from_rgb(59, 130, 246))
+                    .fill(egui::Color32::from_rgb(228, 228, 228))
                     .rounding(8.0)
                     .inner_margin(egui::Margin::symmetric(10.0, 6.0))
                     .show(ui, |ui| {
                         ui.label(
                             egui::RichText::new(&msg.text)
-                                .color(egui::Color32::WHITE),
+                                .color(egui::Color32::from_rgb(30, 30, 30)),
                         );
                     });
             });
@@ -2034,11 +2217,11 @@ fn render_message(ui: &mut egui::Ui, msg: &ChatMessage, actions: &mut Vec<Highli
                     });
                 }
                 if msg.highlights.len() > 1 {
-                    if ui.small_button("Show all on timeline").clicked() {
+                    if ui.small_button("Zoom to all \u{25b8}").clicked() {
                         for hl in &msg.highlights {
                             actions.push(HighlightAction {
                                 highlight: hl.clone(),
-                                zoom_to: false,
+                                zoom_to: true,
                             });
                         }
                     }
@@ -2078,7 +2261,7 @@ fn render_analysis_markdown(ui: &mut egui::Ui, text: &str) {
             ui.label(
                 egui::RichText::new(h)
                     .strong()
-                    .size(13.0)
+                    .size(16.0)
                     .color(heading_color),
             );
             ui.add_space(1.0);
@@ -2089,7 +2272,7 @@ fn render_analysis_markdown(ui: &mut egui::Ui, text: &str) {
             ui.label(
                 egui::RichText::new(h)
                     .strong()
-                    .size(14.0)
+                    .size(17.0)
                     .color(heading_color),
             );
             ui.add_space(2.0);
@@ -2100,7 +2283,7 @@ fn render_analysis_markdown(ui: &mut egui::Ui, text: &str) {
             ui.label(
                 egui::RichText::new(h)
                     .strong()
-                    .size(15.0)
+                    .size(18.0)
                     .color(heading_color),
             );
             ui.add_space(3.0);
@@ -2115,7 +2298,7 @@ fn render_analysis_markdown(ui: &mut egui::Ui, text: &str) {
             ui.label(
                 egui::RichText::new(trimmed)
                     .monospace()
-                    .size(11.0)
+                    .size(12.0)
                     .color(dark),
             );
             continue;

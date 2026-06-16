@@ -20,7 +20,7 @@ duckdb = ["dep:duckdb"]
 client = ["dep:reqwest", "dep:url"]
 server = ["dep:actix-cors", "dep:actix-web"]
 nvtxw = ["dep:nvtxw"]
-ai = ["dep:ureq", "dep:serde_json", "dep:image", "dep:base64"]  # AI analysis + screenshot encoding
+ai = ["dep:ureq", "dep:serde_json", "dep:image", "dep:base64", "dep:tracing", "dep:tracing-subscriber"]  # AI analysis + screenshot encoding + agent tracing
 
 [dependencies]
 egui = "0.29.0"
@@ -52,6 +52,10 @@ serde_json = { version = "1", optional = true }
 # ai screenshot encoding:
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
 base64 = { version = "0.22", optional = true }
+
+# ai agent tracing (Task 12):
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["json", "env-filter", "fmt", "registry"], optional = true }
 
 # duckdb:
 duckdb = { version = "1.4.0", features = ["appender-arrow", "bundled"], optional = true }

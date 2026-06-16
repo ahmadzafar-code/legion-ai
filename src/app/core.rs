@@ -341,6 +341,18 @@ struct Context {
     #[cfg(feature = "ai")]
     #[serde(skip)]
     ai_scroll_to_entry: Option<crate::data::EntryID>,
+
+    /// Item UIDs (sorted) of the last task selection pushed to the chat panel,
+    /// used to detect changes and avoid re-pushing every frame.
+    #[cfg(feature = "ai")]
+    #[serde(skip)]
+    last_item_selection: Vec<u64>,
+
+    /// Shift+drag-selected time region (entry-agnostic), drawn as a blue band
+    /// and surfaced to the chat panel.
+    #[cfg(feature = "ai")]
+    #[serde(skip)]
+    ai_region_selection: Option<Interval>,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -1745,14 +1757,28 @@ fn build_screenshot_metadata(cx: &Context, windows: &[Window]) -> String {
         }
     }
 
+    // If a search is active, report the query and how many tasks matched.
+    let search_note = windows
+        .first()
+        .filter(|w| !w.config.search_state.query.is_empty())
+        .map(|w| {
+            format!(
+                " Active search: \"{}\" ({} matches highlighted).",
+                w.config.search_state.query,
+                w.config.search_state.result_set.len()
+            )
+        })
+        .unwrap_or_default();
+
     format!(
         "Screenshot captured. Visible time range: {} ns \u{2013} {} ns ({:.2} ms). \
-         Visible entries (top to bottom): {}. \
+         Visible entries (top to bottom): {}.{} \
          Use these entry_slugs and time range for follow-up queries.",
         start,
         stop,
         duration_ms,
-        entry_slugs.join(", ")
+        entry_slugs.join(", "),
+        search_note
     )
 }
 
@@ -2020,6 +2046,45 @@ impl Window {
         });
     }
 
+    /// Set the kind filter to show only the given processor kinds (empty = all).
+    /// Requested names are matched case-insensitively AND by substring, so a
+    /// request of "gpu" selects both "gpudev" and "gpuhost". Returns the number
+    /// of known kinds matched (0 means nothing matched — caller may warn).
+    #[cfg(feature = "ai")]
+    fn set_kind_filter(&mut self, kinds: &[String]) -> usize {
+        self.config.kind_filter.clear();
+        for req in kinds {
+            let needle = req.to_lowercase();
+            for k in &self.config.kinds {
+                let hay = k.to_lowercase();
+                if hay == needle || hay.contains(&needle) {
+                    self.config.kind_filter.insert(k.clone());
+                }
+            }
+        }
+        self.config.kind_filter.len()
+    }
+
+    /// Expand or collapse every kind panel matching `kind` (case-insensitive,
+    /// substring), mirroring the Expand/Collapse-by-kind controls. A request of
+    /// "gpu" matches both "gpudev" and "gpuhost".
+    #[cfg(feature = "ai")]
+    fn set_kind_expanded(&mut self, kind: &str, expanded: bool) {
+        let needle = kind.to_lowercase();
+        for node in &mut self.panel.slots {
+            for k in &mut node.slots {
+                // Scope the immutable label borrow so it ends before toggle_expanded().
+                let matches = {
+                    let label = k.label_text();
+                    label == needle || label.contains(needle.as_str())
+                };
+                if matches && k.expanded != expanded {
+                    k.toggle_expanded();
+                }
+            }
+        }
+    }
+
     fn select_interval(&mut self, ui: &mut egui::Ui, cx: &mut Context) {
         ui.subheading("Interval", cx);
         let start_res = ui
@@ -2267,6 +2332,7 @@ impl ProfApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         mut data_sources: Vec<Box<dyn DeferredDataSource>>,
+        opts: StartOptions,
     ) -> Self {
         // This is also where you can customized the look at feel of egui using
         // `cc.egui_ctx.set_visuals` and `cc.egui_ctx.set_fonts`.
@@ -2290,39 +2356,30 @@ impl ProfApp {
         result.cx.scale_factor = 1.0;
         result.cx.row_scroll_delta = 0;
 
+        #[cfg(not(feature = "ai"))]
+        let _ = &opts;
+
         #[cfg(feature = "ai")]
         {
-            // Try multiple paths for diagnostic records and knowledge (CWD varies)
-            let record_candidates = [
-                std::path::PathBuf::from("diagnostic_records"),
-                std::path::PathBuf::from("prof-viewer/diagnostic_records"),
-            ];
-            let knowledge_candidates = [
-                std::path::PathBuf::from("docs"),
-                std::path::PathBuf::from("../docs"),
-                std::path::PathBuf::from("prof-viewer/../docs"),
-            ];
-            let knowledge_dir = knowledge_candidates
-                .iter()
-                .find(|p| p.join("legionconcepts.md").exists())
-                .map(|p| p.as_path())
-                .unwrap_or(std::path::Path::new("docs"));
+            // Pre-fill the assistant's tool paths from CLI flags / auto-detection.
+            result
+                .cx
+                .chat_panel
+                .set_tool_paths(opts.ai_duckdb_path, opts.ai_code_path);
 
-            if let Some(records_dir) = record_candidates.iter().find(|p| p.is_dir()) {
-                match crate::ai::RecordStore::load(records_dir, knowledge_dir) {
-                    Ok(store) => {
-                        eprintln!("Loaded {} diagnostic records", store.record_count());
-                        result
-                            .cx
-                            .chat_panel
-                            .set_record_store(std::sync::Arc::new(store));
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to load diagnostic records: {e}");
-                    }
-                }
-            } else {
-                eprintln!("No diagnostic records directory found, running without case library");
+            // Initialize agent tracing subscriber once at startup. Best-effort:
+            // if the trace dir can't be created, log and continue without tracing.
+            let trace_root_candidates = [
+                std::path::PathBuf::from("prof_results"),
+                std::path::PathBuf::from("../prof_results"),
+            ];
+            let trace_root = trace_root_candidates
+                .iter()
+                .find(|p| p.exists())
+                .map(|p| p.as_path())
+                .unwrap_or(std::path::Path::new("prof_results"));
+            if let Err(e) = crate::ai::trace::init_subscriber(trace_root) {
+                eprintln!("Failed to initialize agent tracing: {e}");
             }
         }
 
@@ -2437,6 +2494,14 @@ impl ProfApp {
         cx.show_controls = false;
         for window in windows.iter_mut() {
             window.config.items_selected.clear();
+        }
+        // Esc also clears the AI selection (task bars + Shift+drag region).
+        #[cfg(feature = "ai")]
+        {
+            cx.ai_region_selection = None;
+            cx.last_item_selection.clear();
+            cx.chat_panel.clear_item_selection();
+            cx.chat_panel.clear_selection();
         }
     }
 
@@ -2574,21 +2639,65 @@ impl ProfApp {
             let interval = Interval::new(start, stop);
 
             if is_active_drag {
-                // Still in drag, draw a rectangle to show the dragged region
+                // Still in drag, draw a rectangle to show the dragged region.
                 let drag_rect =
                     Rect::from_min_max(Pos2::new(min, rect.min.y), Pos2::new(max, rect.max.y));
+                #[cfg(feature = "ai")]
+                let color = if ui.input(|i| i.modifiers.shift) {
+                    // Shift+drag = region select (blue) instead of zoom (gray).
+                    Color32::from_rgba_unmultiplied(50, 100, 255, 60)
+                } else {
+                    Color32::DARK_GRAY.linear_multiply(0.5)
+                };
+                #[cfg(not(feature = "ai"))]
                 let color = Color32::DARK_GRAY.linear_multiply(0.5);
                 ui.painter().rect(drag_rect, 0.0, color, Stroke::NONE);
 
                 drag_interval = Some(interval);
             } else if response.drag_stopped() {
-                // Only set view interval if the drag was a certain amount
+                // Only act if the drag covered a certain distance.
                 const MIN_DRAG_DISTANCE: f32 = 4.0;
                 if max - min > MIN_DRAG_DISTANCE {
-                    ProfApp::zoom(cx, interval);
+                    #[cfg(feature = "ai")]
+                    let is_select = ui.input(|i| i.modifiers.shift);
+                    #[cfg(not(feature = "ai"))]
+                    let is_select = false;
+                    if is_select {
+                        #[cfg(feature = "ai")]
+                        {
+                            cx.ai_region_selection = Some(interval);
+                            cx.chat_panel.set_selection(crate::ai::TimelineSelection {
+                                entry_id: EntryID::root(),
+                                entry_label: "timeline region".to_owned(),
+                                interval,
+                            });
+                            cx.chat_panel.visible = true;
+                        }
+                    } else {
+                        ProfApp::zoom(cx, interval);
+                    }
                 }
 
                 cx.drag_origin = None;
+            }
+        }
+
+        // Persistent Shift+drag region-selection band.
+        #[cfg(feature = "ai")]
+        if let Some(region) = cx.ai_region_selection {
+            let a = cx.view_interval.unlerp(region.start).clamp(0.0, 1.0);
+            let b = cx.view_interval.unlerp(region.stop).clamp(0.0, 1.0);
+            if b > a {
+                let x0 = rect.left() + a * rect.width();
+                let x1 = rect.left() + b * rect.width();
+                let band =
+                    Rect::from_min_max(Pos2::new(x0, rect.min.y), Pos2::new(x1, rect.max.y));
+                ui.painter().rect(
+                    band,
+                    0.0,
+                    Color32::from_rgba_unmultiplied(50, 100, 255, 30),
+                    Stroke::new(1.0, Color32::from_rgba_unmultiplied(50, 100, 255, 120)),
+                );
             }
         }
 
@@ -2969,24 +3078,25 @@ impl eframe::App for ProfApp {
                     }
                 });
 
-                // Right-aligned AI Chat toggle icon (Cursor-style)
+                // Right-aligned Legion AI Co-Pilot toggle button
                 #[cfg(feature = "ai")]
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let color = if cx.chat_panel.visible {
                         egui::Color32::from_rgb(59, 130, 246) // blue accent when open
                     } else {
-                        egui::Color32::from_rgb(160, 160, 160) // grey when closed
+                        egui::Color32::from_rgb(60, 60, 60)
                     };
-                    let btn = ui.add(
-                        egui::Button::new(
-                            egui::RichText::new("◧").size(22.0).color(color),
-                        )
-                        .frame(false),
-                    );
-                    if btn.clicked() {
+                    let label = egui::RichText::new("🤖 Legion AI Co-Pilot")
+                        .strong()
+                        .size(14.0)
+                        .color(color);
+                    if ui
+                        .add(egui::Button::new(label).frame(true))
+                        .on_hover_text("Toggle the Legion AI Co-Pilot")
+                        .clicked()
+                    {
                         cx.chat_panel.toggle();
                     }
-                    btn.on_hover_text("Toggle AI Chat");
                 });
             });
         });
@@ -3036,19 +3146,37 @@ impl eframe::App for ProfApp {
                         cx.show_controls = true;
                     }
 
-                    #[cfg(feature = "ai")]
-                    {
-                        if ui.button("💬 AI Chat").clicked() {
-                            cx.chat_panel.toggle();
-                        }
-                    }
-
                     ui.toggle_value(&mut cx.debug, "🛠 Debug");
 
                     #[cfg(not(target_arch = "wasm32"))]
                     {
                         if cx.debug {
                             ui.label(format!("FPS: {_fps:.0}"));
+                        }
+                    }
+                });
+
+                // Highlight controls (AI overlays) — kept inside the bottom-up
+                // footer so they never collide with the top-down content above.
+                #[cfg(feature = "ai")]
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .button("Toggle highlights")
+                        .on_hover_text("Show or hide AI highlight overlays")
+                        .clicked()
+                    {
+                        for window in windows.iter_mut() {
+                            window.config.ai_highlights_enabled =
+                                !window.config.ai_highlights_enabled;
+                        }
+                    }
+                    if ui
+                        .button("Delete highlights")
+                        .on_hover_text("Remove all AI highlight overlays")
+                        .clicked()
+                    {
+                        for window in windows.iter_mut() {
+                            window.config.ai_highlights.clear();
                         }
                     }
                 });
@@ -3066,19 +3194,51 @@ impl eframe::App for ProfApp {
         // into timeline overlays. Optionally zoom to the first action.
         #[cfg(feature = "ai")]
         {
+            // Clear all highlight overlays if requested (Clear button or agent tool).
+            if cx.chat_panel.take_clear_highlights() {
+                for window in windows.iter_mut() {
+                    window.config.ai_highlights.clear();
+                }
+            }
+
+            // Clear the active selection (✕ in the composer): deselect bars + region.
+            if cx.chat_panel.take_clear_selection() {
+                for window in windows.iter_mut() {
+                    window.config.items_selected.clear();
+                }
+                cx.ai_region_selection = None;
+                cx.last_item_selection.clear();
+            }
+
             let actions = cx.chat_panel.take_pending_highlight_actions();
             if !actions.is_empty() {
+                let mut first_entry: Option<EntryID> = None;
                 for window in windows.iter_mut() {
                     let slug_map = build_slug_map(window);
                     for action in &actions {
                         if let Some(entry_id) = slug_map.get(&action.highlight.entry_slug) {
+                            // Expand the row's ancestors so the highlight actually
+                            // draws — kind panels (level 2) are collapsed by default,
+                            // and a highlight on a hidden row renders nothing.
+                            window.expand_slot(entry_id);
+                            if first_entry.is_none() {
+                                first_entry = Some(entry_id.clone());
+                            }
                             let ai_hl = highlight_to_ai(&action.highlight);
-                            window
+                            let entry = window
                                 .config
                                 .ai_highlights
                                 .entry(entry_id.clone())
-                                .or_default()
-                                .push(ai_hl);
+                                .or_default();
+                            // Dedup: don't stack an identical highlight (same range + label).
+                            let dup = entry.iter().any(|h| {
+                                h.interval.start.0 == ai_hl.interval.start.0
+                                    && h.interval.stop.0 == ai_hl.interval.stop.0
+                                    && h.label == ai_hl.label
+                            });
+                            if !dup {
+                                entry.push(ai_hl);
+                            }
                         } else {
                             log::warn!(
                                 "Highlight: unknown entry_slug '{}'",
@@ -3090,13 +3250,22 @@ impl eframe::App for ProfApp {
                         window.config.ai_highlights_enabled = true;
                     }
                 }
-                // Zoom to the first action that requests it
-                if let Some(action) = actions.iter().find(|a| a.zoom_to) {
-                    let interval = Interval::new(
-                        Timestamp(action.highlight.start_ns),
-                        Timestamp(action.highlight.stop_ns),
-                    );
-                    ProfApp::zoom(cx, interval);
+                // Scroll vertically to the first highlighted row so the overlays are
+                // on screen (the rows we just expanded may be below the fold).
+                if let Some(entry_id) = first_entry {
+                    cx.ai_scroll_to_entry = Some(entry_id);
+                }
+                // Zoom to fit ALL highlights that requested it (union of ranges),
+                // so "Zoom to all" frames every chip, and a single "Show ▸" frames
+                // just that one.
+                let zoom: Vec<_> = actions.iter().filter(|a| a.zoom_to).collect();
+                if !zoom.is_empty() {
+                    let start = zoom.iter().map(|a| a.highlight.start_ns).min().unwrap();
+                    let stop = zoom.iter().map(|a| a.highlight.stop_ns).max().unwrap();
+                    let interval = Interval::new(Timestamp(start), Timestamp(stop));
+                    // Pad so the highlighted span sits inside the view with a margin.
+                    let pad = (interval.duration_ns() / 10).max(1_000);
+                    ProfApp::zoom(cx, interval.grow(pad));
                 }
             }
         }
@@ -3134,7 +3303,9 @@ impl eframe::App for ProfApp {
                     | PendingNavigation::Zoom { request_id, .. }
                     | PendingNavigation::Pan { request_id, .. }
                     | PendingNavigation::ScrollTo { request_id, .. }
-                    | PendingNavigation::SetView { request_id, .. } => *request_id,
+                    | PendingNavigation::SetView { request_id, .. }
+                    | PendingNavigation::Search { request_id, .. }
+                    | PendingNavigation::ResetView { request_id } => *request_id,
                 };
 
                 match nav {
@@ -3165,9 +3336,41 @@ impl eframe::App for ProfApp {
                             }
                         }
                     }
-                    PendingNavigation::SetView { start_ns, stop_ns, entry_slug, .. } => {
+                    PendingNavigation::SetView {
+                        start_ns,
+                        stop_ns,
+                        entry_slug,
+                        filter_kinds,
+                        expand_kinds,
+                        collapse_kinds,
+                        vertical_scale,
+                        ..
+                    } => {
                         let interval = Interval::new(Timestamp(start_ns), Timestamp(stop_ns));
                         ProfApp::zoom(cx, interval);
+                        if let Some(scale) = vertical_scale {
+                            cx.scale_factor = (scale as f32).clamp(0.25, 4.0);
+                        }
+                        for window in windows.iter_mut() {
+                            if let Some(kinds) = &filter_kinds {
+                                let matched = window.set_kind_filter(kinds);
+                                if matched == 0 && !kinds.is_empty() {
+                                    log::warn!(
+                                        "set_view filter_kinds matched no known kinds: {kinds:?}"
+                                    );
+                                }
+                            }
+                            if let Some(kinds) = &expand_kinds {
+                                for k in kinds {
+                                    window.set_kind_expanded(k, true);
+                                }
+                            }
+                            if let Some(kinds) = &collapse_kinds {
+                                for k in kinds {
+                                    window.set_kind_expanded(k, false);
+                                }
+                            }
+                        }
                         if let Some(slug) = entry_slug {
                             for window in windows.iter_mut() {
                                 let slug_map = build_slug_map(window);
@@ -3177,6 +3380,21 @@ impl eframe::App for ProfApp {
                                     break;
                                 }
                             }
+                        }
+                    }
+                    PendingNavigation::Search { query, .. } => {
+                        for window in windows.iter_mut() {
+                            window.config.search_state.query = query.clone();
+                            window.search(cx);
+                        }
+                    }
+                    PendingNavigation::ResetView { .. } => {
+                        ProfApp::zoom(cx, cx.total_interval);
+                        cx.scale_factor = 1.0;
+                        for window in windows.iter_mut() {
+                            window.config.kind_filter.clear();
+                            window.config.search_state.query = String::new();
+                            window.search(cx);
                         }
                     }
                 }
@@ -3275,6 +3493,49 @@ impl eframe::App for ProfApp {
                 ProfApp::zoom(cx, interval);
                 window.expand_slot(&item_loc.entry_id);
                 window.config.scroll_to_item(item_loc);
+            }
+        }
+
+        // Surface the user's task (bar) selection to the chat panel so the agent
+        // can resolve "this task" to concrete item_uid(s)/entry_slug(s).
+        #[cfg(feature = "ai")]
+        {
+            let mut snapshot: Vec<crate::ai::SelectedItem> = Vec::new();
+            for window in windows.iter() {
+                if window.config.items_selected.is_empty() {
+                    continue;
+                }
+                let id_to_slug: HashMap<EntryID, String> = build_slug_map(window)
+                    .into_iter()
+                    .map(|(s, id)| (id, s))
+                    .collect();
+                for (uid, detail) in window.config.items_selected.iter().take(8) {
+                    let (title, start_ns, stop_ns) = match &detail.meta {
+                        Some(m) => (
+                            m.title.clone(),
+                            m.original_interval.start.0,
+                            m.original_interval.stop.0,
+                        ),
+                        None => (String::new(), 0, 0),
+                    };
+                    snapshot.push(crate::ai::SelectedItem {
+                        item_uid: uid.0,
+                        entry_slug: id_to_slug.get(&detail.loc.entry_id).cloned(),
+                        title,
+                        start_ns,
+                        stop_ns,
+                    });
+                }
+                break;
+            }
+            let uids: Vec<u64> = snapshot.iter().map(|s| s.item_uid).collect();
+            if uids != cx.last_item_selection {
+                cx.last_item_selection = uids;
+                if snapshot.is_empty() {
+                    cx.chat_panel.clear_item_selection();
+                } else {
+                    cx.chat_panel.set_item_selection(snapshot);
+                }
             }
         }
 
@@ -3396,8 +3657,22 @@ fn get_locator(data_sources: &[Box<dyn DeferredDataSource>]) -> String {
     }
 }
 
+/// Optional startup configuration (e.g. AI assistant tool paths from the CLI).
+#[derive(Default)]
+pub struct StartOptions {
+    /// Pre-fills the Co-Pilot's DuckDB path (from `--duckdb` or auto-detection).
+    pub ai_duckdb_path: Option<String>,
+    /// Pre-fills the Co-Pilot's source-code path (from `--code`).
+    pub ai_code_path: Option<String>,
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub fn start(data_sources: Vec<Box<dyn DeferredDataSource>>) {
+    start_with_options(data_sources, StartOptions::default());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn start_with_options(data_sources: Vec<Box<dyn DeferredDataSource>>, opts: StartOptions) {
     env_logger::try_init().unwrap_or(()); // Log to stderr (if you run with `RUST_LOG=debug`).
 
     // IMPORTANT: This will be used as the directory name for the storage
@@ -3416,7 +3691,7 @@ pub fn start(data_sources: Vec<Box<dyn DeferredDataSource>>) {
     eframe::run_native(
         app_name,
         native_options,
-        Box::new(|cc| Ok(Box::new(ProfApp::new(cc, data_sources)))),
+        Box::new(|cc| Ok(Box::new(ProfApp::new(cc, data_sources, opts)))),
     )
     .expect("failed to start eframe");
 }
@@ -3446,7 +3721,7 @@ pub fn start(data_sources: Vec<Box<dyn DeferredDataSource>>) {
             .start(
                 canvas,
                 web_options,
-                Box::new(|cc| Ok(Box::new(ProfApp::new(cc, data_sources)))),
+                Box::new(|cc| Ok(Box::new(ProfApp::new(cc, data_sources, StartOptions::default())))),
             )
             .await;
 
