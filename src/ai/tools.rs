@@ -275,6 +275,47 @@ pub fn execute_run_query_raw(duckdb_path: &str, sql: &str) -> Result<String, Str
     }
 }
 
+/// Canonical per-`item_uid` dedup SELECT — the single source of truth for
+/// corrected task durations, composed by eval/MCP layers.
+///
+/// The tile-exported DB stores one row per lifecycle slice, so naive
+/// `COUNT(*)`/`SUM` over `items` over-counts massively (e.g.
+/// `SUM(lifetime.duration)` inflates a task's wall-clock ~523x on bg4N2). This
+/// collapses to one row per `item_uid`:
+///   - inner `DISTINCT (item_uid, entry_slug, title, lifetime, running, waiting)`
+///     removes exact-dup slice rows and cross-slug copy dups (some copy uids
+///     span 2 slugs);
+///   - `any_value(lifetime…)` is the true wall-clock span (lifetime is constant
+///     per uid); `sum(running/waiting)` are true totals over real slices (never
+///     `SUM(DISTINCT …)`, which would collapse equal-duration slices);
+///     `max(running)` is the longest single slice.
+///
+/// Returned WITHOUT a trailing `;` so it composes as a subquery / `CREATE VIEW`
+/// body. On the live read-only connection it must be inlined as a CTE
+/// (`CREATE VIEW` is rejected read-only); the `CREATE VIEW` form is used only in
+/// a separate writable connection (e.g. the regression test).
+#[cfg(feature = "duckdb")]
+pub fn dedup_select_sql() -> &'static str {
+    "WITH slices AS (
+    SELECT DISTINCT item_uid, entry_slug, title, lifetime, running, waiting
+    FROM items
+)
+SELECT
+    item_uid,
+    any_value(title)                              AS title,
+    min(entry_slug)                               AS entry_slug,
+    count(DISTINCT entry_slug)                    AS n_slugs,
+    any_value(lifetime.start)                     AS lifetime_start_ns,
+    any_value(lifetime.stop)                      AS lifetime_stop_ns,
+    any_value(lifetime.duration)                  AS lifetime_dur_ns,
+    round(any_value(lifetime.duration) / 1e6, 4)  AS lifetime_ms,
+    round(sum(running.duration) / 1e6, 4)         AS running_ms,
+    round(sum(waiting.duration) / 1e6, 4)         AS waiting_ms,
+    round(max(running.duration) / 1e6, 4)         AS longest_running_slice_ms
+FROM slices
+GROUP BY item_uid"
+}
+
 /// Read a source file from the code root directory.
 ///
 /// The path must be relative and within `code_root` — path traversal (`..`) is rejected.
@@ -1814,6 +1855,66 @@ mod tests {
             leaked.is_ok(),
             "positive control: an unhardened connection should read the file, got {leaked:?}"
         );
+    }
+
+    /// P0(c): the canonical per-`item_uid` dedup (`dedup_select_sql`) must yield
+    /// the TRUE durations for uid 48, not the inflated naive `SUM(lifetime…)`.
+    /// Pins the NUMBERS (never the title). Owns a WRITABLE temp copy of the DB
+    /// because the live connection is read-only (CREATE VIEW is rejected there).
+    #[test]
+    fn test_dedup_durations_uid48() {
+        let src = test_db_path();
+        if !src.exists() {
+            eprintln!("skipping dedup: test DB absent at {}", src.display());
+            return;
+        }
+        // Writable temp copy — the canonical fixture must not be mutated and the
+        // read-only live connection cannot CREATE VIEW.
+        let tmp = std::env::temp_dir().join("legion_p0c_dedup_uid48.duckdb");
+        let _ = std::fs::remove_file(&tmp);
+        std::fs::copy(&src, &tmp).expect("copy test DB to a writable temp file");
+
+        let conn = duckdb::Connection::open(&tmp).expect("open writable temp DB");
+        conn.execute_batch(&format!(
+            "CREATE OR REPLACE VIEW tasks_dedup AS {}",
+            dedup_select_sql()
+        ))
+        .expect("create dedup view on the writable connection");
+
+        let (lifetime_ms, running_ms, longest_ms): (f64, f64, f64) = conn
+            .query_row(
+                "SELECT lifetime_ms, running_ms, longest_running_slice_ms \
+                 FROM tasks_dedup WHERE item_uid = 48",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("query the dedup view for uid 48");
+
+        // The naive (un-deduped) wall-clock estimate — what the dedup corrects.
+        let naive_ms: f64 = conn
+            .query_row(
+                "SELECT round(SUM(lifetime.duration) / 1e6, 4) FROM items WHERE item_uid = 48",
+                [],
+                |r| r.get(0),
+            )
+            .expect("query the naive inflation");
+
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-3;
+        assert!(close(lifetime_ms, 1546.0172), "lifetime_ms = {lifetime_ms}, want 1546.0172");
+        assert!(close(running_ms, 432.7334), "running_ms = {running_ms}, want 432.7334");
+        assert!(
+            close(longest_ms, 13.1611),
+            "longest_running_slice_ms = {longest_ms}, want 13.1611"
+        );
+        assert!(close(naive_ms, 808566.9726), "naive_ms = {naive_ms}, want 808566.9726");
+        // The dedup removes a ~523x inflation in the naive wall-clock estimate.
+        assert!(
+            (naive_ms / lifetime_ms - 523.0).abs() < 1.0,
+            "inflation ratio = {}, want ~523",
+            naive_ms / lifetime_ms
+        );
+
+        let _ = std::fs::remove_file(&tmp);
     }
 }
 
