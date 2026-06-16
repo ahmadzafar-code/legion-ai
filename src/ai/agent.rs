@@ -620,6 +620,40 @@ impl AgentSession {
         }
     }
 
+    /// Returns true if `slug` is a known `entry_slug` in the profile's `entries`
+    /// table.
+    ///
+    /// The slug comes from untrusted model tool input, so it is NEVER
+    /// interpolated into the SQL (which would make the validation query itself an
+    /// injection vector — `execute_run_query_raw` builds SQL by `format!`, not
+    /// parameters). Instead a CONSTANT query fetches the valid-slug set and
+    /// membership is tested in Rust. The slugs are aggregated into a SINGLE row
+    /// via `json_group_array` so the 50-row cap in `execute_run_query_raw` cannot
+    /// truncate the set (the `entries` table can exceed 50 rows).
+    #[cfg(feature = "duckdb")]
+    fn slug_exists(&self, slug: &str) -> bool {
+        let json = match super::tools::execute_run_query_raw(
+            &self.duckdb_path,
+            "SELECT json_group_array(entry_slug) AS all_slugs FROM entries",
+        ) {
+            Ok(j) => j,
+            Err(_) => return false,
+        };
+        serde_json::from_str::<Value>(&json)
+            .ok()
+            .and_then(|v| {
+                let cell = v.get(0)?.get("all_slugs")?;
+                // Normally a nested JSON array; tolerate a JSON-encoded string too.
+                let arr = match cell {
+                    Value::Array(a) => a.clone(),
+                    Value::String(s) => serde_json::from_str::<Vec<Value>>(s).ok()?,
+                    _ => return None,
+                };
+                Some(arr.iter().any(|x| x.as_str() == Some(slug)))
+            })
+            .unwrap_or(false)
+    }
+
     /// Dispatch a tool call to the appropriate tool function.
     ///
     /// Screenshot and zoom_to results are returned with a `__IMAGE_BASE64__`
@@ -804,6 +838,19 @@ impl AgentSession {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_owned();
+                // Reject unknown slugs explicitly so an invalid highlight does not
+                // silently no-op at render time while reporting success. Gated by a
+                // cfg ATTRIBUTE (not cfg!()) so the call to the duckdb-only
+                // `slug_exists` is textually absent under the {ai}-only combo.
+                #[cfg(feature = "duckdb")]
+                {
+                    if !self.slug_exists(entry_slug) {
+                        return Err(format!(
+                            "highlight: unknown entry_slug '{entry_slug}'. \
+                             Query `SELECT entry_slug FROM entries` for valid slugs."
+                        ));
+                    }
+                }
                 self.run_highlights.push(Highlight {
                     entry_slug: entry_slug.to_owned(),
                     start_ns,
@@ -832,8 +879,17 @@ impl AgentSession {
             }
 
             "clear_highlights" => {
-                self.emit(AgentEvent::ClearHighlights);
-                Ok("Cleared all timeline highlights.".to_owned())
+                // Report what actually happened instead of always claiming success.
+                // Clear the run accumulator too, so the count is truthful and the
+                // cleared highlights do not still appear in the final response.
+                let n = self.run_highlights.len();
+                if n == 0 {
+                    Ok("No highlights to clear.".to_owned())
+                } else {
+                    self.emit(AgentEvent::ClearHighlights);
+                    self.run_highlights.clear();
+                    Ok(format!("Cleared {n} highlight(s)."))
+                }
             }
 
             "update_findings" => {
@@ -1448,5 +1504,53 @@ Found issues.
         assert!(r.starts_with("## Findings so far"));
         assert!(r.contains("- alpha"));
         assert!(r.contains("- beta"));
+    }
+
+    /// P0(b): the `highlight` handler must reject an unknown `entry_slug` with an
+    /// explicit `Err` instead of silently no-opping while reporting success; a
+    /// real slug from `entries` must succeed. Also exercises `slug_exists`
+    /// directly. Requires the bg4N2 fixture; soft-skips if absent.
+    #[cfg(feature = "duckdb")]
+    #[test]
+    fn test_highlight_rejects_unknown_slug() {
+        let db = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../multinoderuns/bg4N2/profcbN2g4b.duckdb");
+        if !db.exists() {
+            eprintln!("skipping: test DB absent at {}", db.display());
+            return;
+        }
+        let (event_tx, _event_rx) = std::sync::mpsc::channel();
+        let (_cmd_tx, command_rx) = std::sync::mpsc::channel();
+        let mut s = AgentSession::new(
+            "key".into(),
+            "model".into(),
+            db.to_str().unwrap().to_owned(),
+            String::new(),
+            String::new(),
+            event_tx,
+            command_rx,
+        );
+
+        // slug_exists membership (entries has >50 rows; "all" is a real slug).
+        assert!(s.slug_exists("all"), "expected 'all' to be a valid entry_slug");
+        assert!(!s.slug_exists("nonexistent/proc_999"));
+
+        // The handler accepts a real slug ...
+        let ok_input = serde_json::json!({
+            "entry_slug": "all", "start_ns": 0, "stop_ns": 1000
+        });
+        assert!(s.execute_tool("highlight", &ok_input).is_ok());
+
+        // ... and rejects a bogus one with an explicit error.
+        let bad_input = serde_json::json!({
+            "entry_slug": "nonexistent/proc_999", "start_ns": 0, "stop_ns": 1000
+        });
+        let err = s
+            .execute_tool("highlight", &bad_input)
+            .expect_err("bogus slug must be rejected");
+        assert!(
+            err.contains("unknown entry_slug"),
+            "error should name the unknown slug, got: {err}"
+        );
     }
 }
