@@ -316,6 +316,62 @@ FROM slices
 GROUP BY item_uid"
 }
 
+/// Cycle-guarded critical-path walk from `start_uid`, enriched with corrected
+/// (deduped) durations — the single source of truth for the `find_blockers` tool.
+///
+/// Walks `critical_path.item_uid` edges from `start_uid` toward the root blocker,
+/// carrying a visited-uid `path` array. The `list_contains` guard plus the
+/// `cycle` flag are MANDATORY: there is no self-loop, but real 2-cycles exist
+/// (e.g. 2220↔1481), and DuckDB's recursive UNION cannot dedup them because the
+/// growing `path`/`depth` keeps rows distinct — a depth cap alone would walk
+/// 100k+ rows. The depth cap (64) is a secondary backstop.
+///
+/// The enrichment join reuses the SAME dedup grain as [`dedup_select_sql`]
+/// (inner `DISTINCT (item_uid, entry_slug, lifetime, running, waiting)`, outer
+/// `GROUP BY item_uid`) so the slice-row inflation cannot re-enter.
+///
+/// `start_uid` is a `u64` (never model text), so formatting it directly into the
+/// two `CAST(... AS UBIGINT)` literals carries no injection surface. Returned
+/// WITHOUT a trailing `;` so it composes as a subquery and passes the
+/// `SELECT/WITH` prefix guard in [`execute_run_query_raw`].
+///
+/// Note: routed through `execute_run_query_raw`, results inherit its 50-row cap.
+/// Real chains are ≤7 rows (uid 48 → 7; uid 2220 → 2), so this is acceptable; a
+/// pathological 51–64-row chain would silently drop its DEEPEST rows.
+#[cfg(feature = "duckdb")]
+pub fn find_blockers_sql(start_uid: u64) -> String {
+    format!(
+        "WITH RECURSIVE edges AS (
+    SELECT DISTINCT item_uid AS src, critical_path.item_uid AS dst
+    FROM items WHERE critical_path.item_uid IS NOT NULL
+),
+walk AS (
+    SELECT CAST({start_uid} AS UBIGINT) AS uid, 0 AS depth,
+           [CAST({start_uid} AS UBIGINT)] AS path, FALSE AS cycle
+    UNION ALL
+    SELECT e.dst, w.depth + 1,
+           list_append(w.path, e.dst),
+           list_contains(w.path, e.dst)        AS cycle
+    FROM walk w
+    JOIN edges e ON e.src = w.uid
+    WHERE w.depth < 64
+      AND NOT w.cycle
+      AND NOT list_contains(w.path, e.dst)
+)
+SELECT w.depth, w.uid, t.title, t.lifetime_ms, t.running_ms, t.waiting_ms
+FROM walk w
+LEFT JOIN (
+    SELECT item_uid, any_value(title) AS title,
+           round(any_value(lifetime.duration)/1e6,4) AS lifetime_ms,
+           round(sum(running.duration)/1e6,4)        AS running_ms,
+           round(sum(waiting.duration)/1e6,4)        AS waiting_ms
+    FROM (SELECT DISTINCT item_uid, entry_slug, title, lifetime, running, waiting FROM items) s
+    GROUP BY item_uid
+) t ON t.item_uid = w.uid
+ORDER BY w.depth"
+    )
+}
+
 /// Read a source file from the code root directory.
 ///
 /// The path must be relative and within `code_root` — path traversal (`..`) is rejected.
@@ -1913,6 +1969,102 @@ mod tests {
             "inflation ratio = {}, want ~523",
             naive_ms / lifetime_ms
         );
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// P1.0: the find_blockers critical-path walk must be cycle-guarded. Pins ROW
+    /// COUNTS and the final uid (never the word "depth-N"). Uses a DIRECT
+    /// connection — the unguarded variant's 100001 rows would be impossible
+    /// through execute_run_query_raw's 50-row cap; mirrors P0(c)'s writable
+    /// temp-copy style.
+    #[test]
+    fn test_find_blockers_cycle_guard() {
+        let src = test_db_path();
+        if !src.exists() {
+            eprintln!("skipping find_blockers: test DB absent at {}", src.display());
+            return;
+        }
+        let tmp = std::env::temp_dir().join("legion_p1_find_blockers.duckdb");
+        let _ = std::fs::remove_file(&tmp);
+        std::fs::copy(&src, &tmp).expect("copy test DB to a writable temp file");
+        let conn = duckdb::Connection::open(&tmp).expect("open writable temp DB");
+
+        // Guarded walk from uid 48: an acyclic chain of exactly 7 rows ending at
+        // the root blocker uid 1 (External Thread).
+        let (rows, max_depth, deepest_uid, deepest_title): (i64, i32, u64, String) = conn
+            .query_row(
+                &format!(
+                    "SELECT count(*), max(depth), arg_max(uid, depth), arg_max(title, depth) \
+                     FROM ({}) s",
+                    find_blockers_sql(48)
+                ),
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .expect("find_blockers(48)");
+        assert_eq!(rows, 7, "uid 48 chain should be exactly 7 rows");
+        assert_eq!(max_depth, 6, "uid 48 max depth should be 6");
+        assert_eq!(deepest_uid, 1, "uid 48 root blocker should be uid 1");
+        assert!(
+            deepest_title.contains("External Thread"),
+            "deepest title should be the External Thread, got: {deepest_title}"
+        );
+
+        // Guarded walk from uid 2220 stops at the 2220<->1481 2-cycle: 2 rows.
+        let (rows2, max_depth2): (i64, i32) = conn
+            .query_row(
+                &format!("SELECT count(*), max(depth) FROM ({}) s", find_blockers_sql(2220)),
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("find_blockers(2220)");
+        assert_eq!(rows2, 2, "uid 2220 guarded chain should stop at 2 rows");
+        assert_eq!(max_depth2, 1, "uid 2220 guarded max depth should be 1");
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// Documents WHY the cycle guard exists: the UNguarded walk (no visited-set
+    /// guard) from the cycle uid 2220 runs away to the depth cap — 100001 rows /
+    /// max_depth 100000 — instead of stopping at the real 2220<->1481 2-cycle.
+    ///
+    /// `#[ignore]`d because the 100k-iteration recursive CTE takes ~40s through
+    /// the bundled duckdb, which is too slow for the default `cargo test` loop.
+    /// Run explicitly to verify the failure mode is pinned:
+    ///   cargo test --features ai,duckdb test_find_blockers_unguarded_runaway -- --ignored
+    #[test]
+    #[ignore = "slow (~40s): 100k-row recursive runaway; run with --ignored"]
+    fn test_find_blockers_unguarded_runaway() {
+        let src = test_db_path();
+        if !src.exists() {
+            eprintln!("skipping unguarded runaway: test DB absent at {}", src.display());
+            return;
+        }
+        let tmp = std::env::temp_dir().join("legion_p1_find_blockers_unguarded.duckdb");
+        let _ = std::fs::remove_file(&tmp);
+        std::fs::copy(&src, &tmp).expect("copy test DB to a writable temp file");
+        let conn = duckdb::Connection::open(&tmp).expect("open writable temp DB");
+
+        let (urows, umax): (i64, i32) = conn
+            .query_row(
+                "WITH RECURSIVE edges AS (
+                     SELECT DISTINCT item_uid AS src, critical_path.item_uid AS dst
+                     FROM items WHERE critical_path.item_uid IS NOT NULL
+                 ),
+                 walk AS (
+                     SELECT CAST(2220 AS UBIGINT) AS uid, 0 AS depth
+                     UNION ALL
+                     SELECT e.dst, w.depth + 1 FROM walk w JOIN edges e ON e.src = w.uid
+                     WHERE w.depth < 100000
+                 )
+                 SELECT count(*), max(depth) FROM walk",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("unguarded runaway");
+        assert_eq!(urows, 100001, "unguarded walk should run away to 100001 rows");
+        assert_eq!(umax, 100000, "unguarded walk should hit the 100000 depth cap");
 
         let _ = std::fs::remove_file(&tmp);
     }
