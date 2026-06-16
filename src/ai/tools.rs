@@ -189,7 +189,7 @@ pub fn execute_run_query(duckdb_path: &str, sql: &str) -> Result<String, String>
 /// Used internally by gather_overview() which parses the JSON itself.
 #[cfg(feature = "duckdb")]
 pub fn execute_run_query_raw(duckdb_path: &str, sql: &str) -> Result<String, String> {
-    use duckdb::Connection;
+    use duckdb::{AccessMode, Config, Connection};
 
     let sql_trimmed = sql.trim().trim_end_matches(';');
 
@@ -199,7 +199,18 @@ pub fn execute_run_query_raw(duckdb_path: &str, sql: &str) -> Result<String, Str
         return Err("Only SELECT/WITH queries are allowed.".into());
     }
 
-    let conn = Connection::open(duckdb_path)
+    // Open read-only with external file access disabled. The SELECT/WITH prefix
+    // guard above does NOT block table functions such as read_text()/read_csv()/
+    // glob() used in a FROM clause, so an untrusted query could otherwise read
+    // arbitrary host files. AccessMode::ReadOnly rejects writes/DDL (defense in
+    // depth + clearer errors); enable_external_access(false) is the actual gate
+    // that blocks external-file reads.
+    let config = Config::default()
+        .access_mode(AccessMode::ReadOnly)
+        .map_err(|e| format!("config access_mode: {e}"))?
+        .enable_external_access(false)
+        .map_err(|e| format!("config external_access: {e}"))?;
+    let conn = Connection::open_with_flags(duckdb_path, config)
         .map_err(|e| format!("Failed to open DuckDB '{}': {}", duckdb_path, e))?;
 
     // Strip trailing LIMIT clause to avoid LIMIT-inside-LIMIT syntax errors.
@@ -1746,5 +1757,63 @@ pub fn tool_definitions(has_duckdb: bool, has_code: bool) -> Vec<serde_json::Val
     }));
 
     tools
+}
+
+#[cfg(all(test, feature = "duckdb"))]
+mod tests {
+    use super::*;
+
+    /// Path to the shared bg4N2 test profile. It is an untracked fixture living in
+    /// the repo root (one level above the crate dir), so resolve it relative to
+    /// `CARGO_MANIFEST_DIR`. Tests soft-skip if it is absent on this machine.
+    fn test_db_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../multinoderuns/bg4N2/profcbN2g4b.duckdb")
+    }
+
+    /// P0(a): the read-only + `enable_external_access(false)` hardening must block
+    /// table-function file reads (e.g. `read_text`) in a FROM clause, while benign
+    /// SELECTs still work. The probe MUST use the FROM form: scalar `SELECT
+    /// read_text(...)` raises a Binder Error regardless of hardening (false positive).
+    #[test]
+    fn test_run_query_blocks_external_file_read() {
+        let db = test_db_path();
+        if !db.exists() {
+            eprintln!("skipping {}: test DB absent at {}", "exfil", db.display());
+            return;
+        }
+        let db = db.to_str().unwrap();
+
+        // Benign query still works through the hardened connection.
+        let ok = execute_run_query_raw(db, "SELECT COUNT(*) AS cnt FROM items")
+            .expect("benign SELECT should succeed through hardened connection");
+        assert!(ok.starts_with('['), "benign query should return a JSON array, got: {ok}");
+        assert!(ok.contains("cnt"), "benign query JSON missing alias, got: {ok}");
+
+        // Exfil probe (table function in a FROM clause) must be blocked at the engine,
+        // exercised through the real wrapped path the agent uses.
+        let err = execute_run_query_raw(db, "SELECT content FROM read_text('/etc/hosts')")
+            .expect_err("external file read must be blocked by the hardened connection");
+        assert!(
+            err.contains("Permission") || err.contains("disabled") || err.contains("external"),
+            "blocked error should signal external-access denial, got: {err}"
+        );
+        assert!(
+            !err.contains("Binder Error"),
+            "must be an access denial, not a binder error (the scalar-form false positive): {err}"
+        );
+
+        // Positive control: the SAME probe SUCCEEDS against an unhardened (default,
+        // external-access-enabled) connection — proving the test gates the hardening
+        // rather than some unrelated failure. This is the in-process analogue of the
+        // CLI positive control that read /etc/hosts before the fix.
+        let unhardened = duckdb::Connection::open_in_memory().expect("open in-memory");
+        let leaked: Result<String, _> =
+            unhardened.query_row("SELECT content FROM read_text('/etc/hosts')", [], |r| r.get(0));
+        assert!(
+            leaked.is_ok(),
+            "positive control: an unhardened connection should read the file, got {leaked:?}"
+        );
+    }
 }
 

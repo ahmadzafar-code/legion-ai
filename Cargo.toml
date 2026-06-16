@@ -58,7 +58,10 @@ tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["json", "env-filter", "fmt", "registry"], optional = true }
 
 # duckdb:
-duckdb = { version = "1.4.0", features = ["appender-arrow", "bundled"], optional = true }
+# "json" statically bundles the json extension so to_json()/json_group_array()
+# (used to serialize query results) work even with enable_external_access(false),
+# which disables on-demand extension autoloading. See execute_run_query_raw.
+duckdb = { version = "1.4.0", features = ["appender-arrow", "bundled", "json"], optional = true }
 
 # client:
 url = { version = "2", optional = true }
