@@ -1336,6 +1336,7 @@ The `overview` reports the node count and a per-node breakdown (e.g. "Per-Node U
 
 ## Working with a selection
 If the message contains a `## Current selection` block, treat it as the referent of "this", "that task", "here", etc. It lists the selected item_uid(s), entry_slug(s), time intervals, and titles — use those exact values in your queries.
+For "longest / most time in this range" questions about a selected RANGE, CLIP each task's running time to the selected interval — `SUM(LEAST(running.stop, hi) - GREATEST(running.start, lo))` over the slices that overlap it (see run_query example 10). Do NOT compare full task durations: a task that mostly runs outside the range must not win on the strength of time spent outside it.
 
 ## Memory across questions
 If the message starts with a `## Findings so far` block, those are YOUR notes from earlier in this session — treat them as established and don't re-derive them. As you reach durable conclusions (the profile's structure, the dominant bottleneck, hypotheses you've confirmed or ruled out), record them with `update_findings` so they carry to later questions. Keep the list short and current; pass `replace=true` to consolidate or correct it.

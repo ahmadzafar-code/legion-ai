@@ -1627,6 +1627,18 @@ pub fn tool_definitions(has_duckdb: bool, has_code: bool) -> Vec<serde_json::Val
                     WHERE deferred IS NOT NULL AND deferred.duration < 100000\n\
                       AND running IS NOT NULL\n\
                     ORDER BY running.start\n\n\
+                 10. Most running time WITHIN a range (CLIP to the range — for \"longest / most\n\
+                     time in the selected range\"; count only the portion inside [{lo_ns}, {hi_ns}]):\n\
+                    SELECT item_uid,\n\
+                      ROUND(SUM(LEAST(e, {hi_ns}) - GREATEST(s, {lo_ns})) / 1e6, 2) AS ms_in_range\n\
+                    FROM (SELECT DISTINCT item_uid, entry_slug,\n\
+                            running.start AS s, running.stop AS e\n\
+                          FROM items WHERE running.start IS NOT NULL\n\
+                            AND (entry_slug LIKE '%_cpu_%' OR entry_slug LIKE '%_gpudev_%')\n\
+                            AND running.start < {hi_ns} AND running.stop > {lo_ns})\n\
+                    GROUP BY item_uid ORDER BY ms_in_range DESC, item_uid ASC\n\
+                    (CLIP each task's running to the range with LEAST/GREATEST; do NOT compare\n\
+                     full task durations — a task mostly outside the range should not win)\n\n\
                  IMPORTANT: You can call this tool multiple times per response to batch independent queries. \
                  Do NOT include LIMIT in your query — a hard cap of 50 rows is applied automatically. \
                  Before writing a query, check the overview's Schema section for exact column names. \
