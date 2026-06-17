@@ -691,26 +691,7 @@ impl AgentSession {
     /// truncate the set (the `entries` table can exceed 50 rows).
     #[cfg(feature = "duckdb")]
     fn slug_exists(&self, slug: &str) -> bool {
-        let json = match super::tools::execute_run_query_raw(
-            &self.duckdb_path,
-            "SELECT json_group_array(entry_slug) AS all_slugs FROM entries",
-        ) {
-            Ok(j) => j,
-            Err(_) => return false,
-        };
-        serde_json::from_str::<Value>(&json)
-            .ok()
-            .and_then(|v| {
-                let cell = v.get(0)?.get("all_slugs")?;
-                // Normally a nested JSON array; tolerate a JSON-encoded string too.
-                let arr = match cell {
-                    Value::Array(a) => a.clone(),
-                    Value::String(s) => serde_json::from_str::<Vec<Value>>(s).ok()?,
-                    _ => return None,
-                };
-                Some(arr.iter().any(|x| x.as_str() == Some(slug)))
-            })
-            .unwrap_or(false)
+        super::tools::slug_exists(&self.duckdb_path, slug)
     }
 
     /// Dispatch a tool call to the appropriate tool function.

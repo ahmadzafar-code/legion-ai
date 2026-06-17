@@ -216,7 +216,7 @@ fn tools_call_result(params: &Value, ctx: &ServerCtx) -> Value {
     // RESULT with isError:true (model-readable), not a protocol error.
     if VISUAL_TOOLS.contains(&name) {
         return match &ctx.ui_bridge {
-            Some(bridge) => visual_tool_result(name, &args, bridge),
+            Some(bridge) => visual_tool_result(name, &args, bridge, &ctx.duckdb_path),
             None => text_result(
                 &format!("visual tool '{name}' is unavailable: this server has no UI bridge."),
                 true,
@@ -279,7 +279,12 @@ fn text_result(text: &str, is_error: bool) -> Value {
 /// GUI arms), driving the live viewer over `bridge`, and translating the reply:
 /// a screenshot -> an MCP image block; an `Ack` -> text; a `viewport busy`/timeout
 /// -> `isError:true`. Typed args only (start_uid/entry_slug/range) — no model SQL.
-fn visual_tool_result(name: &str, args: &Value, bridge: &super::bridge::UiBridge) -> Value {
+fn visual_tool_result(
+    name: &str,
+    args: &Value,
+    bridge: &super::bridge::UiBridge,
+    duckdb_path: &str,
+) -> Value {
     use super::agent::{AgentEvent, UiCommand};
     use super::bridge::DEFAULT_REQUEST_TIMEOUT;
 
@@ -360,6 +365,18 @@ fn visual_tool_result(name: &str, args: &Value, bridge: &super::bridge::UiBridge
             let (Some(start_ns), Some(stop_ns)) = (i64_arg("start_ns"), i64_arg("stop_ns")) else {
                 return text_result("highlight requires start_ns and stop_ns (integers).", true);
             };
+            // P0(b) parity: reject an unknown slug (same check the embedded agent
+            // uses) BEFORE driving the UI — an invalid highlight is a tool error,
+            // not a silent no-op overlay.
+            if !super::tools::slug_exists(duckdb_path, slug) {
+                return text_result(
+                    &format!(
+                        "highlight: unknown entry_slug '{slug}'. Query \
+                         `SELECT entry_slug FROM entries` for valid slugs."
+                    ),
+                    true,
+                );
+            }
             let severity = args.get("severity").and_then(Value::as_str).unwrap_or("medium").to_owned();
             let label = args.get("label").and_then(Value::as_str).unwrap_or("").to_owned();
             let entry_slug = slug.to_owned();
@@ -655,18 +672,19 @@ mod tests {
     }
 
     /// A ctx with a bridge whose UI-side channels dangle — fine for `tools/list`
-    /// (which never drives the bridge).
-    fn ctx_with_dangling_bridge() -> ServerCtx {
+    /// and for arms that reject BEFORE driving the bridge (bad args / unknown slug).
+    fn ctx_with_dangling_bridge(duckdb_path: &str) -> ServerCtx {
         let (event_tx, _event_rx) = channel::<AgentEvent>();
         let (_cmd_tx, cmd_rx) = channel::<UiCommand>();
         let bridge = UiBridge::new(event_tx, cmd_rx, ViewportToken::new(), MCP_CONSUMER_ID);
-        ServerCtx::new("unused".into(), None).with_ui_bridge(bridge)
+        ServerCtx::new(duckdb_path.to_owned(), None).with_ui_bridge(bridge)
     }
 
     /// A ctx with a bridge + a stub UI thread that handles ONE event and replies
     /// with `reply(&event)`. The join handle yields the event the server emitted,
     /// for assertions.
     fn ctx_with_stub_ui(
+        duckdb_path: String,
         reply: impl Fn(&AgentEvent) -> UiCommand + Send + 'static,
     ) -> (ServerCtx, std::thread::JoinHandle<AgentEvent>) {
         let (event_tx, event_rx) = channel::<AgentEvent>();
@@ -677,7 +695,7 @@ mod tests {
             let _ = cmd_tx.send(reply(&ev));
             ev
         });
-        (ServerCtx::new("unused".into(), None).with_ui_bridge(bridge), handle)
+        (ServerCtx::new(duckdb_path, None).with_ui_bridge(bridge), handle)
     }
 
     #[test]
@@ -692,7 +710,7 @@ mod tests {
         }
 
         // WITH a bridge: all 9 visual tools advertised, alongside the data tools.
-        let resp = handle_request(&req("tools/list", json!({})), &ctx_with_dangling_bridge()).unwrap();
+        let resp = handle_request(&req("tools/list", json!({})), &ctx_with_dangling_bridge("unused")).unwrap();
         let tools = resp["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         for v in VISUAL_TOOLS {
@@ -712,37 +730,61 @@ mod tests {
     }
 
     #[test]
-    fn test_visual_highlight_routes_and_acks() {
+    fn test_visual_highlight_valid_slug_routes_and_acks() {
+        // Needs the real DB: the highlight arm validates the slug (P0(b) parity)
+        // against `entries` BEFORE driving the UI.
+        let Some(path) = test_db() else {
+            eprintln!("skipping: test DB absent");
+            return;
+        };
         // The stub UI asserts the event is a HighlightRequest with the right typed
         // fields, then ACKs.
-        let (ctx, handle) = ctx_with_stub_ui(|ev| {
+        let (ctx, handle) = ctx_with_stub_ui(path, |ev| {
             let rid = event_request_id(ev);
             match ev {
                 AgentEvent::HighlightRequest { entry_slug, start_ns, stop_ns, severity, .. } => {
-                    assert_eq!(entry_slug, "n0_gpu_g0");
+                    assert_eq!(entry_slug, "n0_cpu_c1");
                     assert_eq!((*start_ns, *stop_ns), (100, 200));
                     assert_eq!(severity, "high");
                 }
                 other => panic!("expected HighlightRequest, got {other:?}"),
             }
-            UiCommand::Ack { request_id: rid, message: "Highlight added on n0_gpu_g0.".into() }
+            UiCommand::Ack { request_id: rid, message: "Highlight added on n0_cpu_c1.".into() }
         });
 
         let (text, is_error) = call(
             &ctx,
             "highlight",
-            json!({ "entry_slug": "n0_gpu_g0", "start_ns": 100, "stop_ns": 200, "severity": "high" }),
+            json!({ "entry_slug": "n0_cpu_c1", "start_ns": 100, "stop_ns": 200, "severity": "high" }),
         );
-        assert!(!is_error, "highlight should ACK success: {text}");
+        assert!(!is_error, "valid-slug highlight should ACK success: {text}");
         assert!(text.contains("Highlight added"), "ACK text echoed: {text}");
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_visual_highlight_unknown_slug_rejected() {
+        // P0(b): an unknown slug is rejected as a tool error BEFORE the bridge is
+        // driven (dangling bridge proves no event is sent — else it would block).
+        let Some(path) = test_db() else {
+            eprintln!("skipping: test DB absent");
+            return;
+        };
+        let ctx = ctx_with_dangling_bridge(&path);
+        let (text, is_error) = call(
+            &ctx,
+            "highlight",
+            json!({ "entry_slug": "n0_not_a_real_slug", "start_ns": 1, "stop_ns": 2 }),
+        );
+        assert!(is_error, "unknown slug must be a tool error, not a silent no-op");
+        assert!(text.contains("unknown entry_slug"), "actionable message: {text}");
     }
 
     #[test]
     fn test_visual_screenshot_returns_image_block() {
         let png = vec![0x89, 0x50, 0x4E, 0x47]; // \x89PNG magic
         let png_for_thread = png.clone();
-        let (ctx, handle) = ctx_with_stub_ui(move |ev| {
+        let (ctx, handle) = ctx_with_stub_ui("unused".into(), move |ev| {
             assert!(matches!(ev, AgentEvent::ScreenshotRequest { .. }), "expected ScreenshotRequest");
             UiCommand::ScreenshotData {
                 request_id: event_request_id(ev),
@@ -793,7 +835,7 @@ mod tests {
     fn test_visual_screenshot_empty_is_tool_error() {
         // Parity with the embedded path: an empty PNG capture -> tool error, not a
         // degenerate empty image block.
-        let (ctx, handle) = ctx_with_stub_ui(|ev| UiCommand::ScreenshotData {
+        let (ctx, handle) = ctx_with_stub_ui("unused".into(), |ev| UiCommand::ScreenshotData {
             request_id: event_request_id(ev),
             png_bytes: vec![],
             metadata: String::new(),
@@ -808,7 +850,7 @@ mod tests {
     fn test_visual_bad_args_is_tool_error() {
         // zoom_to without the required integers -> tool error, and the bridge is
         // never driven (stub UI thread would block forever, so use a dangling one).
-        let ctx = ctx_with_dangling_bridge();
+        let ctx = ctx_with_dangling_bridge("unused");
         let (text, is_error) = call(&ctx, "zoom_to", json!({ "start_ns": 5 }));
         assert!(is_error, "missing stop_ns must be a tool error");
         assert!(text.contains("zoom_to requires"), "actionable message: {text}");

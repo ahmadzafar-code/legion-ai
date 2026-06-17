@@ -1459,6 +1459,34 @@ fn classify_channel_slug(slug: &str) -> &'static str {
     "local"
 }
 
+/// True iff `slug` is a known `entries.entry_slug` in the profile DB. Used to
+/// reject a `highlight` on an unknown row (both the embedded agent and the
+/// in-viewer MCP server). Injection-safe: the slug is NEVER interpolated into SQL
+/// — we fetch the full slug set and check membership in Rust.
+#[cfg(feature = "duckdb")]
+pub fn slug_exists(duckdb_path: &str, slug: &str) -> bool {
+    let json = match execute_run_query_raw(
+        duckdb_path,
+        "SELECT json_group_array(entry_slug) AS all_slugs FROM entries",
+    ) {
+        Ok(j) => j,
+        Err(_) => return false,
+    };
+    serde_json::from_str::<serde_json::Value>(&json)
+        .ok()
+        .and_then(|v| {
+            let cell = v.get(0)?.get("all_slugs")?;
+            // Normally a nested JSON array; tolerate a JSON-encoded string too.
+            let arr = match cell {
+                serde_json::Value::Array(a) => a.clone(),
+                serde_json::Value::String(s) => serde_json::from_str::<Vec<serde_json::Value>>(s).ok()?,
+                _ => return None,
+            };
+            Some(arr.iter().any(|x| x.as_str() == Some(slug)))
+        })
+        .unwrap_or(false)
+}
+
 /// Return Claude API tool definitions for the agent.
 ///
 /// - `has_duckdb`: include `run_query` tool (only if duckdb feature AND path is set)
