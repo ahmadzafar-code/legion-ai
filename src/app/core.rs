@@ -374,11 +374,17 @@ struct Context {
     #[serde(skip)]
     mcp_cmd_tx: Option<std::sync::mpsc::Sender<crate::ai::UiCommand>>,
 
-    /// Request id + reply channel for a screenshot the SECOND source is awaiting;
-    /// Phase 1 routes the captured PNG here AFTER the embedded slot.
+    /// Request id + reply channel + watchdog deadline for a screenshot the SECOND
+    /// source is awaiting; Phase 1 routes the captured PNG here AFTER the embedded
+    /// slot. The deadline bounds the slot: `Event::Screenshot` always arrives the
+    /// next frame in practice, but if one were ever lost the slot would otherwise
+    /// stay stuck — busy-looping the repaint driver and locking out future MCP
+    /// navigations. Past the deadline the slot is reset (the bridge has already
+    /// timed out, so the dropped reply channel is harmless).
     #[cfg(feature = "ai")]
     #[serde(skip)]
-    mcp_awaiting_screenshot: Option<(u64, std::sync::mpsc::Sender<crate::ai::UiCommand>)>,
+    mcp_awaiting_screenshot:
+        Option<(u64, std::sync::mpsc::Sender<crate::ai::UiCommand>, std::time::Instant)>,
 
     /// V1.1: whether the in-viewer HTTP MCP server (data tools) has been started.
     /// One spawn attempt is made once a DuckDB path is configured.
@@ -3583,7 +3589,7 @@ impl eframe::App for ProfApp {
                         if let Some(request_id) = cx.awaiting_screenshot.take() {
                             return Some((request_id, encode_screenshot_png(image), false));
                         }
-                        if let Some((request_id, _)) = &cx.mcp_awaiting_screenshot {
+                        if let Some((request_id, _, _)) = &cx.mcp_awaiting_screenshot {
                             return Some((*request_id, encode_screenshot_png(image), true));
                         }
                     }
@@ -3593,7 +3599,7 @@ impl eframe::App for ProfApp {
             if let Some((request_id, png_bytes, is_mcp)) = captured {
                 let metadata = build_screenshot_metadata(cx, windows);
                 if is_mcp {
-                    if let Some((_, reply_tx)) = cx.mcp_awaiting_screenshot.take() {
+                    if let Some((_, reply_tx, _)) = cx.mcp_awaiting_screenshot.take() {
                         let _ = reply_tx.send(crate::ai::UiCommand::ScreenshotData {
                             request_id,
                             png_bytes,
@@ -3634,7 +3640,11 @@ impl eframe::App for ProfApp {
                     let request_id = pending_nav_request_id(&nav);
                     apply_navigation(cx, windows, &nav);
                     ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
-                    cx.mcp_awaiting_screenshot = Some((request_id, reply_tx));
+                    // Watchdog deadline > the bridge's request timeout, so the client
+                    // sees its own timeout first; this only frees a slot egui somehow
+                    // never fulfilled.
+                    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+                    cx.mcp_awaiting_screenshot = Some((request_id, reply_tx, deadline));
                 }
                 // Highlight: apply to the SAME shared state the embedded path writes,
                 // scroll to it, ACK (no screenshot — mirrors the embedded text result).
@@ -3810,10 +3820,16 @@ impl eframe::App for ProfApp {
 
         // V1.3: while an MCP screenshot is mid-flight, keep repainting so the
         // capture frame (which delivers `Event::Screenshot`) actually happens — the
-        // window is otherwise idle and would stall the request to timeout.
+        // window is otherwise idle and would stall the request to timeout. A watchdog
+        // resets the slot if egui somehow never delivers the screenshot, so this
+        // never becomes a permanent busy-loop / lockout.
         #[cfg(feature = "ai")]
-        if cx.mcp_awaiting_screenshot.is_some() {
-            ctx.request_repaint();
+        if let Some((_, _, deadline)) = &cx.mcp_awaiting_screenshot {
+            if std::time::Instant::now() >= *deadline {
+                cx.mcp_awaiting_screenshot = None; // bridge already timed out; free the slot
+            } else {
+                ctx.request_repaint();
+            }
         }
     }
 }
