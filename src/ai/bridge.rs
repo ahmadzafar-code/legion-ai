@@ -128,6 +128,13 @@ pub fn drain_source<S: EventSink>(
     }
 }
 
+/// Consumer id the embedded chat agent uses when it claims the viewport (V1.2).
+/// Distinct from [`MCP_CONSUMER_ID`] so the two drivers are mutually exclusive
+/// rather than re-entrant.
+pub const EMBEDDED_CONSUMER_ID: u64 = 0;
+/// Consumer id the in-viewer MCP server's [`UiBridge`] uses.
+pub const MCP_CONSUMER_ID: u64 = 1;
+
 // ── Viewport ownership: structural single-driver guard ───────────────────────
 
 /// A shared, clonable handle to the single viewport-ownership slot. `None` = free;
@@ -449,5 +456,103 @@ mod tests {
         assert_eq!(err, "viewport busy");
         // No event was sent (the guard failed before the send).
         assert!(event_rx.try_recv().is_err());
+    }
+
+    /// THE single-outstanding invariant (V1.2): with TWO sources sharing one token,
+    /// source A holds the viewport across a FULL screenshot round-trip (request ->
+    /// DELAYED reply). While A's request is in flight, source B's request returns
+    /// `Err("viewport busy")` (no interleaving, no clobbered slot); after A's
+    /// round-trip completes and releases, B's request succeeds. This pins that the
+    /// guard lives for the whole round-trip, not just the request frame.
+    #[test]
+    fn test_single_outstanding_screenshot_across_roundtrip() {
+        let token = ViewportToken::new();
+
+        // Source A (consumer 1) and source B (consumer 2): each has its own channel
+        // pair; both share the one token.
+        let (a_event_tx, a_event_rx) = channel::<AgentEvent>();
+        let (a_cmd_tx, a_cmd_rx) = channel::<UiCommand>();
+        let bridge_a = UiBridge::new(a_event_tx, a_cmd_rx, token.clone(), 1);
+
+        let (b_event_tx, b_event_rx) = channel::<AgentEvent>();
+        let (b_cmd_tx, b_cmd_rx) = channel::<UiCommand>();
+        let bridge_b = UiBridge::new(b_event_tx, b_cmd_rx, token.clone(), 2);
+
+        // Rendezvous: `claimed` fires once A has claimed the token (inside request);
+        // `release` gates the stub UI's reply so A is held in flight meanwhile.
+        let (claimed_tx, claimed_rx) = channel::<()>();
+        let (release_tx, release_rx) = channel::<()>();
+
+        // Stub UI thread: reply to A only AFTER `release` fires (delayed round-trip),
+        // then reply to B immediately. Echoes each event's request_id.
+        let ui = std::thread::spawn(move || {
+            let a_ev = a_event_rx.recv().expect("A event");
+            let a_rid = screenshot_rid(&a_ev);
+            release_rx.recv().expect("release signal");
+            let _ = a_cmd_tx.send(UiCommand::ScreenshotData {
+                request_id: a_rid,
+                png_bytes: vec![0xA],
+                metadata: "a".into(),
+            });
+            let b_ev = b_event_rx.recv().expect("B event");
+            let b_rid = screenshot_rid(&b_ev);
+            let _ = b_cmd_tx.send(UiCommand::ScreenshotData {
+                request_id: b_rid,
+                png_bytes: vec![0xB],
+                metadata: "b".into(),
+            });
+        });
+
+        // Source A: claim + send (signalling `claimed` from inside the event
+        // builder, i.e. after the token is held) + block on the delayed reply.
+        let claimed_tx2 = claimed_tx.clone();
+        let a = std::thread::spawn(move || {
+            bridge_a.request(
+                move |rid| {
+                    claimed_tx2.send(()).unwrap();
+                    AgentEvent::ScreenshotRequest { request_id: rid }
+                },
+                |cmd| matches!(cmd, UiCommand::ScreenshotData { .. }),
+                Duration::from_secs(5),
+            )
+        });
+
+        // Wait until A actually holds the token, then prove B is locked out.
+        claimed_rx.recv().expect("A claimed");
+        assert_eq!(token.current_owner(), Some(1), "A holds the viewport in flight");
+        let busy = bridge_b
+            .request(
+                |rid| AgentEvent::ScreenshotRequest { request_id: rid },
+                |_| true,
+                Duration::from_secs(1),
+            )
+            .unwrap_err();
+        assert_eq!(busy, "viewport busy", "B is locked out while A's round-trip is in flight");
+
+        // Let A's reply through; A completes and releases.
+        release_tx.send(()).unwrap();
+        let a_reply = a.join().unwrap().expect("A round-trips");
+        assert!(matches!(a_reply, UiCommand::ScreenshotData { png_bytes, .. } if png_bytes == vec![0xA]));
+        assert_eq!(token.current_owner(), None, "A released after its round-trip");
+
+        // Now B succeeds.
+        let b_reply = bridge_b
+            .request(
+                |rid| AgentEvent::ScreenshotRequest { request_id: rid },
+                |cmd| matches!(cmd, UiCommand::ScreenshotData { .. }),
+                Duration::from_secs(5),
+            )
+            .expect("B succeeds after A releases");
+        assert!(matches!(b_reply, UiCommand::ScreenshotData { png_bytes, .. } if png_bytes == vec![0xB]));
+        ui.join().unwrap();
+    }
+
+    /// Extract the request_id from a screenshot-bearing event (test helper).
+    fn screenshot_rid(ev: &AgentEvent) -> u64 {
+        match ev {
+            AgentEvent::ScreenshotRequest { request_id }
+            | AgentEvent::ZoomRequest { request_id, .. } => *request_id,
+            other => panic!("expected a screenshot event, got {other:?}"),
+        }
     }
 }

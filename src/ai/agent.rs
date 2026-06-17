@@ -163,6 +163,14 @@ pub struct AgentSession {
     /// Monotonically increasing ID for screenshot/zoom requests.
     next_request_id: u64,
 
+    /// Shared viewport-ownership token (V1.2). When set, the screenshot/navigation
+    /// path claims it for each round-trip so the embedded agent and an external
+    /// MCP driver are mutually exclusive. `None` (tests, or before the chat panel
+    /// wires it) keeps the legacy sole-driver behavior: no claim, always proceeds.
+    viewport_token: Option<super::bridge::ViewportToken>,
+    /// Consumer id used when claiming `viewport_token`.
+    viewport_consumer_id: u64,
+
     /// Highlights emitted via the `highlight` tool during the current run,
     /// merged into the final `AgentResponse`.
     run_highlights: Vec<Highlight>,
@@ -210,6 +218,8 @@ impl AgentSession {
             event_tx,
             command_rx,
             next_request_id: 0,
+            viewport_token: None,
+            viewport_consumer_id: super::bridge::EMBEDDED_CONSUMER_ID,
             run_highlights: Vec::new(),
             findings: Vec::new(),
             session_id: super::trace::new_session_id(),
@@ -280,10 +290,36 @@ impl AgentSession {
         self.command_rx = command_rx;
     }
 
+    /// Wire the shared viewport token (V1.2). After this, the screenshot/navigation
+    /// path claims `token` for each round-trip under `consumer_id`, so the embedded
+    /// agent and the in-viewer MCP driver are mutually exclusive (single outstanding
+    /// screenshot across both). Idempotent. When never called, the agent stays the
+    /// transparent sole driver (no claim).
+    pub fn set_viewport(&mut self, token: super::bridge::ViewportToken, consumer_id: u64) {
+        self.viewport_token = Some(token);
+        self.viewport_consumer_id = consumer_id;
+    }
+
     /// Send an event to the UI thread. Silently ignores send failures
     /// (which happen if the UI dropped its receiver).
     fn emit(&self, event: AgentEvent) {
         let _ = self.event_tx.send(event);
+    }
+
+    /// Claim the shared viewport for a viewport round-trip (V1.2). Returns an RAII
+    /// guard the caller holds for the duration of emit+wait — releasing it on every
+    /// exit path. `Err` with a model-readable "viewport busy" message if an external
+    /// driver holds it. When no token is wired, returns `Ok(None)` and the request
+    /// proceeds as the sole driver (legacy behavior, unchanged).
+    fn claim_viewport(&self) -> Result<Option<super::bridge::ViewportGuard>, String> {
+        match &self.viewport_token {
+            Some(token) => token.try_claim(self.viewport_consumer_id).map(Some).map_err(|_| {
+                "viewport busy: an external driver (Claude Code via the in-viewer MCP \
+                 server) is currently controlling the timeline. Retry shortly."
+                    .to_string()
+            }),
+            None => Ok(None),
+        }
     }
 
     /// Request a screenshot from the UI thread and wait for the response.
@@ -296,6 +332,9 @@ impl AgentSession {
         &mut self,
         zoom_range: Option<(i64, i64)>,
     ) -> Result<String, String> {
+        // Hold the viewport for the whole round-trip (claim -> emit -> await PNG ->
+        // release on drop). Single outstanding screenshot across embedded + MCP.
+        let _viewport = self.claim_viewport()?;
         let request_id = self.next_request_id;
         self.next_request_id += 1;
 
@@ -329,6 +368,8 @@ impl AgentSession {
     /// responds with `UiCommand::ScreenshotData`. Caller embeds `request_id`
     /// (from `alloc_request_id()`) into the event before passing it here.
     fn request_navigation(&mut self, request_id: u64, event: AgentEvent) -> Result<String, String> {
+        // Hold the viewport across the nav + screenshot round-trip (released on drop).
+        let _viewport = self.claim_viewport()?;
         self.emit(event);
         self.wait_for_screenshot(request_id)
     }

@@ -443,6 +443,10 @@ pub struct ChatPanel {
     pending_clear_selection: bool,
     /// User-initiated highlight actions from chip clicks, consumed by core.rs.
     pending_highlight_actions: Vec<HighlightAction>,
+    /// Shared viewport-ownership token (V1.2), handed to each spawned
+    /// `AgentSession` so the embedded agent and the in-viewer MCP driver are
+    /// mutually exclusive. `None` until `core.rs` wires it from the `Context`.
+    viewport_token: Option<crate::ai::bridge::ViewportToken>,
 }
 
 impl Clone for ChatPanel {
@@ -477,6 +481,7 @@ impl Clone for ChatPanel {
             pending_clear_highlights: self.pending_clear_highlights,
             pending_clear_selection: self.pending_clear_selection,
             pending_highlight_actions: self.pending_highlight_actions.clone(),
+            viewport_token: self.viewport_token.clone(),
         }
     }
 }
@@ -537,12 +542,22 @@ impl ChatPanel {
             pending_clear_highlights: false,
             pending_clear_selection: false,
             pending_highlight_actions: Vec::new(),
+            viewport_token: None,
         }
     }
 
     /// Toggle panel visibility.
     pub fn toggle(&mut self) {
         self.visible = !self.visible;
+    }
+
+    /// Wire the shared viewport token (V1.2). Idempotent; called by `core.rs` once
+    /// the `Context` is available so each spawned `AgentSession` claims the same
+    /// token the in-viewer MCP driver does.
+    pub fn ensure_viewport_token(&mut self, token: crate::ai::bridge::ViewportToken) {
+        if self.viewport_token.is_none() {
+            self.viewport_token = Some(token);
+        }
     }
 
     /// Pre-fill the tool paths (from CLI flags / auto-detection at startup).
@@ -961,6 +976,7 @@ impl ChatPanel {
         let session_arc = Arc::clone(&self.agent_session);
         let selection_preamble = self.build_selection_preamble();
         let query_clone = user_query;
+        let viewport_token = self.viewport_token.clone();
 
         // Create bidirectional channels for this request
         let (event_tx, event_rx) = mpsc::channel::<AgentEvent>();
@@ -992,6 +1008,13 @@ impl ChatPanel {
                     cmd_rx,
                 ),
             };
+
+            // V1.2: claim the shared viewport for each screenshot/nav round-trip so
+            // the embedded agent and the in-viewer MCP driver never have two
+            // screenshots in flight at once. No token wired => unchanged sole driver.
+            if let Some(token) = viewport_token {
+                session.set_viewport(token, crate::ai::bridge::EMBEDDED_CONSUMER_ID);
+            }
 
             // Run the agent — prepend selection context + @ attachments to the question.
             let enriched = format!("{selection_preamble}{context_section}{query_clone}");

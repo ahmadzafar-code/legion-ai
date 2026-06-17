@@ -3170,6 +3170,13 @@ impl eframe::App for ProfApp {
             ..
         } = self;
 
+        // V1.2: hand the embedded chat agent a clone of the shared viewport token so
+        // its screenshot/nav round-trips are mutually exclusive with the in-viewer
+        // MCP driver (single outstanding screenshot across both). Idempotent; no
+        // effect on the sole-driver path (the token is always free for it).
+        #[cfg(feature = "ai")]
+        cx.chat_panel.ensure_viewport_token(cx.viewport_token.clone());
+
         // V1.1: start the in-viewer HTTP MCP server (data tools only) once a DuckDB
         // path is configured. Runs on its OWN thread — never the egui main thread.
         // One spawn attempt; serves run_query/overview/find_blockers over HTTP so
