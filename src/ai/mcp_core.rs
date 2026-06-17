@@ -419,6 +419,11 @@ fn reply_request_id(cmd: &super::agent::UiCommand) -> Option<u64> {
 /// The visible time-range / entry-slug metadata rides along as a text block so the
 /// model can issue follow-up zoom/queries.
 fn screenshot_result(png_bytes: &[u8], metadata: &str) -> Value {
+    // Parity with the embedded path (wait_for_screenshot): an empty capture is a
+    // tool error, not a degenerate empty image block.
+    if png_bytes.is_empty() {
+        return text_result("screenshot capture returned empty data.", true);
+    }
     use base64::Engine;
     let encoded = base64::engine::general_purpose::STANDARD.encode(png_bytes);
     let bare = encoded.strip_prefix("data:image/png;base64,").unwrap_or(&encoded);
@@ -782,6 +787,21 @@ mod tests {
         let (text, is_error) = call(&ctx, "screenshot", json!({}));
         assert!(is_error, "viewport busy must be a tool error");
         assert!(text.contains("viewport busy"), "busy message is model-readable: {text}");
+    }
+
+    #[test]
+    fn test_visual_screenshot_empty_is_tool_error() {
+        // Parity with the embedded path: an empty PNG capture -> tool error, not a
+        // degenerate empty image block.
+        let (ctx, handle) = ctx_with_stub_ui(|ev| UiCommand::ScreenshotData {
+            request_id: event_request_id(ev),
+            png_bytes: vec![],
+            metadata: String::new(),
+        });
+        let (text, is_error) = call(&ctx, "screenshot", json!({}));
+        assert!(is_error, "empty screenshot must be a tool error");
+        assert!(text.contains("empty"), "actionable message: {text}");
+        handle.join().unwrap();
     }
 
     #[test]
