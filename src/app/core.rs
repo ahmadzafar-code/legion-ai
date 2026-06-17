@@ -1982,6 +1982,36 @@ fn clear_all_highlights(windows: &mut [Window]) -> usize {
     n
 }
 
+/// Flatten `ai_highlights` into the manager's row order: a flat list of
+/// `(entry_id, &mut highlight)` sorted by the stable `id`. Used by the manager (the
+/// `&mut` lets each row drive its enable checkbox) and unit-tested for deterministic
+/// ordering. Pure (no egui).
+#[cfg(feature = "ai")]
+fn flatten_highlights_sorted(
+    map: &mut HashMap<EntryID, Vec<AiHighlight>>,
+) -> Vec<(EntryID, &mut AiHighlight)> {
+    let mut rows: Vec<(EntryID, &mut AiHighlight)> =
+        map.iter_mut().flat_map(|(eid, v)| v.iter_mut().map(move |h| (eid.clone(), h))).collect();
+    rows.sort_by_key(|(_, h)| h.id);
+    rows
+}
+
+/// Union of the intervals of all ENABLED highlights (for "Zoom to all"); disabled
+/// highlights are ignored. `None` when nothing is enabled. Pure.
+#[cfg(feature = "ai")]
+fn highlight_union(map: &HashMap<EntryID, Vec<AiHighlight>>) -> Option<Interval> {
+    use crate::timestamp::Timestamp;
+    let mut bounds: Option<(i64, i64)> = None;
+    for h in map.values().flatten().filter(|h| h.enabled) {
+        let (s, e) = (h.interval.start.0, h.interval.stop.0);
+        bounds = Some(match bounds {
+            None => (s, e),
+            Some((bs, be)) => (bs.min(s), be.max(e)),
+        });
+    }
+    bounds.map(|(s, e)| Interval::new(Timestamp(s), Timestamp(e)))
+}
+
 /// Sink for draining the SECOND event source (the in-viewer MCP). Records the ONE
 /// request serviced per drain (the viewport token guarantees a single outstanding
 /// request across both sources): a navigation/screenshot (applied via the shared
@@ -2650,6 +2680,69 @@ impl Window {
         self.search_box(ui, cx);
         ui.add_space(WIDGET_PADDING);
         self.search_results(ui, cx);
+    }
+
+    /// Highlight manager (Task 3) — reuses the search-results backend shape (count
+    /// header + ScrollArea + the zoom/expand/scroll click handler). FLAT list across
+    /// `ai_highlights`, sorted by `id`; each row = an enable checkbox + the label as a
+    /// button that zooms to (and expands) the highlight. Globals: toggle all / clear
+    /// all / zoom to the union of enabled highlights.
+    #[cfg(feature = "ai")]
+    fn highlight_manager(&mut self, ui: &mut egui::Ui, cx: &mut Context) {
+        let total: usize = self.config.ai_highlights.values().map(Vec::len).sum();
+        ui.heading(format!("Profile {}: Highlights ({total})", self.index));
+        if total == 0 {
+            ui.label("No highlights.");
+            return;
+        }
+
+        // Globals row: toggle all overlays · clear all · zoom to the enabled union.
+        ui.horizontal(|ui| {
+            if ui.button("Toggle all").on_hover_text("Show or hide all overlays").clicked() {
+                self.config.ai_highlights_enabled = !self.config.ai_highlights_enabled;
+            }
+            if ui.button("Clear all").on_hover_text("Remove all highlights").clicked() {
+                self.config.ai_highlights.clear();
+            }
+            if ui.button("Zoom to all").on_hover_text("Frame the union of enabled highlights").clicked() {
+                if let Some(u) = highlight_union(&self.config.ai_highlights) {
+                    ProfApp::zoom(cx, u);
+                }
+            }
+        });
+
+        // Flat list, stable order by id. Record a clicked row, then act AFTER the
+        // scroll area releases the &mut borrow of ai_highlights (mirrors search_results).
+        let mut clicked: Option<(EntryID, Interval, Option<ItemUID>)> = None;
+        ScrollArea::vertical()
+            .max_height(ui.available_height().min(240.0))
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                for (eid, hl) in flatten_highlights_sorted(&mut self.config.ai_highlights) {
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut hl.enabled, "");
+                        let label = if hl.label.is_empty() {
+                            format!("highlight {}", hl.id)
+                        } else {
+                            hl.label.clone()
+                        };
+                        if ui.add(egui::Button::new(label).small()).clicked() {
+                            clicked = Some((eid.clone(), hl.interval, hl.item_uid));
+                        }
+                    });
+                }
+            });
+
+        if let Some((eid, interval, item_uid)) = clicked {
+            // Same as the search-result click: zoom to (a padded) interval + expand
+            // the row. uid-less gaps/regions stop here; a future task-target also
+            // scrolls to the item.
+            ProfApp::zoom(cx, interval.grow(interval.duration_ns() / 20));
+            self.expand_slot(&eid);
+            if let Some(uid) = item_uid {
+                self.config.scroll_to_item(ItemLocator { entry_id: eid, irow: None, item_uid: uid });
+            }
+        }
     }
 }
 
@@ -3511,6 +3604,17 @@ impl eframe::App for ProfApp {
                 });
             }
 
+            // Highlight manager — under the profile-search section. Reuses search's
+            // count + ScrollArea + zoom/expand click backend. Subsumes the former
+            // standalone Toggle/Delete highlight buttons (now its globals row).
+            #[cfg(feature = "ai")]
+            for window in windows.iter_mut() {
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    window.highlight_manager(ui, cx);
+                });
+            }
+
             ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
@@ -3543,30 +3647,8 @@ impl eframe::App for ProfApp {
                     }
                 });
 
-                // Highlight controls (AI overlays) — kept inside the bottom-up
-                // footer so they never collide with the top-down content above.
-                #[cfg(feature = "ai")]
-                ui.horizontal_wrapped(|ui| {
-                    if ui
-                        .button("Toggle highlights")
-                        .on_hover_text("Show or hide AI highlight overlays")
-                        .clicked()
-                    {
-                        for window in windows.iter_mut() {
-                            window.config.ai_highlights_enabled =
-                                !window.config.ai_highlights_enabled;
-                        }
-                    }
-                    if ui
-                        .button("Delete highlights")
-                        .on_hover_text("Remove all AI highlight overlays")
-                        .clicked()
-                    {
-                        for window in windows.iter_mut() {
-                            window.config.ai_highlights.clear();
-                        }
-                    }
-                });
+                // (The former standalone "Toggle highlights" / "Delete highlights"
+                // buttons moved into the highlight manager's globals row above.)
 
                 ui.separator();
                 egui::warn_if_debug_build(ui);
@@ -4282,5 +4364,48 @@ mod highlight_model_tests {
         assert!(a.enabled, "new highlights start enabled");
         // Unique + monotonic ids across BOTH apply sites (allocated in highlight_to_ai).
         assert!(b.id > a.id, "ids must be monotonic + unique: {} then {}", a.id, b.id);
+    }
+
+    use crate::ai::AiHighlight;
+    use crate::data::EntryID;
+    use crate::timestamp::{Interval, Timestamp};
+    use std::collections::HashMap;
+
+    fn ahl(id: u64, start: i64, stop: i64, enabled: bool) -> AiHighlight {
+        AiHighlight {
+            id,
+            interval: Interval::new(Timestamp(start), Timestamp(stop)),
+            label: format!("h{id}"),
+            item_uid: None,
+            enabled,
+        }
+    }
+
+    #[test]
+    fn test_flatten_highlights_sorted_is_deterministic() {
+        let mut map: HashMap<EntryID, Vec<AiHighlight>> = HashMap::new();
+        // Out-of-order ids across two entries -> flat list sorted by id.
+        map.insert(EntryID::root().child(0), vec![ahl(30, 0, 1, true), ahl(10, 0, 1, true)]);
+        map.insert(EntryID::root().child(1), vec![ahl(20, 0, 1, false)]);
+        let order: Vec<u64> =
+            flatten_highlights_sorted(&mut map).iter().map(|(_, h)| h.id).collect();
+        assert_eq!(order, vec![10, 20, 30], "flat list sorted by id across all entries");
+    }
+
+    #[test]
+    fn test_highlight_union_enabled_only() {
+        let mut map: HashMap<EntryID, Vec<AiHighlight>> = HashMap::new();
+        // ENABLED [100,200] + [400,500]; a DISABLED [0,1000] must be IGNORED.
+        map.insert(EntryID::root().child(0), vec![ahl(1, 100, 200, true), ahl(2, 0, 1000, false)]);
+        map.insert(EntryID::root().child(1), vec![ahl(3, 400, 500, true)]);
+        let u = highlight_union(&map).expect("some enabled -> Some");
+        assert_eq!((u.start.0, u.stop.0), (100, 500), "union of ENABLED only (disabled [0,1000] ignored)");
+
+        // All disabled -> None.
+        let mut none_map: HashMap<EntryID, Vec<AiHighlight>> = HashMap::new();
+        none_map.insert(EntryID::root().child(0), vec![ahl(1, 100, 200, false)]);
+        assert!(highlight_union(&none_map).is_none(), "no enabled -> None");
+        // Empty -> None.
+        assert!(highlight_union(&HashMap::new()).is_none());
     }
 }
