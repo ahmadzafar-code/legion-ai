@@ -265,7 +265,15 @@ struct Grade {
 }
 
 fn to_set(s: &str) -> BTreeSet<String> {
-    s.split(',').map(|e| e.trim().to_lowercase()).filter(|e| !e.is_empty()).collect()
+    // Strip surrounding list brackets/braces/parens + whitespace, then split on
+    // ',' and trim each token. So an LLM's "[1, 2, 3]" and the oracle's bare
+    // "3,2,1" both normalize to {1,2,3} (the bracket strip fixes a live mis-score).
+    let bracket = |c: char| matches!(c, '[' | ']' | '{' | '}' | '(' | ')') || c.is_whitespace();
+    s.trim_matches(bracket)
+        .split(',')
+        .map(|e| e.trim_matches(bracket).to_lowercase())
+        .filter(|e| !e.is_empty())
+        .collect()
 }
 
 /// Parse a uid tolerantly: accepts `"48"`, `" 48 "`, and integer-valued floats
@@ -780,7 +788,12 @@ mod tests {
     #[test]
     fn test_grade_set() {
         assert!(grade("set", "1,2,3", "3, 2, 1", 0.0).pass); // order/space-insensitive
-        let g = grade("set", "1,2", "1,2,3", 0.0);
+        // An LLM commonly emits a set as a bracketed list; it must still match the
+        // oracle's bare comma list (this was a live mis-score before the bracket strip).
+        assert!(grade("set", "[1, 2, 3]", "3,2,1", 0.0).pass);
+        assert!(grade("set", "{1,2,3}", "1, 2, 3", 0.0).pass);
+        // Genuine mismatch still fails (and reports Jaccard), even when bracketed.
+        let g = grade("set", "[1, 2]", "1,2,3", 0.0);
         assert!(!g.pass);
         assert_eq!(g.divergence.unwrap()["jaccard"], json!(2.0 / 3.0)); // |∩|/|∪|
     }
