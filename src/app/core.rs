@@ -2988,7 +2988,8 @@ impl ProfApp {
                                 entry_label: "timeline region".to_owned(),
                                 interval,
                             });
-                            cx.chat_panel.visible = true;
+                            // A2: record the selection but do NOT auto-open the chat
+                            // panel — the header "Selected:" banner surfaces it instead.
                         }
                     } else {
                         ProfApp::zoom(cx, interval);
@@ -3400,10 +3401,9 @@ impl eframe::App for ProfApp {
                         entry_label: label,
                         interval,
                     });
-                    // Auto-open chat panel when selection is made
-                    if !cx.chat_panel.visible {
-                        cx.chat_panel.visible = true;
-                    }
+                    // A2: record the selection but do NOT auto-open the chat panel —
+                    // the header "Selected:" banner surfaces it instead. (An already-
+                    // open panel still updates its pill via set_selection above.)
                 }
             }
         }
