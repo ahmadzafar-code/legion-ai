@@ -864,7 +864,7 @@ mod tests {
             "L2-first-util-002",
             "L2-children-002",
             "L3-bound-in-range-001",
-            "L3-overhead-overall-002",
+            "L3-busiest-proc-kind-002",
         ];
         // All fixtures share bg4N2; check presence once via the first case.
         let probe = load_case(CASES[0]).expect("load first case");
