@@ -524,21 +524,51 @@ fn parse_frontmatter(content: &str) -> (Option<String>, Option<String>, Vec<Stri
     (title, summary, tags)
 }
 
+/// A markdown fenced-code-block delimiter (``` or ~~~, optionally indented, with
+/// an optional info string). Used so a `# shell-comment` line inside a code fence
+/// is not mistaken for a heading.
+fn is_code_fence(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with("```") || t.starts_with("~~~")
+}
+
 /// Extract a single `## <header>` block (header + body up to the next level-1/2
 /// heading or EOF). Case-insensitive on the header text. `None` if not found.
+///
+/// Fenced code blocks are tracked so a `# ...` / `## ...` comment line INSIDE a
+/// ```` ```bash ```` block is not mistaken for a heading (which would silently
+/// truncate the section). `###`+ subheadings stay inside the block.
 fn extract_section(content: &str, header: &str) -> Option<String> {
     let want = header.trim().trim_start_matches('#').trim().to_lowercase();
     let lines: Vec<&str> = content.lines().collect();
-    let start = lines.iter().position(|l| {
-        l.strip_prefix("## ")
-            .is_some_and(|rest| rest.trim().to_lowercase() == want)
-    })?;
-    // Stop at the next level-1 (`# `) or level-2 (`## `) heading; keep `###`+ inside.
-    let end = lines[start + 1..]
-        .iter()
-        .position(|l| l.starts_with("## ") || l.starts_with("# "))
-        .map(|rel| start + 1 + rel)
-        .unwrap_or(lines.len());
+
+    // Locate the start header (outside any code fence).
+    let mut in_fence = false;
+    let mut start = None;
+    for (i, l) in lines.iter().enumerate() {
+        if is_code_fence(l) {
+            in_fence = !in_fence;
+        } else if !in_fence
+            && l.strip_prefix("## ")
+                .is_some_and(|rest| rest.trim().to_lowercase() == want)
+        {
+            start = Some(i);
+            break;
+        }
+    }
+    let start = start?;
+
+    // Scan to the next level-1/2 heading, ignoring heading-like lines inside fences.
+    let mut in_fence = false;
+    let mut end = lines.len();
+    for (j, l) in lines.iter().enumerate().skip(start + 1) {
+        if is_code_fence(l) {
+            in_fence = !in_fence;
+        } else if !in_fence && (l.starts_with("## ") || l.starts_with("# ")) {
+            end = j;
+            break;
+        }
+    }
     Some(lines[start..end].join("\n"))
 }
 
@@ -3087,6 +3117,43 @@ mod wiki_tests {
         assert!(!block.contains("## Related"), "Related leaked into Debug-signals block");
         // A missing section is an explicit error.
         assert!(wiki_read(&root, &page, Some("No Such Header"), None).is_err());
+    }
+
+    /// Regression: a `# shell-comment` line inside a ```` ```bash ```` fence must
+    /// NOT prematurely terminate the section (it is not a heading). Pure unit test
+    /// on extract_section — no wiki root needed.
+    #[test]
+    fn test_extract_section_ignores_comments_in_code_fence() {
+        let page = "\
+## Typical combinations
+Prose before the fence.
+
+```bash
+./app -ll:cpu 4
+# In a separate shell:
+# gdb -p <PID>
+./app -lg:inorder 1
+```
+
+Trailing prose after the fence.
+
+## Invariants
+- next section, must NOT appear in the block.
+";
+        let block = extract_section(page, "Typical combinations").unwrap();
+        // The fenced comment lines and everything up to the NEXT real heading are kept.
+        assert!(block.contains("# In a separate shell:"), "fenced comment truncated the section");
+        assert!(block.contains("gdb -p <PID>"), "second fenced comment lost");
+        assert!(block.contains("Trailing prose after the fence."), "post-fence prose lost");
+        // The genuine next heading still bounds the block.
+        assert!(!block.contains("## Invariants"), "next section leaked in");
+        assert!(!block.contains("next section, must NOT appear"), "next section body leaked in");
+
+        // Case-insensitive header match still works.
+        assert!(extract_section(page, "typical COMBINATIONS").is_some());
+        // A `## ` that only appears inside a fence is not matched as a start header.
+        let fenced_only = "## Real\nbody\n```\n## not a heading\n```\n";
+        assert!(extract_section(fenced_only, "not a heading").is_none());
     }
 
     #[test]
