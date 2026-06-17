@@ -94,13 +94,23 @@ fn header_value<'a>(req: &httparse::Request<'a, '_>, name: &str) -> Option<&'a s
 /// (`127.0.0.0/8`, `::1`). It deliberately does NOT prefix-match `127.` —
 /// `http://127.0.0.1.evil.com` is an attacker domain, not a loopback address, and
 /// must be rejected.
+///
+/// We parse the authority strictly as `[ userinfo "@" ] host [ ":" port ]` per
+/// RFC 3986: the authority ends at the first `/`, `?`, or `#`, and any userinfo
+/// (everything up to the last `@`) is stripped BEFORE extracting the host. This
+/// closes spoofs like `http://[::1]@evil.com` and `http://evil.com#@127.0.0.1`,
+/// where a loopback-looking userinfo/fragment hides the real attacker host.
 fn is_localhost_origin(origin: &str) -> bool {
     let after_scheme = origin.trim().split("://").nth(1).unwrap_or(origin.trim());
-    let authority = after_scheme.split('/').next().unwrap_or("");
-    let host = if let Some(rest) = authority.strip_prefix('[') {
+    // Authority terminates at the first path/query/fragment delimiter.
+    let authority = after_scheme.split(['/', '?', '#']).next().unwrap_or("");
+    // Drop userinfo: take the part AFTER the last '@' so a spoofed
+    // `loopback@real-host` resolves to the real host, not the userinfo.
+    let hostport = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    let host = if let Some(rest) = hostport.strip_prefix('[') {
         rest.split(']').next().unwrap_or("") // IPv6: [addr]:port -> addr
     } else {
-        authority.rsplit_once(':').map(|(h, _)| h).unwrap_or(authority)
+        hostport.rsplit_once(':').map(|(h, _)| h).unwrap_or(hostport)
     };
     host == "localhost"
         || host
@@ -282,16 +292,31 @@ mod tests {
             assert_eq!(status, 200, "loopback Origin {ok_origin} must be allowed");
         }
 
-        // Look-alike attacker domains must NOT bypass the loopback check.
+        // Look-alike attacker domains must NOT bypass the loopback check,
+        // including userinfo/fragment spoofs where a loopback-looking prefix
+        // hides the real attacker host (RFC 3986 authority parsing).
         for bad in [
             "http://127.0.0.1.evil.com",
             "http://localhost.evil.com",
             "https://evil.com",
             "http://10.0.0.1",
+            "http://[::1]@evil.com",
+            "http://127.0.0.1@evil.com",
+            "http://localhost@evil.com",
+            "http://evil.com#@127.0.0.1",
+            "http://evil.com/@127.0.0.1",
+            "http://evil.com?@127.0.0.1",
         ] {
             let req = post(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#, Some(bad));
             let (status, _b) = split_response(&handle_http_request(&req, &ctx()));
             assert_eq!(status, 403, "look-alike Origin {bad} must be rejected");
+        }
+
+        // Legitimate userinfo with a real loopback host is still allowed.
+        for ok in ["http://user@localhost:8743", "http://user@127.0.0.1:8765/mcp"] {
+            let req = post(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#, Some(ok));
+            let (status, _b) = split_response(&handle_http_request(&req, &ctx()));
+            assert_eq!(status, 200, "loopback Origin with userinfo {ok} must be allowed");
         }
     }
 
