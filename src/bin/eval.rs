@@ -855,8 +855,10 @@ mod tests {
             return;
         }
         let oracle = compute_oracle(&case).expect("oracle should compute + match expected");
-        assert_eq!(oracle, "48");
-        assert_eq!(case.expected.as_deref(), Some("48"));
+        // Reconciled to CLIPPED OCCUPANCY (most running time WITHIN the range): uid
+        // 221 (278.6ms in-range) wins over the old longest-single-slice uid 48.
+        assert_eq!(oracle, "221");
+        assert_eq!(case.expected.as_deref(), Some("221"));
     }
 
     /// The answer-key LOCK: for every fixture, `compute_oracle` must compute the
