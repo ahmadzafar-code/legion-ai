@@ -251,6 +251,43 @@ mod tests {
         ServerCtx::new("unused".to_owned(), None).with_protocol(HTTP_PROTOCOL_VERSION)
     }
 
+    /// A ctx with a UiBridge attached (the LIVE-wired server, V1.3). The UI-side
+    /// channels dangle — fine for `tools/list`, which never drives the bridge.
+    fn ctx_with_bridge() -> ServerCtx {
+        use crate::ai::bridge::{UiBridge, ViewportToken, MCP_CONSUMER_ID};
+        let (event_tx, _erx) = std::sync::mpsc::channel();
+        let (_ctx_tx, cmd_rx) = std::sync::mpsc::channel();
+        let bridge = UiBridge::new(event_tx, cmd_rx, ViewportToken::new(), MCP_CONSUMER_ID);
+        ctx().with_ui_bridge(bridge)
+    }
+
+    #[test]
+    fn test_http_tools_list_visual_with_bridge() {
+        // The LIVE-wired server (ServerCtx with a UiBridge, as ProfApp builds it in
+        // V1.3) advertises the 9 visual tools over HTTP, alongside the data tools.
+        let req = post(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#, None);
+        let (status, body) = split_response(&handle_http_request(&req, &ctx_with_bridge()));
+        assert_eq!(status, 200);
+        let v: Value = serde_json::from_str(&body).unwrap();
+        let names: Vec<&str> =
+            v["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        for t in [
+            "screenshot", "zoom_to", "pan", "scroll_to", "set_view", "search", "reset_view",
+            "highlight", "clear_highlights",
+        ] {
+            assert!(names.contains(&t), "live-wired tools/list must advertise visual tool {t}");
+        }
+        for t in ["run_query", "overview", "final_answer"] {
+            assert!(names.contains(&t), "data tool {t} still present");
+        }
+        // Still never exposed.
+        assert!(!names.contains(&"ask_user") && !names.contains(&"update_findings"));
+        // camelCase inputSchema over HTTP, no snake_case leak (incl. visual tools).
+        for t in v["result"]["tools"].as_array().unwrap() {
+            assert!(t.get("inputSchema").is_some() && t.get("input_schema").is_none());
+        }
+    }
+
     #[test]
     fn test_http_initialize() {
         let req = post(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#, None);

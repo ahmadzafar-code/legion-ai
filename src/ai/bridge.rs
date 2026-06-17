@@ -259,6 +259,11 @@ pub struct UiBridge {
     token: ViewportToken,
     consumer_id: u64,
     next_request_id: AtomicU64,
+    /// Optional hook fired AFTER an event is sent, to WAKE the UI thread (e.g.
+    /// `egui::Context::request_repaint`). A reactive UI that is idle would never
+    /// run its update loop to drain the event, so `request` would block to timeout;
+    /// this nudges it to repaint. `None` (tests) => no nudge.
+    wake: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl UiBridge {
@@ -274,7 +279,16 @@ impl UiBridge {
             token,
             consumer_id,
             next_request_id: AtomicU64::new(0),
+            wake: None,
         }
+    }
+
+    /// Attach a wake hook fired after each event is sent (e.g. an
+    /// `egui::Context::request_repaint` closure) so a reactive, idle UI repaints to
+    /// service the request instead of letting it block to timeout.
+    pub fn with_wake(mut self, wake: impl Fn() + Send + Sync + 'static) -> Self {
+        self.wake = Some(Box::new(wake));
+        self
     }
 
     pub fn alloc_request_id(&self) -> u64 {
@@ -305,6 +319,11 @@ impl UiBridge {
         self.event_tx
             .send(make_event(request_id))
             .map_err(|_| "viewport event channel disconnected".to_string())?;
+        // Nudge a reactive UI to repaint so it drains + services this event; without
+        // this an idle window never runs its update loop and we block to timeout.
+        if let Some(wake) = &self.wake {
+            wake();
+        }
 
         let deadline = Instant::now() + timeout;
         loop {

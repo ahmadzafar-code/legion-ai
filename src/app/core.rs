@@ -3263,7 +3263,13 @@ impl eframe::App for ProfApp {
                 // server so it advertises + routes the 9 VISUAL tools, driving this
                 // live window. The bridge's UI-side ends (mcp_event_rx / mcp_cmd_tx)
                 // are drained + replied to by the per-frame second-source loop below.
-                let bridge = cx.ui_bridge(crate::ai::bridge::MCP_CONSUMER_ID);
+                // The wake hook repaints this (reactive, often-idle) window when a
+                // request arrives, so the drain loop runs instead of blocking to
+                // timeout.
+                let egui_ctx = ctx.clone();
+                let bridge = cx
+                    .ui_bridge(crate::ai::bridge::MCP_CONSUMER_ID)
+                    .with_wake(move || egui_ctx.request_repaint());
                 if let Err(e) = crate::ai::viewer_mcp::spawn(duckdb_path, 8765, bridge) {
                     eprintln!("[legion-viewer] in-viewer MCP server failed to start: {e}");
                 }
@@ -3800,6 +3806,14 @@ impl eframe::App for ProfApp {
                 .any(|w| w.config.data_source.outstanding_requests() > 0)
         {
             ctx.request_repaint_after(Duration::from_millis(50));
+        }
+
+        // V1.3: while an MCP screenshot is mid-flight, keep repainting so the
+        // capture frame (which delivers `Event::Screenshot`) actually happens — the
+        // window is otherwise idle and would stall the request to timeout.
+        #[cfg(feature = "ai")]
+        if cx.mcp_awaiting_screenshot.is_some() {
+            ctx.request_repaint();
         }
     }
 }
