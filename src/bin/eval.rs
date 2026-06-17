@@ -268,13 +268,25 @@ fn to_set(s: &str) -> BTreeSet<String> {
     s.split(',').map(|e| e.trim().to_lowercase()).filter(|e| !e.is_empty()).collect()
 }
 
+/// Parse a uid tolerantly: accepts `"48"`, `" 48 "`, and integer-valued floats
+/// like `"48.0"` (an LLM may emit the value as a JSON float). Rejects
+/// non-integers (`"48.5"`, `"abc"`). The oracle uid is always a clean integer, so
+/// this only ever rescues a false-negative — it can never create a false-positive.
+fn parse_uid(s: &str) -> Option<i64> {
+    let t = s.trim();
+    if let Ok(i) = t.parse::<i64>() {
+        return Some(i);
+    }
+    let f = t.parse::<f64>().ok()?;
+    (f.is_finite() && f.fract() == 0.0).then_some(f as i64)
+}
+
 /// Grade `agent` vs `oracle` by `answer_type`, normalizing both sides.
 fn grade(answer_type: &str, agent: &str, oracle: &str, tolerance: f64) -> Grade {
     let pass = match answer_type {
         "uid" => {
-            let a = agent.trim().parse::<i64>().ok();
-            let o = oracle.trim().parse::<i64>().ok();
-            a.is_some() && a == o
+            let a = parse_uid(agent);
+            a.is_some() && a == parse_uid(oracle)
         }
         "label" => agent.trim().eq_ignore_ascii_case(oracle.trim()),
         "number" => match (agent.trim().parse::<f64>(), oracle.trim().parse::<f64>()) {
@@ -729,6 +741,12 @@ mod tests {
         assert!(grade("uid", "48", "48", 0.0).pass);
         assert!(!grade("uid", "999", "48", 0.0).pass);
         assert!(!grade("uid", "abc", "48", 0.0).pass);
+        // tolerate an integer-valued float / whitespace (LLMs emit value:48.0)
+        assert!(grade("uid", "48.0", "48", 0.0).pass);
+        assert!(grade("uid", " 48 ", "48", 0.0).pass);
+        assert!(!grade("uid", "48.5", "48", 0.0).pass); // non-integer float rejected
+        // both unparseable must NOT pass (no None==None false-positive)
+        assert!(!grade("uid", "abc", "xyz", 0.0).pass);
         // divergence localizes the miss
         let g = grade("uid", "999", "48", 0.0);
         assert_eq!(g.divergence.unwrap()["oracle"], "48");
