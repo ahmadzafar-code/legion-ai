@@ -89,6 +89,11 @@ fn header_value<'a>(req: &httparse::Request<'a, '_>, name: &str) -> Option<&'a s
 
 /// True iff `origin` (e.g. `http://localhost:8743`, `http://[::1]:8743`) is a
 /// loopback host. Used only to REJECT a present non-loopback Origin.
+///
+/// The host must be the literal name `localhost` OR parse as a loopback IP
+/// (`127.0.0.0/8`, `::1`). It deliberately does NOT prefix-match `127.` —
+/// `http://127.0.0.1.evil.com` is an attacker domain, not a loopback address, and
+/// must be rejected.
 fn is_localhost_origin(origin: &str) -> bool {
     let after_scheme = origin.trim().split("://").nth(1).unwrap_or(origin.trim());
     let authority = after_scheme.split('/').next().unwrap_or("");
@@ -97,7 +102,11 @@ fn is_localhost_origin(origin: &str) -> bool {
     } else {
         authority.rsplit_once(':').map(|(h, _)| h).unwrap_or(authority)
     };
-    matches!(host, "localhost" | "127.0.0.1" | "::1") || host.starts_with("127.")
+    host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
 }
 
 fn http_response(code: u16, content_type: &str, body: &[u8]) -> Vec<u8> {
@@ -271,6 +280,18 @@ mod tests {
             let req = post(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#, Some(ok_origin));
             let (status, _b) = split_response(&handle_http_request(&req, &ctx()));
             assert_eq!(status, 200, "loopback Origin {ok_origin} must be allowed");
+        }
+
+        // Look-alike attacker domains must NOT bypass the loopback check.
+        for bad in [
+            "http://127.0.0.1.evil.com",
+            "http://localhost.evil.com",
+            "https://evil.com",
+            "http://10.0.0.1",
+        ] {
+            let req = post(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#, Some(bad));
+            let (status, _b) = split_response(&handle_http_request(&req, &ctx()));
+            assert_eq!(status, 403, "look-alike Origin {bad} must be rejected");
         }
     }
 
