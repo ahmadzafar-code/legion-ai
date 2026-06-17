@@ -817,6 +817,10 @@ impl Slot {
         if config.ai_highlights_enabled {
             if let Some(highlights) = config.ai_highlights.get(&self.entry_id) {
                 for hl in highlights {
+                    // Honor the per-highlight enable toggle (manager checkbox).
+                    if !hl.enabled {
+                        continue;
+                    }
                     // Map interval to normalized [0,1] within view
                     let norm_start = cx.view_interval.unlerp(hl.interval.start).clamp(0.0, 1.0);
                     let norm_stop = cx.view_interval.unlerp(hl.interval.stop).clamp(0.0, 1.0);
@@ -1025,6 +1029,10 @@ impl Slot {
         if config.ai_highlights_enabled {
             if let Some(highlights) = config.ai_highlights.get(&self.entry_id) {
                 for hl in highlights {
+                    // Honor the per-highlight enable toggle (manager checkbox).
+                    if !hl.enabled {
+                        continue;
+                    }
                     // Map interval to normalized [0,1] within view
                     let norm_start = cx.view_interval.unlerp(hl.interval.start).clamp(0.0, 1.0);
                     let norm_stop = cx.view_interval.unlerp(hl.interval.stop).clamp(0.0, 1.0);
@@ -1046,7 +1054,6 @@ impl Slot {
                             ui.show_tooltip_ui(tooltip_id, &hl_rect, |ui| {
                                 ui.label(RichText::new(&hl.label).strong());
                                 ui.label(format!("Interval: {}", hl.interval));
-                                ui.label(format!("Confidence: {:.0}%", hl.confidence * 100.0));
                             });
                         }
                     }
@@ -1731,21 +1738,29 @@ fn build_slug_map(window: &Window) -> HashMap<String, EntryID> {
     map
 }
 
-/// Convert an agent `Highlight` to the `AiHighlight` used by the renderer.
+/// Monotonic source of unique highlight ids (the manager's stable ordering key).
+#[cfg(feature = "ai")]
+static NEXT_HIGHLIGHT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Allocate the next unique highlight id.
+#[cfg(feature = "ai")]
+fn next_highlight_id() -> u64 {
+    NEXT_HIGHLIGHT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Build the renderable [`AiHighlight`] from an agent [`Highlight`]. Severity is no
+/// longer used (one uniform light-red overlay); the optional `item_uid` task-target
+/// is `None` (the tool is region/interval-based today). Used by BOTH the embedded
+/// apply and the MCP handler, so the id is allocated here for uniqueness across both.
 #[cfg(feature = "ai")]
 fn highlight_to_ai(hl: &Highlight) -> AiHighlight {
     use crate::timestamp::Timestamp;
-    let color = match hl.severity.as_str() {
-        "critical" => egui::Color32::from_rgba_unmultiplied(220, 20, 20, 55),
-        "high" => egui::Color32::from_rgba_unmultiplied(220, 100, 20, 55),
-        "medium" => egui::Color32::from_rgba_unmultiplied(220, 180, 20, 55),
-        _ => egui::Color32::from_rgba_unmultiplied(180, 0, 180, 45),
-    };
     AiHighlight {
+        id: next_highlight_id(),
         interval: Interval::new(Timestamp(hl.start_ns), Timestamp(hl.stop_ns)),
-        color,
         label: hl.label.clone(),
-        confidence: 1.0,
+        item_uid: None,
+        enabled: true,
     }
 }
 
@@ -4236,5 +4251,36 @@ mod banner_tests {
         assert!(b.contains("alpha") && b.contains("beta"), "first two shown: {b}");
         assert!(!b.contains("gamma"), "3rd item collapsed, not shown by title: {b}");
         assert!(b.contains("+1 more"), "overflow summarized: {b}");
+    }
+}
+
+/// Highlight-model tests (Task 1): the apply path builds an AiHighlight with the
+/// right fields and a unique, monotonic id.
+#[cfg(all(test, feature = "ai"))]
+mod highlight_model_tests {
+    use super::*;
+    use crate::ai::Highlight;
+
+    fn hl(label: &str) -> Highlight {
+        Highlight {
+            entry_slug: "n0_cpu_c1".into(),
+            start_ns: 100,
+            stop_ns: 200,
+            severity: "critical".into(), // accepted-but-ignored (no severity colors)
+            label: label.into(),
+        }
+    }
+
+    #[test]
+    fn test_highlight_to_ai_fields_and_monotonic_id() {
+        let a = highlight_to_ai(&hl("blk"));
+        let b = highlight_to_ai(&hl("blk2"));
+        // Fields carried correctly.
+        assert_eq!(a.label, "blk");
+        assert_eq!((a.interval.start.0, a.interval.stop.0), (100, 200));
+        assert!(a.item_uid.is_none(), "region/interval highlight has no task target");
+        assert!(a.enabled, "new highlights start enabled");
+        // Unique + monotonic ids across BOTH apply sites (allocated in highlight_to_ai).
+        assert!(b.id > a.id, "ids must be monotonic + unique: {} then {}", a.id, b.id);
     }
 }

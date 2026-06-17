@@ -16,19 +16,26 @@ pub mod trace;
 #[cfg(feature = "viewer-mcp")]
 pub mod viewer_mcp;
 
+use crate::data::ItemUID;
 use crate::timestamp::Interval;
 
-/// A highlighted region on the timeline indicating a performance issue.
+/// A highlighted region on the timeline (a task, an idle gap, or a region). Every
+/// highlight renders as the SAME uniform light-red overlay — no severity, no color.
+/// Managed via the left-panel highlight manager (toggle / clear / zoom).
 #[derive(Debug, Clone)]
 pub struct AiHighlight {
+    /// Monotonic unique id — stable ordering key for the manager list.
+    pub id: u64,
     /// The time interval this highlight covers.
     pub interval: Interval,
-    /// Color for rendering the highlight overlay.
-    pub color: egui::Color32,
-    /// Human-readable description.
+    /// Human-readable description (shown as the manager row label).
     pub label: String,
-    /// Confidence score in [0.0, 1.0] range.
-    pub confidence: f32,
+    /// Optional task target. `None` (today's region/interval highlights) ⇒ the
+    /// manager zooms to the interval only; `Some` ⇒ also scroll-to-item.
+    pub item_uid: Option<ItemUID>,
+    /// Whether this highlight is rendered (manager checkbox). Cleared highlights are
+    /// removed; disabled ones stay in the list but don't draw.
+    pub enabled: bool,
 }
 
 pub use agent::{AgentEvent, Highlight, SelectedItemInfo, UiCommand};
