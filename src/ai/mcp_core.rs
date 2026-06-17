@@ -160,6 +160,21 @@ fn tools_list_result(ctx: &ServerCtx) -> Value {
         })
         .collect();
 
+    // V1.4: get_selection is a non-driving READ, advertised only with a UI bridge
+    // (like the visual tools). No args.
+    if has_bridge {
+        tools.push(json!({
+            "name": "get_selection",
+            "description": "Read the human's CURRENT timeline selection in the live viewer — the \
+                            task bar(s) and/or dragged time range they have selected. Use this to \
+                            resolve \"this\", \"that task\", \"here\" to concrete identifiers \
+                            before querying. Returns selected_items [{item_uid, entry_slug, title, \
+                            start_ns, stop_ns}] and selected_range {entry_label, start_ns, stop_ns} \
+                            (or an explicit note when nothing is selected). Does NOT change the view.",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
+        }));
+    }
+
     tools.push(json!({
         "name": "find_blockers",
         "description": "Walk the cycle-guarded critical path from a task to its root \
@@ -221,6 +236,14 @@ fn tools_call_result(params: &Value, ctx: &ServerCtx) -> Value {
                 &format!("visual tool '{name}' is unavailable: this server has no UI bridge."),
                 true,
             ),
+        };
+    }
+
+    // get_selection (V1.4): a non-driving READ over the bridge (no viewport claim).
+    if name == "get_selection" {
+        return match &ctx.ui_bridge {
+            Some(bridge) => get_selection_result(bridge),
+            None => text_result("get_selection is unavailable: this server has no UI bridge.", true),
         };
     }
 
@@ -419,13 +442,67 @@ fn visual_tool_result(
     }
 }
 
+/// Execute `get_selection` (V1.4): a non-driving READ of the human's timeline
+/// selection over the bridge. Uses `request_read` — it does NOT claim the viewport
+/// token, so it succeeds even while a driver holds the viewport. Formats
+/// `SelectionData` as structured JSON, or an explicit note when nothing is selected.
+fn get_selection_result(bridge: &super::bridge::UiBridge) -> Value {
+    use super::agent::{AgentEvent, UiCommand};
+    use super::bridge::DEFAULT_REQUEST_TIMEOUT;
+
+    let rid = std::cell::Cell::new(u64::MAX);
+    let reply = bridge.request_read(
+        |id| {
+            rid.set(id);
+            AgentEvent::GetSelection { request_id: id }
+        },
+        |cmd| reply_request_id(cmd) == Some(rid.get()),
+        DEFAULT_REQUEST_TIMEOUT,
+    );
+
+    match reply {
+        Ok(UiCommand::SelectionData { items, range, .. }) => {
+            if items.is_empty() && range.is_none() {
+                return text_result(
+                    "Nothing is selected in the viewer. Ask the user to click a task bar or \
+                     shift-drag a time range, then call get_selection again.",
+                    false,
+                );
+            }
+            let items_json: Vec<Value> = items
+                .iter()
+                .map(|it| {
+                    json!({
+                        "item_uid": it.item_uid,
+                        "entry_slug": it.entry_slug,
+                        "title": it.title,
+                        "start_ns": it.start_ns,
+                        "stop_ns": it.stop_ns,
+                    })
+                })
+                .collect();
+            let range_json = range.as_ref().map(|(label, start, stop)| {
+                json!({ "entry_label": label, "start_ns": start, "stop_ns": stop })
+            });
+            let payload = json!({
+                "selected_items": items_json,
+                "selected_range": range_json,
+            });
+            text_result(&payload.to_string(), false)
+        }
+        Ok(other) => text_result(&format!("unexpected selection reply: {other:?}"), true),
+        Err(e) => text_result(&e, true),
+    }
+}
+
 /// The request_id carried by any [`UiCommand`](super::agent::UiCommand) reply.
 fn reply_request_id(cmd: &super::agent::UiCommand) -> Option<u64> {
     use super::agent::UiCommand;
     match cmd {
         UiCommand::ScreenshotData { request_id, .. }
         | UiCommand::UserAnswer { request_id, .. }
-        | UiCommand::Ack { request_id, .. } => Some(*request_id),
+        | UiCommand::Ack { request_id, .. }
+        | UiCommand::SelectionData { request_id, .. } => Some(*request_id),
     }
 }
 
@@ -651,11 +728,11 @@ mod tests {
     }
 
     // ── V1.2 visual tools (stub UiBridge — no live window) ───────────────────
-    use crate::ai::agent::{AgentEvent, UiCommand};
+    use crate::ai::agent::{AgentEvent, SelectedItemInfo, UiCommand};
     use crate::ai::bridge::{UiBridge, ViewportGuard, ViewportToken, MCP_CONSUMER_ID};
     use std::sync::mpsc::channel;
 
-    /// The request_id any of the visual events carries (test helper).
+    /// The request_id any of the visual / read events carries (test helper).
     fn event_request_id(ev: &AgentEvent) -> u64 {
         match ev {
             AgentEvent::ScreenshotRequest { request_id }
@@ -666,7 +743,8 @@ mod tests {
             | AgentEvent::SearchRequest { request_id, .. }
             | AgentEvent::ResetViewRequest { request_id }
             | AgentEvent::HighlightRequest { request_id, .. }
-            | AgentEvent::ClearHighlightsRequest { request_id } => *request_id,
+            | AgentEvent::ClearHighlightsRequest { request_id }
+            | AgentEvent::GetSelection { request_id } => *request_id,
             other => panic!("unexpected visual event: {other:?}"),
         }
     }
@@ -854,5 +932,72 @@ mod tests {
         let (text, is_error) = call(&ctx, "zoom_to", json!({ "start_ns": 5 }));
         assert!(is_error, "missing stop_ns must be a tool error");
         assert!(text.contains("zoom_to requires"), "actionable message: {text}");
+    }
+
+    // ── V1.4 get_selection (READ) ────────────────────────────────────────────
+    #[test]
+    fn test_get_selection_formats_json() {
+        // Stub UI asserts the event is GetSelection, replies with a seeded selection.
+        let (ctx, handle) = ctx_with_stub_ui("unused".into(), |ev| {
+            assert!(matches!(ev, AgentEvent::GetSelection { .. }), "expected GetSelection");
+            UiCommand::SelectionData {
+                request_id: event_request_id(ev),
+                items: vec![SelectedItemInfo {
+                    item_uid: 48,
+                    entry_slug: Some("n0_cpu_c1".into()),
+                    title: "top_level <6>".into(),
+                    start_ns: 100,
+                    stop_ns: 200,
+                }],
+                range: Some(("CPU 1".into(), 50, 300)),
+            }
+        });
+        let (text, is_error) = call(&ctx, "get_selection", json!({}));
+        assert!(!is_error, "get_selection should succeed: {text}");
+        let v: Value = serde_json::from_str(&text).expect("structured JSON");
+        assert_eq!(v["selected_items"][0]["item_uid"], 48);
+        assert_eq!(v["selected_items"][0]["entry_slug"], "n0_cpu_c1");
+        assert_eq!(v["selected_items"][0]["title"], "top_level <6>");
+        assert_eq!(v["selected_items"][0]["start_ns"], 100);
+        assert_eq!(v["selected_range"]["entry_label"], "CPU 1");
+        assert_eq!(v["selected_range"]["start_ns"], 50);
+        assert_eq!(v["selected_range"]["stop_ns"], 300);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_get_selection_nothing_selected() {
+        let (ctx, handle) = ctx_with_stub_ui("unused".into(), |ev| UiCommand::SelectionData {
+            request_id: event_request_id(ev),
+            items: vec![],
+            range: None,
+        });
+        let (text, is_error) = call(&ctx, "get_selection", json!({}));
+        assert!(!is_error, "nothing-selected is not an error");
+        assert!(text.contains("Nothing is selected"), "explicit empty note: {text}");
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_tools_list_get_selection_gating() {
+        // WITHOUT a bridge (stdio path): get_selection is NOT advertised.
+        let resp = handle_request(&req("tools/list", json!({})), &dummy_ctx()).unwrap();
+        let names: Vec<&str> =
+            resp["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(!names.contains(&"get_selection"), "no-bridge tools/list must NOT advertise get_selection");
+
+        // WITH a bridge: advertised, camelCase inputSchema, no args.
+        let resp = handle_request(&req("tools/list", json!({})), &ctx_with_dangling_bridge("unused")).unwrap();
+        let tools = resp["result"]["tools"].as_array().unwrap();
+        let gs = tools
+            .iter()
+            .find(|t| t["name"] == "get_selection")
+            .expect("get_selection advertised with a bridge");
+        assert!(gs.get("inputSchema").is_some(), "camelCase inputSchema");
+        assert!(gs.get("input_schema").is_none(), "no snake_case leak");
+        assert!(
+            gs["inputSchema"]["properties"].as_object().map(|o| o.is_empty()).unwrap_or(false),
+            "get_selection takes no args"
+        );
     }
 }

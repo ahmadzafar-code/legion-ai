@@ -70,6 +70,11 @@ pub trait EventSink {
     /// `reply_tx`. Default no-op until the live sink is wired (V1.3).
     fn on_clear_highlights_request(&mut self, _request_id: u64, _reply_tx: &Sender<UiCommand>) {}
 
+    /// MCP-driven (V1.4) READ of the human's timeline selection: reply with
+    /// `UiCommand::SelectionData` on `reply_tx`. A non-driving read (no viewport
+    /// token). Default no-op; the live sink (`McpDrainSink`) overrides it.
+    fn on_get_selection(&mut self, _request_id: u64, _reply_tx: &Sender<UiCommand>) {}
+
     fn on_complete(&mut self, _response: AgentResponse) {}
     fn on_error(&mut self, _error: String) {}
 }
@@ -140,6 +145,7 @@ pub fn apply_agent_event<S: EventSink>(sink: &mut S, event: AgentEvent, reply_tx
         AgentEvent::ClearHighlightsRequest { request_id } => {
             sink.on_clear_highlights_request(request_id, reply_tx)
         }
+        AgentEvent::GetSelection { request_id } => sink.on_get_selection(request_id, reply_tx),
         AgentEvent::Complete(response) => sink.on_complete(response),
         AgentEvent::Error(error) => sink.on_error(error),
     }
@@ -314,7 +320,31 @@ impl UiBridge {
     ) -> Result<UiCommand, String> {
         // RAII: held for the whole request; dropped (released) on any return below.
         let _guard = self.token.try_claim(self.consumer_id).map_err(String::from)?;
+        self.send_and_await(make_event, match_reply, timeout)
+    }
 
+    /// Issue a blocking READ against the live viewer WITHOUT claiming the viewport
+    /// token (V1.4). A read (e.g. `get_selection`) does not conflict with driving,
+    /// so it must succeed even while the embedded agent or another consumer holds
+    /// the viewport. Still wakes the UI so an idle window services the request.
+    pub fn request_read(
+        &self,
+        make_event: impl FnOnce(u64) -> AgentEvent,
+        match_reply: impl Fn(&UiCommand) -> bool,
+        timeout: Duration,
+    ) -> Result<UiCommand, String> {
+        self.send_and_await(make_event, match_reply, timeout)
+    }
+
+    /// Shared send → wake → await-matching-reply loop. Assumes any required
+    /// viewport claim has already been made by the caller (`request` claims;
+    /// `request_read` deliberately does not).
+    fn send_and_await(
+        &self,
+        make_event: impl FnOnce(u64) -> AgentEvent,
+        match_reply: impl Fn(&UiCommand) -> bool,
+        timeout: Duration,
+    ) -> Result<UiCommand, String> {
         let request_id = self.alloc_request_id();
         self.event_tx
             .send(make_event(request_id))
@@ -607,5 +637,48 @@ mod tests {
             | AgentEvent::ZoomRequest { request_id, .. } => *request_id,
             other => panic!("expected a screenshot event, got {other:?}"),
         }
+    }
+
+    /// THE V1.4 read-not-blocked property: a `request_read` (e.g. get_selection)
+    /// SUCCEEDS even while another consumer HOLDS the viewport token — reads don't
+    /// conflict with driving — whereas a driving `request` from the same consumer is
+    /// cleanly locked out ("viewport busy").
+    #[test]
+    fn test_request_read_bypasses_viewport_token() {
+        let token = ViewportToken::new();
+        let _held = token.try_claim(1).expect("consumer 1 holds the viewport");
+
+        // The read consumer (id 2) + a stub UI that replies SelectionData.
+        let (event_tx, event_rx) = channel::<AgentEvent>();
+        let (cmd_tx, cmd_rx) = channel::<UiCommand>();
+        let reader = UiBridge::new(event_tx, cmd_rx, token.clone(), 2);
+        let ui = std::thread::spawn(move || {
+            if let Ok(AgentEvent::GetSelection { request_id }) = event_rx.recv() {
+                let _ = cmd_tx.send(UiCommand::SelectionData { request_id, items: vec![], range: None });
+            }
+        });
+
+        let reply = reader
+            .request_read(
+                |id| AgentEvent::GetSelection { request_id: id },
+                |cmd| matches!(cmd, UiCommand::SelectionData { .. }),
+                Duration::from_secs(5),
+            )
+            .expect("read must succeed even while the viewport token is held");
+        assert!(matches!(reply, UiCommand::SelectionData { .. }));
+        ui.join().unwrap();
+
+        // Contrast: a DRIVING request() while the token is held is locked out.
+        let (e2, _e2rx) = channel::<AgentEvent>();
+        let (_c2tx, c2rx) = channel::<UiCommand>();
+        let driver = UiBridge::new(e2, c2rx, token, 2);
+        let err = driver
+            .request(
+                |id| AgentEvent::ScreenshotRequest { request_id: id },
+                |_| true,
+                Duration::from_millis(50),
+            )
+            .unwrap_err();
+        assert_eq!(err, "viewport busy", "driving must still be locked out by the token");
     }
 }

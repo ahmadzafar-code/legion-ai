@@ -1942,6 +1942,8 @@ struct McpDrainSink {
         Option<(crate::ai::Highlight, u64, std::sync::mpsc::Sender<crate::ai::UiCommand>)>,
     /// (request_id, reply channel) for a clear-highlights request.
     pending_clear: Option<(u64, std::sync::mpsc::Sender<crate::ai::UiCommand>)>,
+    /// (request_id, reply channel) for a get_selection READ (V1.4 — non-driving).
+    pending_selection: Option<(u64, std::sync::mpsc::Sender<crate::ai::UiCommand>)>,
 }
 
 #[cfg(feature = "ai")]
@@ -1977,6 +1979,14 @@ impl crate::ai::bridge::EventSink for McpDrainSink {
         reply_tx: &std::sync::mpsc::Sender<crate::ai::UiCommand>,
     ) {
         self.pending_clear = Some((request_id, reply_tx.clone()));
+    }
+
+    fn on_get_selection(
+        &mut self,
+        request_id: u64,
+        reply_tx: &std::sync::mpsc::Sender<crate::ai::UiCommand>,
+    ) {
+        self.pending_selection = Some((request_id, reply_tx.clone()));
     }
 }
 
@@ -3669,6 +3679,17 @@ impl eframe::App for ProfApp {
                     };
                     let _ = reply_tx.send(crate::ai::UiCommand::Ack { request_id, message });
                 }
+                // get_selection (V1.4): a non-driving READ of the human's current
+                // selection — the SAME state the embedded `build_selection_preamble`
+                // reads. No viewport claim, no screenshot; reply synchronously.
+                if let Some((request_id, reply_tx)) = sink.pending_selection {
+                    let (items, range) = cx.chat_panel.selection_snapshot();
+                    let _ = reply_tx.send(crate::ai::UiCommand::SelectionData {
+                        request_id,
+                        items,
+                        range,
+                    });
+                }
             }
         }
 
@@ -4094,5 +4115,13 @@ mod mcp_sink_tests {
         let (rid, _tx) = sink.pending_clear.expect("clear must be RECORDED, not a no-op");
         assert_eq!(rid, 11);
         assert!(sink.pending.is_none() && sink.pending_highlight.is_none());
+    }
+
+    #[test]
+    fn test_mcp_sink_records_get_selection() {
+        let sink = drive(AgentEvent::GetSelection { request_id: 13 });
+        let (rid, _tx) = sink.pending_selection.expect("get_selection must be RECORDED, not a no-op");
+        assert_eq!(rid, 13);
+        assert!(sink.pending.is_none() && sink.pending_highlight.is_none() && sink.pending_clear.is_none());
     }
 }

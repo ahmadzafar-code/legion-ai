@@ -31,5 +31,5 @@ pub struct AiHighlight {
     pub confidence: f32,
 }
 
-pub use agent::{AgentEvent, Highlight, UiCommand};
+pub use agent::{AgentEvent, Highlight, SelectedItemInfo, UiCommand};
 pub use chat_panel::{ChatMessage, ChatMessageKind, ChatPanel, HighlightAction, PendingNavigation, SelectedItem, TimelineSelection};

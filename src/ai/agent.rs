@@ -125,6 +125,11 @@ pub enum AgentEvent {
     /// MCP-driven (V1.2): clear all highlight overlays, then ACK via
     /// `UiCommand::Ack`. The embedded agent emits the reply-less `ClearHighlights`.
     ClearHighlightsRequest { request_id: u64 },
+    /// MCP-driven (V1.4): READ the human's current timeline selection and reply via
+    /// `UiCommand::SelectionData`. A non-driving read — the bridge services it
+    /// WITHOUT claiming the viewport token. The embedded agent reads its own
+    /// selection state directly (`build_selection_preamble`) and never emits this.
+    GetSelection { request_id: u64 },
     /// Agentic loop finished successfully.
     Complete(AgentResponse),
     /// Agentic loop failed with an error.
@@ -150,6 +155,27 @@ pub enum UiCommand {
     /// `message` is the model-readable confirmation text. Used only by the
     /// in-viewer MCP bridge path (V1.2).
     Ack { request_id: u64, message: String },
+    /// The human's current timeline selection, in reply to `GetSelection` (V1.4).
+    /// `items` are selected task bars; `range` is the dragged region (entry label,
+    /// start_ns, stop_ns), if any. Both empty/None ⇒ nothing selected.
+    SelectionData {
+        request_id: u64,
+        items: Vec<SelectedItemInfo>,
+        range: Option<(String, i64, i64)>,
+    },
+}
+
+/// One selected task bar reported by `get_selection` over the bridge (V1.4). A
+/// self-contained mirror of the chat panel's `SelectedItem`, so the UI↔bridge
+/// command layer carries no dependency on the chat-panel type. The UI drain maps
+/// `SelectedItem` → this when building [`UiCommand::SelectionData`].
+#[derive(Debug, Clone)]
+pub struct SelectedItemInfo {
+    pub item_uid: u64,
+    pub entry_slug: Option<String>,
+    pub title: String,
+    pub start_ns: i64,
+    pub stop_ns: i64,
 }
 
 // ── Agent session ────────────────────────────────────────────────────────────

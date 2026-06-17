@@ -674,6 +674,33 @@ impl ChatPanel {
         s
     }
 
+    /// V1.4: structured snapshot of the current selection for the in-viewer MCP
+    /// `get_selection` tool. Reads the SAME state the embedded
+    /// `build_selection_preamble` reads (selected task bars + dragged region), so
+    /// the MCP read and the embedded preamble report identical information. Returns
+    /// `(items, range)`; `range` is `(entry_label, start_ns, stop_ns)`. Both
+    /// empty/None ⇒ nothing selected.
+    pub fn selection_snapshot(
+        &self,
+    ) -> (Vec<crate::ai::SelectedItemInfo>, Option<(String, i64, i64)>) {
+        let items = self
+            .selected_items
+            .iter()
+            .map(|it| crate::ai::SelectedItemInfo {
+                item_uid: it.item_uid,
+                entry_slug: it.entry_slug.clone(),
+                title: it.title.clone(),
+                start_ns: it.start_ns,
+                stop_ns: it.stop_ns,
+            })
+            .collect();
+        let range = self
+            .selection
+            .as_ref()
+            .map(|s| (s.entry_label.clone(), s.interval.start.0, s.interval.stop.0));
+        (items, range)
+    }
+
     /// Take pending highlight actions (user clicked a chip) for core.rs to resolve.
     pub fn take_pending_highlight_actions(&mut self) -> Vec<HighlightAction> {
         std::mem::take(&mut self.pending_highlight_actions)
@@ -2734,5 +2761,48 @@ impl crate::ai::bridge::EventSink for ChatPanel {
         self.add_message(ChatMessageKind::System, format!("Error: {error}"));
         self.pending_request = false;
         *self.event_rx.lock().unwrap() = None;
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    use crate::data::EntryID;
+    use crate::timestamp::{Interval, Timestamp};
+
+    /// V1.4: selection_snapshot mirrors the embedded `build_selection_preamble`
+    /// state — the data `get_selection` returns over the MCP. Empty when nothing is
+    /// selected; carries item_uid/entry_slug/title/interval + the dragged region.
+    #[test]
+    fn test_selection_snapshot_empty_and_seeded() {
+        let mut p = ChatPanel::new();
+
+        // Nothing selected -> empty snapshot.
+        let (items, range) = p.selection_snapshot();
+        assert!(items.is_empty() && range.is_none(), "empty selection -> empty snapshot");
+
+        // Seed a selected task bar + a dragged region.
+        p.set_item_selection(vec![SelectedItem {
+            item_uid: 48,
+            entry_slug: Some("n0_cpu_c1".into()),
+            title: "top_level <6>".into(),
+            start_ns: 100,
+            stop_ns: 200,
+        }]);
+        p.set_selection(TimelineSelection {
+            entry_id: EntryID::root(),
+            entry_label: "CPU 1".into(),
+            interval: Interval::new(Timestamp(50), Timestamp(300)),
+        });
+
+        let (items, range) = p.selection_snapshot();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].item_uid, 48);
+        assert_eq!(items[0].entry_slug.as_deref(), Some("n0_cpu_c1"));
+        assert_eq!(items[0].title, "top_level <6>");
+        assert_eq!((items[0].start_ns, items[0].stop_ns), (100, 200));
+        let (label, start, stop) = range.expect("dragged region present");
+        assert_eq!(label, "CPU 1");
+        assert_eq!((start, stop), (50, 300));
     }
 }
