@@ -103,19 +103,9 @@ fn main() {
         println!("Legion AI Co-Pilot DuckDB: {db}");
     }
 
-    // When no --code was given, prefer a `code_examples/` directory relative to the
-    // launch dir (the app source); fall back to the launch cwd so read_code/list_files
-    // still work. Explicit --code always overrides (code_path is already Some here).
-    if code_path.is_none() {
-        let cand = Path::new("code_examples");
-        if cand.is_dir() {
-            let p = cand.to_string_lossy().into_owned();
-            println!("Legion AI Co-Pilot source root: {p}");
-            code_path = Some(p);
-        } else if let Ok(cwd) = std::env::current_dir() {
-            code_path = Some(cwd.to_string_lossy().into_owned());
-        }
-    }
+    // The code root is explicit-only: set solely by the `--code` flag (no autodetect,
+    // no cwd default). Launch with `--code code_examples` to enable the source
+    // briefing (MCP instructions + overview line) and read_code/list_files.
     if let Some(ref code) = code_path {
         println!("Legion AI Co-Pilot code root: {code}");
     }
