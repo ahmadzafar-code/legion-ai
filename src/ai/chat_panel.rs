@@ -9,7 +9,7 @@
 //! When built with `--features ai`, the panel calls the native Rust agent
 //! (`agent::AgentSession`) directly — no Python sidecar required.
 
-use crate::ai::agent::{AgentEvent, AgentSession, Highlight, UiCommand};
+use crate::ai::agent::{AgentEvent, AgentResponse, AgentSession, Highlight, UiCommand};
 use crate::data::EntryID;
 use crate::timestamp::Interval;
 use std::sync::{Arc, Mutex};
@@ -801,141 +801,15 @@ impl ChatPanel {
             // guard dropped here
         };
 
-        // Phase 2: Process events (no lock held)
+        // Phase 2: Process events (no lock held) through the SHARED bridge handler
+        // (`apply_agent_event`), so the embedded agent and any future consumer run
+        // the identical AgentEvent→UI logic. The embedded screenshot reply is
+        // delivered by core.rs via `ui_command_tx`, so `reply_tx` is unused by this
+        // sink; a dummy channel only stands in if no agent channel is wired yet.
+        let (dummy_tx, _dummy_rx) = mpsc::channel::<UiCommand>();
+        let reply_tx = self.ui_command_tx.clone().unwrap_or(dummy_tx);
         for event in events {
-            match event {
-                AgentEvent::ToolCall { name, purpose } => {
-                    self.add_message(
-                        ChatMessageKind::System,
-                        format!("  ↳ {name}: {purpose}"),
-                    );
-                }
-                AgentEvent::ToolResult { name, summary, full_content } => {
-                    let has_content = !full_content.is_empty() && full_content != summary;
-                    self.messages.push(ChatMessage {
-                        kind: ChatMessageKind::System,
-                        text: format!("  ✓ {name} ({summary})"),
-                        highlights: vec![],
-                        expandable_content: if has_content { Some(full_content) } else { None },
-                    });
-                    self.scroll_to_bottom = true;
-                }
-                AgentEvent::ScreenshotRequest { request_id } => {
-                    self.pending_navigation = Some(PendingNavigation::Screenshot { request_id });
-                }
-                AgentEvent::ZoomRequest {
-                    request_id,
-                    start_ns,
-                    stop_ns,
-                } => {
-                    self.pending_navigation = Some(PendingNavigation::Zoom { request_id, start_ns, stop_ns });
-                }
-                AgentEvent::PanRequest {
-                    request_id,
-                    direction,
-                    percent,
-                } => {
-                    self.pending_navigation = Some(PendingNavigation::Pan { request_id, direction, percent });
-                }
-                AgentEvent::ScrollToRequest {
-                    request_id,
-                    entry_slug,
-                } => {
-                    self.pending_navigation = Some(PendingNavigation::ScrollTo { request_id, entry_slug });
-                }
-                AgentEvent::SetViewRequest {
-                    request_id,
-                    start_ns,
-                    stop_ns,
-                    entry_slug,
-                    filter_kinds,
-                    expand_kinds,
-                    collapse_kinds,
-                    vertical_scale,
-                } => {
-                    self.pending_navigation = Some(PendingNavigation::SetView {
-                        request_id,
-                        start_ns,
-                        stop_ns,
-                        entry_slug,
-                        filter_kinds,
-                        expand_kinds,
-                        collapse_kinds,
-                        vertical_scale,
-                    });
-                }
-                AgentEvent::SearchRequest { request_id, query } => {
-                    self.pending_navigation = Some(PendingNavigation::Search { request_id, query });
-                }
-                AgentEvent::ResetViewRequest { request_id } => {
-                    self.pending_navigation = Some(PendingNavigation::ResetView { request_id });
-                }
-                AgentEvent::QuestionForUser { request_id, question, options } => {
-                    self.add_message(ChatMessageKind::System, format!("❓ {question}"));
-                    self.pending_question = Some((request_id, question, options));
-                    self.visible = true;
-                }
-                AgentEvent::ClearHighlights => {
-                    self.pending_clear_highlights = true;
-                    self.add_message(ChatMessageKind::System, "Cleared timeline highlights.");
-                }
-                AgentEvent::Complete(response) => {
-                    let display = if response.text.len() > 10_000 {
-                        format!(
-                            "{}…\n\n*(truncated — full response was {} chars)*",
-                            &response.text[..10_000],
-                            response.text.len()
-                        )
-                    } else {
-                        response.text
-                    };
-
-                    let highlights = response.highlights;
-                    // Auto-apply the agent's highlights to the timeline so they
-                    // appear immediately (deduped in core) — matching the agent's
-                    // "I've highlighted…" narration. zoom_to:false because the
-                    // agent has usually navigated already; the "Zoom to all" chip
-                    // re-fits the view on demand.
-                    for hl in &highlights {
-                        self.pending_highlight_actions.push(HighlightAction {
-                            highlight: hl.clone(),
-                            zoom_to: false,
-                        });
-                    }
-
-                    // Embed highlights in the Analysis message as clickable chips
-                    self.messages.push(ChatMessage {
-                        kind: ChatMessageKind::Analysis,
-                        text: display,
-                        highlights,
-                        expandable_content: None,
-                    });
-                    self.scroll_to_bottom = true;
-
-                    self.add_message(
-                        ChatMessageKind::System,
-                        format!(
-                            "Done. {} quer{} executed.",
-                            response.queries_executed,
-                            if response.queries_executed == 1 {
-                                "y"
-                            } else {
-                                "ies"
-                            }
-                        ),
-                    );
-                    self.pending_request = false;
-                    *self.event_rx.lock().unwrap() = None;
-                }
-                AgentEvent::Error(error) => {
-                    self.add_message(
-                        ChatMessageKind::System,
-                        format!("Error: {error}"),
-                    );
-                    self.pending_request = false;
-                    *self.event_rx.lock().unwrap() = None;
-                }
-            }
+            crate::ai::bridge::apply_agent_event(self, event, &reply_tx);
         }
 
         // Handle disconnected channel (agent thread crashed without sending Complete/Error)
@@ -2735,5 +2609,98 @@ fn format_duration_ns(ns: i64) -> String {
         format!("{:.2} ms", ns as f64 / 1_000_000.0)
     } else {
         format!("{:.3} s", ns as f64 / 1_000_000_000.0)
+    }
+}
+
+/// The embedded chat panel as an [`EventSink`]: each method is the verbatim body
+/// of the corresponding former `poll_events` match arm, so behavior is unchanged —
+/// `poll_events` now delegates here via `apply_agent_event`. The embedded
+/// screenshot reply is delivered by core.rs through `ui_command_tx`, so this sink
+/// does not use `reply_tx`.
+impl crate::ai::bridge::EventSink for ChatPanel {
+    fn on_tool_call(&mut self, name: String, purpose: String) {
+        self.add_message(ChatMessageKind::System, format!("  ↳ {name}: {purpose}"));
+    }
+
+    fn on_tool_result(&mut self, name: String, summary: String, full_content: String) {
+        let has_content = !full_content.is_empty() && full_content != summary;
+        self.messages.push(ChatMessage {
+            kind: ChatMessageKind::System,
+            text: format!("  ✓ {name} ({summary})"),
+            highlights: vec![],
+            expandable_content: if has_content { Some(full_content) } else { None },
+        });
+        self.scroll_to_bottom = true;
+    }
+
+    fn on_navigation(&mut self, nav: PendingNavigation, _reply_tx: &mpsc::Sender<UiCommand>) {
+        self.pending_navigation = Some(nav);
+    }
+
+    fn on_question(
+        &mut self,
+        request_id: u64,
+        question: String,
+        options: Vec<String>,
+        _reply_tx: &mpsc::Sender<UiCommand>,
+    ) {
+        self.add_message(ChatMessageKind::System, format!("❓ {question}"));
+        self.pending_question = Some((request_id, question, options));
+        self.visible = true;
+    }
+
+    fn on_clear_highlights(&mut self) {
+        self.pending_clear_highlights = true;
+        self.add_message(ChatMessageKind::System, "Cleared timeline highlights.");
+    }
+
+    fn on_complete(&mut self, response: AgentResponse) {
+        let display = if response.text.len() > 10_000 {
+            format!(
+                "{}…\n\n*(truncated — full response was {} chars)*",
+                &response.text[..10_000],
+                response.text.len()
+            )
+        } else {
+            response.text
+        };
+
+        let highlights = response.highlights;
+        // Auto-apply the agent's highlights to the timeline so they appear
+        // immediately (deduped in core) — matching the agent's "I've highlighted…"
+        // narration. zoom_to:false because the agent has usually navigated already;
+        // the "Zoom to all" chip re-fits the view on demand.
+        for hl in &highlights {
+            self.pending_highlight_actions.push(HighlightAction {
+                highlight: hl.clone(),
+                zoom_to: false,
+            });
+        }
+
+        // Embed highlights in the Analysis message as clickable chips.
+        self.messages.push(ChatMessage {
+            kind: ChatMessageKind::Analysis,
+            text: display,
+            highlights,
+            expandable_content: None,
+        });
+        self.scroll_to_bottom = true;
+
+        self.add_message(
+            ChatMessageKind::System,
+            format!(
+                "Done. {} quer{} executed.",
+                response.queries_executed,
+                if response.queries_executed == 1 { "y" } else { "ies" }
+            ),
+        );
+        self.pending_request = false;
+        *self.event_rx.lock().unwrap() = None;
+    }
+
+    fn on_error(&mut self, error: String) {
+        self.add_message(ChatMessageKind::System, format!("Error: {error}"));
+        self.pending_request = false;
+        *self.event_rx.lock().unwrap() = None;
     }
 }

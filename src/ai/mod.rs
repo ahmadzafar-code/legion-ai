@@ -5,6 +5,7 @@
 //! - Native Rust AI agent + direct tool calls (`agent`, `tools`)
 
 pub mod agent;
+pub mod bridge;
 mod chat_panel;
 pub mod tools;
 pub mod trace;

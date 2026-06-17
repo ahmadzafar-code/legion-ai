@@ -353,6 +353,55 @@ struct Context {
     #[cfg(feature = "ai")]
     #[serde(skip)]
     ai_region_selection: Option<Interval>,
+
+    /// V1.0 bridge: the single viewport-ownership token. The embedded chat agent
+    /// drives transparently (sole driver in V1.0); a second consumer claims it via
+    /// the `UiBridge` from [`Context::ui_bridge`]. Read only by `ui_bridge`, which
+    /// has no caller until V1.1 wires the in-viewer MCP server.
+    #[cfg(feature = "ai")]
+    #[serde(skip)]
+    #[allow(dead_code)]
+    viewport_token: crate::ai::bridge::ViewportToken,
+
+    /// Second event source (the future in-viewer MCP). Arc-wrapped so `Context`
+    /// stays `Clone`; drained every frame alongside the embedded source, with
+    /// replies routed to `mcp_cmd_tx`. Empty/unused until a `UiBridge` is minted.
+    #[cfg(feature = "ai")]
+    #[serde(skip)]
+    mcp_event_rx:
+        std::sync::Arc<std::sync::Mutex<Option<std::sync::mpsc::Receiver<crate::ai::AgentEvent>>>>,
+    #[cfg(feature = "ai")]
+    #[serde(skip)]
+    mcp_cmd_tx: Option<std::sync::mpsc::Sender<crate::ai::UiCommand>>,
+
+    /// Request id + reply channel for a screenshot the SECOND source is awaiting;
+    /// Phase 1 routes the captured PNG here AFTER the embedded slot.
+    #[cfg(feature = "ai")]
+    #[serde(skip)]
+    mcp_awaiting_screenshot: Option<(u64, std::sync::mpsc::Sender<crate::ai::UiCommand>)>,
+}
+
+#[cfg(feature = "ai")]
+impl Context {
+    /// Mint a [`UiBridge`](crate::ai::bridge::UiBridge) for a second consumer (the
+    /// future in-viewer MCP server thread) bound to `consumer_id`. Creates the
+    /// second event/command channel pair, stores the UI-side ends so the per-frame
+    /// loop drains and replies on them, and hands the consumer-side ends + a clone
+    /// of the shared viewport token to the bridge. The embedded chat agent is
+    /// unaffected; the bridge's `request` is structurally locked out via the token
+    /// while another consumer owns the viewport.
+    ///
+    /// No caller until V1.1 (the in-viewer MCP server) — the per-frame drain and
+    /// channels it wires are already live, so V1.1 only needs to call this + spawn
+    /// the server thread.
+    #[allow(dead_code)]
+    pub fn ui_bridge(&mut self, consumer_id: u64) -> crate::ai::bridge::UiBridge {
+        let (event_tx, event_rx) = std::sync::mpsc::channel::<crate::ai::AgentEvent>();
+        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<crate::ai::UiCommand>();
+        *self.mcp_event_rx.lock().unwrap() = Some(event_rx);
+        self.mcp_cmd_tx = Some(cmd_tx);
+        crate::ai::bridge::UiBridge::new(event_tx, cmd_rx, self.viewport_token.clone(), consumer_id)
+    }
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -1710,6 +1759,138 @@ fn encode_screenshot_png(color_image: &egui::ColorImage) -> Vec<u8> {
         )
         .expect("PNG encode failed");
     buf
+}
+
+/// Apply a navigation/screenshot request to the live view (zoom / pan / scroll /
+/// filter / search / reset). Shared by the embedded chat agent and any second
+/// consumer (the V1.0 bridge) so both run identical view logic. Does NOT request
+/// the screenshot — the caller sends the `ViewportCommand` and records the
+/// awaiting slot.
+#[cfg(feature = "ai")]
+fn apply_navigation(cx: &mut Context, windows: &mut [Window], nav: &crate::ai::PendingNavigation) {
+    use crate::ai::PendingNavigation;
+    match nav {
+        PendingNavigation::Screenshot { .. } => {
+            // Plain screenshot — no navigation changes needed.
+        }
+        PendingNavigation::Zoom { start_ns, stop_ns, .. } => {
+            let interval = Interval::new(Timestamp(*start_ns), Timestamp(*stop_ns));
+            ProfApp::zoom(cx, interval);
+        }
+        PendingNavigation::Pan { direction, percent, .. } => {
+            let pct = (percent.round() as i64).clamp(1, 200);
+            let dir = if direction.as_str() == "left" {
+                PanDirection::Left
+            } else {
+                PanDirection::Right
+            };
+            ProfApp::pan(cx, Percentage::from(pct), dir);
+        }
+        PendingNavigation::ScrollTo { entry_slug, .. } => {
+            for window in windows.iter_mut() {
+                let slug_map = build_slug_map(window);
+                if let Some(entry_id) = slug_map.get(entry_slug) {
+                    window.expand_slot(entry_id);
+                    cx.ai_scroll_to_entry = Some(entry_id.clone());
+                    break;
+                }
+            }
+        }
+        PendingNavigation::SetView {
+            start_ns,
+            stop_ns,
+            entry_slug,
+            filter_kinds,
+            expand_kinds,
+            collapse_kinds,
+            vertical_scale,
+            ..
+        } => {
+            let interval = Interval::new(Timestamp(*start_ns), Timestamp(*stop_ns));
+            ProfApp::zoom(cx, interval);
+            if let Some(scale) = vertical_scale {
+                cx.scale_factor = (*scale as f32).clamp(0.25, 4.0);
+            }
+            for window in windows.iter_mut() {
+                if let Some(kinds) = filter_kinds {
+                    let matched = window.set_kind_filter(kinds);
+                    if matched == 0 && !kinds.is_empty() {
+                        log::warn!("set_view filter_kinds matched no known kinds: {kinds:?}");
+                    }
+                }
+                if let Some(kinds) = expand_kinds {
+                    for k in kinds {
+                        window.set_kind_expanded(k, true);
+                    }
+                }
+                if let Some(kinds) = collapse_kinds {
+                    for k in kinds {
+                        window.set_kind_expanded(k, false);
+                    }
+                }
+            }
+            if let Some(slug) = entry_slug {
+                for window in windows.iter_mut() {
+                    let slug_map = build_slug_map(window);
+                    if let Some(entry_id) = slug_map.get(slug) {
+                        window.expand_slot(entry_id);
+                        cx.ai_scroll_to_entry = Some(entry_id.clone());
+                        break;
+                    }
+                }
+            }
+        }
+        PendingNavigation::Search { query, .. } => {
+            for window in windows.iter_mut() {
+                window.config.search_state.query = query.clone();
+                window.search(cx);
+            }
+        }
+        PendingNavigation::ResetView { .. } => {
+            ProfApp::zoom(cx, cx.total_interval);
+            cx.scale_factor = 1.0;
+            for window in windows.iter_mut() {
+                window.config.kind_filter.clear();
+                window.config.search_state.query = String::new();
+                window.search(cx);
+            }
+        }
+    }
+}
+
+/// The `request_id` carried by any navigation variant.
+#[cfg(feature = "ai")]
+fn pending_nav_request_id(nav: &crate::ai::PendingNavigation) -> u64 {
+    use crate::ai::PendingNavigation;
+    match nav {
+        PendingNavigation::Screenshot { request_id }
+        | PendingNavigation::Zoom { request_id, .. }
+        | PendingNavigation::Pan { request_id, .. }
+        | PendingNavigation::ScrollTo { request_id, .. }
+        | PendingNavigation::SetView { request_id, .. }
+        | PendingNavigation::Search { request_id, .. }
+        | PendingNavigation::ResetView { request_id } => *request_id,
+    }
+}
+
+/// Sink for draining the SECOND event source (the future in-viewer MCP). It only
+/// records navigation requests — that consumer drives the view, it does not emit
+/// chat events. At most one nav is serviced per frame (single screenshot pipeline).
+#[cfg(feature = "ai")]
+#[derive(Default)]
+struct McpDrainSink {
+    pending: Option<(crate::ai::PendingNavigation, std::sync::mpsc::Sender<crate::ai::UiCommand>)>,
+}
+
+#[cfg(feature = "ai")]
+impl crate::ai::bridge::EventSink for McpDrainSink {
+    fn on_navigation(
+        &mut self,
+        nav: crate::ai::PendingNavigation,
+        reply_tx: &std::sync::mpsc::Sender<crate::ai::UiCommand>,
+    ) {
+        self.pending = Some((nav, reply_tx.clone()));
+    }
 }
 
 /// Build a metadata string describing the visible time range and entry
@@ -3280,127 +3461,71 @@ impl eframe::App for ProfApp {
             // Phase 1: Check for Event::Screenshot delivered by egui.
             // Extract data inside ctx.input() closure, send outside to avoid
             // capturing &mut cx across the send call.
-            let captured: Option<(u64, Vec<u8>)> = ctx.input(|i| {
+            // Embedded slot is checked FIRST (unchanged behavior); the second
+            // source's slot only if the embedded one is empty, so the single egui
+            // screenshot pipeline serves whichever source is currently active.
+            let captured: Option<(u64, Vec<u8>, bool)> = ctx.input(|i| {
                 for event in &i.events {
                     if let egui::Event::Screenshot { image, .. } = event {
                         if let Some(request_id) = cx.awaiting_screenshot.take() {
-                            return Some((request_id, encode_screenshot_png(image)));
+                            return Some((request_id, encode_screenshot_png(image), false));
+                        }
+                        if let Some((request_id, _)) = &cx.mcp_awaiting_screenshot {
+                            return Some((*request_id, encode_screenshot_png(image), true));
                         }
                     }
                 }
                 None
             });
-            if let Some((request_id, png_bytes)) = captured {
+            if let Some((request_id, png_bytes, is_mcp)) = captured {
                 let metadata = build_screenshot_metadata(cx, windows);
-                cx.chat_panel.send_screenshot(request_id, png_bytes, metadata);
+                if is_mcp {
+                    if let Some((_, reply_tx)) = cx.mcp_awaiting_screenshot.take() {
+                        let _ = reply_tx.send(crate::ai::UiCommand::ScreenshotData {
+                            request_id,
+                            png_bytes,
+                            metadata,
+                        });
+                    }
+                } else {
+                    cx.chat_panel.send_screenshot(request_id, png_bytes, metadata);
+                }
             }
 
             // Phase 2: Check for new navigation requests from the agent thread.
             if let Some(nav) = cx.chat_panel.take_pending_navigation() {
-                use crate::ai::PendingNavigation;
-                let request_id = match &nav {
-                    PendingNavigation::Screenshot { request_id }
-                    | PendingNavigation::Zoom { request_id, .. }
-                    | PendingNavigation::Pan { request_id, .. }
-                    | PendingNavigation::ScrollTo { request_id, .. }
-                    | PendingNavigation::SetView { request_id, .. }
-                    | PendingNavigation::Search { request_id, .. }
-                    | PendingNavigation::ResetView { request_id } => *request_id,
-                };
-
-                match nav {
-                    PendingNavigation::Screenshot { .. } => {
-                        // Plain screenshot — no navigation changes needed.
-                    }
-                    PendingNavigation::Zoom { start_ns, stop_ns, .. } => {
-                        let interval = Interval::new(Timestamp(start_ns), Timestamp(stop_ns));
-                        ProfApp::zoom(cx, interval);
-                    }
-                    PendingNavigation::Pan { direction, percent, .. } => {
-                        let pct = (percent.round() as i64).clamp(1, 200);
-                        let dir = if direction == "left" {
-                            PanDirection::Left
-                        } else {
-                            PanDirection::Right
-                        };
-                        ProfApp::pan(cx, Percentage::from(pct), dir);
-                    }
-                    PendingNavigation::ScrollTo { entry_slug, .. } => {
-                        // Resolve slug → EntryID, expand parent, set scroll target.
-                        for window in windows.iter_mut() {
-                            let slug_map = build_slug_map(window);
-                            if let Some(entry_id) = slug_map.get(&entry_slug) {
-                                window.expand_slot(entry_id);
-                                cx.ai_scroll_to_entry = Some(entry_id.clone());
-                                break;
-                            }
-                        }
-                    }
-                    PendingNavigation::SetView {
-                        start_ns,
-                        stop_ns,
-                        entry_slug,
-                        filter_kinds,
-                        expand_kinds,
-                        collapse_kinds,
-                        vertical_scale,
-                        ..
-                    } => {
-                        let interval = Interval::new(Timestamp(start_ns), Timestamp(stop_ns));
-                        ProfApp::zoom(cx, interval);
-                        if let Some(scale) = vertical_scale {
-                            cx.scale_factor = (scale as f32).clamp(0.25, 4.0);
-                        }
-                        for window in windows.iter_mut() {
-                            if let Some(kinds) = &filter_kinds {
-                                let matched = window.set_kind_filter(kinds);
-                                if matched == 0 && !kinds.is_empty() {
-                                    log::warn!(
-                                        "set_view filter_kinds matched no known kinds: {kinds:?}"
-                                    );
-                                }
-                            }
-                            if let Some(kinds) = &expand_kinds {
-                                for k in kinds {
-                                    window.set_kind_expanded(k, true);
-                                }
-                            }
-                            if let Some(kinds) = &collapse_kinds {
-                                for k in kinds {
-                                    window.set_kind_expanded(k, false);
-                                }
-                            }
-                        }
-                        if let Some(slug) = entry_slug {
-                            for window in windows.iter_mut() {
-                                let slug_map = build_slug_map(window);
-                                if let Some(entry_id) = slug_map.get(&slug) {
-                                    window.expand_slot(entry_id);
-                                    cx.ai_scroll_to_entry = Some(entry_id.clone());
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    PendingNavigation::Search { query, .. } => {
-                        for window in windows.iter_mut() {
-                            window.config.search_state.query = query.clone();
-                            window.search(cx);
-                        }
-                    }
-                    PendingNavigation::ResetView { .. } => {
-                        ProfApp::zoom(cx, cx.total_interval);
-                        cx.scale_factor = 1.0;
-                        for window in windows.iter_mut() {
-                            window.config.kind_filter.clear();
-                            window.config.search_state.query = String::new();
-                            window.search(cx);
-                        }
-                    }
-                }
-
+                // Embedded source: apply the view change via the SHARED handler,
+                // then request the screenshot. Behavior is identical to the prior
+                // inline match — the logic now lives in `apply_navigation`, reused
+                // by the second source below.
+                let request_id = pending_nav_request_id(&nav);
+                apply_navigation(cx, windows, &nav);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
                 cx.awaiting_screenshot = Some(request_id);
+            }
+
+            // Second source (the V1.0 bridge): drain the MCP event channel and
+            // service ONE navigation this frame, replying on its OWN channel. Empty
+            // until a `UiBridge` is minted, so this is dormant for the embedded
+            // agent. Only runs when the screenshot pipeline is free this frame.
+            if cx.awaiting_screenshot.is_none() && cx.mcp_awaiting_screenshot.is_none() {
+                let drained = {
+                    let guard = cx.mcp_event_rx.lock().unwrap();
+                    match (guard.as_ref(), cx.mcp_cmd_tx.clone()) {
+                        (Some(rx), Some(reply_tx)) => {
+                            let mut sink = McpDrainSink::default();
+                            crate::ai::bridge::drain_source(rx, &reply_tx, &mut sink);
+                            sink.pending
+                        }
+                        _ => None,
+                    }
+                };
+                if let Some((nav, reply_tx)) = drained {
+                    let request_id = pending_nav_request_id(&nav);
+                    apply_navigation(cx, windows, &nav);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
+                    cx.mcp_awaiting_screenshot = Some((request_id, reply_tx));
+                }
             }
         }
 
