@@ -1,0 +1,24 @@
+schema_version = 1
+case_id        = "L1-find-long-tasks-005"
+question       = "Find every application task (running on a CPU or GPU-device compute processor) that has at least one running slice longer than 10 ms anywhere in the run. Return the set of their item_uids."
+level          = "L1"
+duckdb_relpath = "../../../multinoderuns/bg4N2/profcbN2g4b.duckdb"
+sha256         = "93d2066d564706a8ea06015603ead75816075697838ccf13b0d3d3ff54bbb427"
+answer_type    = "set"
+tolerance      = 0.0
+
+# Per-uid longest running slice = MAX(running.duration) over the dedup grain
+# (DISTINCT slices), app-scope (cpu/gpudev). Threshold 10 ms = 10000000 ns. MAX is
+# order-independent -> deterministic; set grading is order-insensitive.
+oracle_sql = """
+SELECT item_uid
+FROM (SELECT item_uid, MAX(running.duration) AS mx
+      FROM (SELECT DISTINCT item_uid, entry_slug, running
+            FROM items
+            WHERE running.start IS NOT NULL
+              AND (entry_slug LIKE '%_cpu_%' OR entry_slug LIKE '%_gpudev_%'))
+      GROUP BY item_uid)
+WHERE mx > 10000000
+ORDER BY item_uid
+"""
+expected = "28,48,221,1932,1935,1937,1945,3122,3124"

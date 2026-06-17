@@ -1,0 +1,24 @@
+schema_version = 1
+case_id        = "L2-first-util-002"
+question       = "Which utility meta-task did application task 48 first use? (Provenance: among the children of task 48 — items whose creator is task 48 — that run on a utility processor, the one with the earliest running.start.)"
+level          = "L2"
+duckdb_relpath = "../../../multinoderuns/bg4N2/profcbN2g4b.duckdb"
+sha256         = "93d2066d564706a8ea06015603ead75816075697838ccf13b0d3d3ff54bbb427"
+answer_type    = "uid"
+tolerance      = 0.0
+
+# Provenance via `creator`: children of 48 = items with creator.item_uid = 48,
+# restricted to utility slots, earliest by running.start (raw ns), tiebreak item_uid.
+# `mapper` is VARCHAR in this profile so it is NOT used (only creator/operation/
+# critical_path/previous_executing are valid structs).
+oracle_sql = """
+SELECT item_uid
+FROM (SELECT DISTINCT item_uid, running.start AS rs
+      FROM items
+      WHERE creator.item_uid = 48
+        AND entry_slug LIKE '%util%'
+        AND running.start IS NOT NULL)
+ORDER BY rs ASC, item_uid ASC
+LIMIT 1
+"""
+expected = "50"

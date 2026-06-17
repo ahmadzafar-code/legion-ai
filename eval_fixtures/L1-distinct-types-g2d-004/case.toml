@@ -1,0 +1,14 @@
+schema_version = 1
+case_id        = "L1-distinct-types-g2d-004"
+question       = "How many distinct task types (distinct titles) ran on the node-0 GPU g2d processor (entry_slug = 'n0_gpudev_g2d')?"
+level          = "L1"
+duckdb_relpath = "../../../multinoderuns/bg4N2/profcbN2g4b.duckdb"
+sha256         = "93d2066d564706a8ea06015603ead75816075697838ccf13b0d3d3ff54bbb427"
+answer_type    = "int"
+tolerance      = 0.0
+
+# COUNT(DISTINCT title) on a single pinned slot — fully deterministic (no ordering).
+oracle_sql = """
+SELECT COUNT(DISTINCT title) FROM items WHERE entry_slug = 'n0_gpudev_g2d'
+"""
+expected = "6"

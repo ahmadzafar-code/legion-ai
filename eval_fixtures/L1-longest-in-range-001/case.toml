@@ -1,6 +1,6 @@
 schema_version = 1
 case_id        = "L1-longest-in-range-001"
-question       = "Which task ran the longest within the highlighted time range?"
+question       = "Which application task ran the longest single uninterrupted stretch in the highlighted range? (Application tasks only — running on CPU/GPU compute processors; ignore runtime/IO service threads and utility meta-tasks.)"
 level          = "L1"
 # Points at the shared bg4N2 fixture (relative to this case.toml) so we do not copy
 # the multi-MB .duckdb into the repo. External cases ship their own co-located file.

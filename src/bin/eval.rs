@@ -846,6 +846,42 @@ mod tests {
         assert_eq!(case.expected.as_deref(), Some("48"));
     }
 
+    /// The answer-key LOCK: for every fixture, `compute_oracle` must compute the
+    /// ground truth on a direct connection AND match the manifest `expected`
+    /// (compute_oracle returns Err on drift, so `.is_ok()` IS the assertion — and
+    /// it grades by answer_type, so set order doesn't matter). Soft-skips if bg4N2
+    /// is absent. This is the same discipline that caught the L1 any_value bug.
+    #[test]
+    fn test_all_fixture_oracles_locked() {
+        const CASES: &[&str] = &[
+            "L1-longest-in-range-001",
+            "L1-longest-anyitem-002",
+            "L1-total-bytes-003",
+            "L1-data-movement-002",
+            "L1-distinct-types-g2d-004",
+            "L1-find-long-tasks-005",
+            "L2-cp-root-001",
+            "L2-first-util-002",
+            "L2-children-002",
+            "L3-bound-in-range-001",
+            "L3-overhead-overall-002",
+        ];
+        // All fixtures share bg4N2; check presence once via the first case.
+        let probe = load_case(CASES[0]).expect("load first case");
+        if !probe.duckdb_abs_path().exists() {
+            eprintln!("skipping oracle lock: bg4N2 absent at {}", probe.duckdb_abs_path().display());
+            return;
+        }
+        for id in CASES {
+            let case = load_case(id).unwrap_or_else(|e| panic!("load {id}: {e}"));
+            // Err == oracle drift (computed value != manifest expected).
+            let value = compute_oracle(&case)
+                .unwrap_or_else(|e| panic!("ORACLE LOCK FAILED for {id}: {e}"));
+            assert!(case.expected.is_some(), "{id} has no expected to lock against");
+            eprintln!("locked {id}: oracle={value:?}");
+        }
+    }
+
     // ── end-to-end with StubHarness (no Claude/network) ──────────────────────
     fn fake_case(answer_type: &str) -> Case {
         Case {
