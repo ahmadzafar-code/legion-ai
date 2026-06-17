@@ -252,7 +252,7 @@ impl AgentSession {
         let has_wiki = !wiki_path.is_empty();
         let tools = super::tools::tool_definitions(has_duckdb, has_code, has_wiki);
 
-        let system_prompt = build_system_prompt();
+        let system_prompt = build_system_prompt(has_code);
 
         Self {
             messages: Vec::new(),
@@ -1341,14 +1341,21 @@ fn render_findings(findings: &[String]) -> String {
 
 // ── Highlight extraction ─────────────────────────────────────────────────────
 
-fn build_system_prompt() -> String {
+fn build_system_prompt(has_code: bool) -> String {
+    // The source-read pointer is shown only when a code root is configured (the
+    // read_code/list_files tools are gated the same way). {{CODE_POINTER}} is the
+    // seam in the Tools list below.
+    let code_pointer = if has_code {
+        "- `list_files` / `read_code`: the profiled application's source — read a task's source before explaining what it computes.\n"
+    } else {
+        ""
+    };
     r#"You are an interactive assistant embedded in the Legion Prof timeline viewer. You help the user explore and understand a Legion Runtime performance profile and carry out tasks they hand off — answering questions, finding things, and navigating the timeline.
 
 ## Tools
 - `run_query`: read-only SQL over the DuckDB profiling database (tables `entries` and `items`; STRUCT columns via dot notation, e.g. `running.duration`). Write your own queries.
 - `overview`: a precomputed structured summary of the database (schema, counts, per-kind utilization, timeline bounds). Call it once for orientation when you need it.
-- `read_code` / `list_files`: read the application's source code.
-- `wiki_index` / `wiki_read` / `wiki_search`: a structured Legion knowledge wiki — search or scan the index, read the relevant page, follow its `Related` links; consult it for concepts, pitfalls, and diagnostic workflows instead of guessing.
+{{CODE_POINTER}}- `wiki_index` / `wiki_read` / `wiki_search`: a structured Legion knowledge wiki — search or scan the index, read the relevant page, follow its `Related` links; consult it for concepts, pitfalls, and diagnostic workflows instead of guessing.
 - `screenshot` / `zoom_to` / `pan` / `scroll_to` / `set_view`: inspect and move the timeline. Each returns a screenshot plus the visible time range (ns) and the entry_slugs on screen. `set_view` can also focus the view on specific processor kinds (`filter_kinds`), expand/collapse kinds (`expand_kinds`/`collapse_kinds`), and change row height (`vertical_scale`, 0.25–4.0).
 - `search`: set the timeline's search box to a string — matching tasks are highlighted in place and a match count is returned. Use this to *locate* tasks visually; use `run_query` for an exact list.
 - `reset_view`: zoom out to the whole profile and clear kind filters, search, and row scaling — a clean slate.
@@ -1403,7 +1410,7 @@ Pre-compute durations in SQL (e.g. `running.duration / 1e6 AS ms`).
 
 ## Style
 Be concise and concrete; cite the values you found. Use screenshots or navigation when a visual check helps or the user asks to see something. If the request is ambiguous or you are unsure what the user wants, ask a brief clarifying question before doing expensive work."#
-        .to_string()
+        .replace("{{CODE_POINTER}}", code_pointer)
 }
 
 /// Extract highlights from the agent's final text response.
@@ -1612,6 +1619,29 @@ Found issues.
         assert!(r.starts_with("## Findings so far"));
         assert!(r.contains("- alpha"));
         assert!(r.contains("- beta"));
+    }
+
+    /// The read_code/list_files pointer in the system prompt is gated on a code
+    /// root being configured (matching tool_definitions' has_code gating).
+    #[test]
+    fn test_build_system_prompt_code_pointer_gated_on_has_code() {
+        let with_code = build_system_prompt(true);
+        assert!(
+            with_code.contains("read_code"),
+            "code pointer must appear when has_code"
+        );
+        assert!(
+            with_code.contains("read a task's source before explaining what it computes"),
+            "directive wording missing"
+        );
+        // No leftover placeholder, and the wiki pointer is unaffected.
+        assert!(!with_code.contains("{{CODE_POINTER}}"), "placeholder not substituted");
+        assert!(with_code.contains("wiki_index"), "wiki pointer should remain");
+
+        let no_code = build_system_prompt(false);
+        assert!(!no_code.contains("read_code"), "no code pointer without a code root");
+        assert!(!no_code.contains("{{CODE_POINTER}}"), "placeholder not substituted");
+        assert!(no_code.contains("wiki_index"), "wiki pointer should remain without code");
     }
 
     /// P0(b): the `highlight` handler must reject an unknown `entry_slug` with an
