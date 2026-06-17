@@ -776,13 +776,19 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     out.push('\n');
 
     // ── Channel copy patterns ──────────────────────────────────────────────
+    // Copies live on %chan% slots and carry their cost in `lifetime` + `size`,
+    // NEVER `running` (title = "Copy"). The old `running IS NOT NULL` filter +
+    // `SUM(running.duration)` reported 0 copies / 0ms while the truth on bg4N2 is
+    // 207 distinct copies / 53.3ms. Dedup by item_uid (235 raw chan rows -> 207
+    // distinct copies). Volume is intentionally omitted (see TODO below).
     let copies = execute_run_query_raw(
         duckdb_path,
         "SELECT COUNT(*) AS copy_count, \
-         ROUND(COALESCE(SUM(running.duration), 0) / 1e6, 1) AS total_copy_ms, \
-         ROUND(COALESCE(SUM(CAST(size AS BIGINT)), 0) / 1e6, 1) AS total_copy_mb \
-         FROM items \
-         WHERE entry_slug LIKE '%chan%' AND running IS NOT NULL",
+         ROUND(SUM(ld) / 1e6, 1) AS total_copy_ms \
+         FROM (SELECT item_uid, any_value(lifetime.duration) AS ld \
+               FROM (SELECT DISTINCT item_uid, entry_slug, lifetime \
+                     FROM items WHERE entry_slug LIKE '%chan%') s \
+               GROUP BY item_uid)",
     );
     out.push_str("## Channel Copy Patterns\n");
     match &copies {
@@ -791,11 +797,14 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
                 if let Some(row) = parsed.first() {
                     let count = row.get("copy_count").and_then(|v| v.as_u64()).unwrap_or(0);
                     let ms = row.get("total_copy_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let mb = row.get("total_copy_mb").and_then(|v| v.as_f64()).unwrap_or(0.0);
                     out.push_str(&format!(
-                        "- {} copies | total time: {:.1}ms | total volume: {:.1}MB\n",
-                        count, ms, mb
+                        "- {} copies | total comm time (lifetime): {:.1}ms\n",
+                        count, ms
                     ));
+                    // TODO(volume): total bytes copied needs unit-aware parsing of
+                    // `size` (a unit-suffixed string: "76.000 KiB", "96 B", ...);
+                    // units vary (B/KiB on bg4N2) so a naive CAST is wrong. Deferred
+                    // rather than report an incorrect MB figure.
                     if count == 0 {
                         out.push_str("- No channel copies (CPU-only or no data movement)\n");
                     }
@@ -1022,13 +1031,18 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     out.push('\n');
 
     // ── Channel direction analysis ─────────────────────────────────────────
+    // Per-channel comm activity. Copies use `lifetime` (not `running`); dedup by
+    // item_uid, assigning each copy to its min(entry_slug) so the per-channel
+    // total matches the 53.3ms whole-run figure. Volume omitted (see TODO above).
     let chan_dir = execute_run_query_raw(
         duckdb_path,
         "SELECT entry_slug, COUNT(*) AS copy_count, \
-         ROUND(SUM(running.duration) / 1e6, 1) AS total_ms, \
-         ROUND(COALESCE(SUM(TRY_CAST(size AS BIGINT)), 0) / 1e6, 1) AS total_mb \
-         FROM items \
-         WHERE entry_slug LIKE '%chan%' AND running IS NOT NULL \
+         ROUND(SUM(ld) / 1e6, 1) AS total_ms \
+         FROM (SELECT item_uid, min(entry_slug) AS entry_slug, \
+                 any_value(lifetime.duration) AS ld \
+               FROM (SELECT DISTINCT item_uid, entry_slug, lifetime \
+                     FROM items WHERE entry_slug LIKE '%chan%') s \
+               GROUP BY item_uid) \
          GROUP BY entry_slug ORDER BY total_ms DESC",
     );
     out.push_str("## Channel Direction Analysis\n");
@@ -1045,7 +1059,6 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
                         let slug = row.get("entry_slug").and_then(|v| v.as_str()).unwrap_or("?");
                         let copies = row.get("copy_count").and_then(|v| v.as_u64()).unwrap_or(0);
                         let ms = row.get("total_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                        let mb = row.get("total_mb").and_then(|v| v.as_f64()).unwrap_or(0.0);
 
                         // Classify channel direction from slug
                         let direction = classify_channel_slug(slug);
@@ -1057,8 +1070,8 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
                         }
 
                         out.push_str(&format!(
-                            "- {} [{}]: {} copies, {:.1}ms, {:.1}MB\n",
-                            slug, direction, copies, ms, mb
+                            "- {} [{}]: {} copies, {:.1}ms\n",
+                            slug, direction, copies, ms
                         ));
                     }
                     if parsed.len() > 5 {
@@ -1087,11 +1100,18 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     out.push('\n');
 
     // ── Copy-to-compute ratio ──────────────────────────────────────────────
+    // Copy time = SUM(lifetime.duration) on channels, dedup'd by item_uid (copies
+    // have no `running`; the old `SUM(running)` on chan was always 0). Compute
+    // time keeps `running` on cpu/gpu non-util — already correct and unaffected by
+    // slice duplication (dedup'd == naive == 2263.1ms on bg4N2).
     let copy_ratio = execute_run_query_raw(
         duckdb_path,
         "WITH copy_time AS ( \
-           SELECT COALESCE(SUM(running.duration), 0) AS copy_ns \
-           FROM items WHERE entry_slug LIKE '%chan%' AND running IS NOT NULL \
+           SELECT COALESCE(SUM(ld), 0) AS copy_ns \
+           FROM (SELECT item_uid, any_value(lifetime.duration) AS ld \
+                 FROM (SELECT DISTINCT item_uid, entry_slug, lifetime \
+                       FROM items WHERE entry_slug LIKE '%chan%') s \
+                 GROUP BY item_uid) \
          ), \
          compute_time AS ( \
            SELECT COALESCE(SUM(running.duration), 0) AS compute_ns \
@@ -1502,13 +1522,16 @@ pub fn tool_definitions(has_duckdb: bool, has_code: bool) -> Vec<serde_json::Val
                       ROUND(AVG(running.duration) / 1e6, 2) AS avg_run_ms\n\
                     FROM items WHERE running IS NOT NULL\n\
                     GROUP BY title ORDER BY avg_wait_ms DESC LIMIT 10\n\n\
-                 7. Channel copy analysis:\n\
+                 7. Channel copy analysis (copies use lifetime + size, NEVER running; dedup by item_uid):\n\
                     SELECT entry_slug, COUNT(*) AS copy_count,\n\
-                      ROUND(SUM(running.duration) / 1e6, 1) AS total_ms,\n\
-                      ROUND(SUM(TRY_CAST(size AS BIGINT)) / 1e6, 1) AS total_mb\n\
-                    FROM items\n\
-                    WHERE entry_slug LIKE '%chan%' AND running IS NOT NULL\n\
-                    GROUP BY entry_slug ORDER BY total_ms DESC\n\n\
+                      ROUND(SUM(ld) / 1e6, 1) AS total_ms\n\
+                    FROM (SELECT item_uid, min(entry_slug) AS entry_slug,\n\
+                            any_value(lifetime.duration) AS ld\n\
+                          FROM (SELECT DISTINCT item_uid, entry_slug, lifetime\n\
+                                FROM items WHERE entry_slug LIKE '%chan%') s\n\
+                          GROUP BY item_uid)\n\
+                    GROUP BY entry_slug ORDER BY total_ms DESC\n\
+                    (size is a unit-suffixed string like '76.000 KiB'/'96 B' \u{2014} parse units for bytes)\n\n\
                  8. Utility activity during a time window:\n\
                     SELECT title, COUNT(*) AS cnt,\n\
                       ROUND(SUM(running.duration) / 1e6, 1) AS total_ms\n\
@@ -2065,6 +2088,67 @@ mod tests {
             .expect("unguarded runaway");
         assert_eq!(urows, 100001, "unguarded walk should run away to 100001 rows");
         assert_eq!(umax, 100000, "unguarded walk should hit the 100000 depth cap");
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// P1.A(1): channel copies use `lifetime`, not `running`. The pre-fix overview
+    /// query (`running IS NOT NULL` on `%chan%`) reported 0 copies / 0ms — a lie;
+    /// the truth on bg4N2 is 207 distinct copies / 53.3ms via lifetime. Red→green
+    /// on a DIRECT oracle connection, then asserts the real `gather_overview`
+    /// (tool path) now surfaces the corrected numbers.
+    #[test]
+    fn test_channel_copy_lifetime_fix() {
+        let src = test_db_path();
+        if !src.exists() {
+            eprintln!("skipping channel-copy fix: test DB absent at {}", src.display());
+            return;
+        }
+        let tmp = std::env::temp_dir().join("legion_p1a_channel_copy.duckdb");
+        let _ = std::fs::remove_file(&tmp);
+        std::fs::copy(&src, &tmp).expect("copy test DB to a writable temp file");
+        let db = tmp.to_str().unwrap();
+
+        // Direct oracle (independent answer key). Scoped so the connection is
+        // dropped before gather_overview opens the same file read-only.
+        {
+            let conn = duckdb::Connection::open(&tmp).expect("open writable temp DB");
+
+            // RED: the OLD buggy query (running on chan) finds 0 copies.
+            let old_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM items \
+                     WHERE entry_slug LIKE '%chan%' AND running IS NOT NULL",
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("old buggy copy count");
+            assert_eq!(old_count, 0, "documents the bug: running-on-chan finds 0 copies");
+
+            // GREEN: corrected copies via lifetime, dedup'd by item_uid.
+            let (count, comm_ms): (i64, f64) = conn
+                .query_row(
+                    "SELECT COUNT(*), ROUND(SUM(ld) / 1e6, 1) \
+                     FROM (SELECT item_uid, any_value(lifetime.duration) AS ld \
+                           FROM (SELECT DISTINCT item_uid, entry_slug, lifetime \
+                                 FROM items WHERE entry_slug LIKE '%chan%') s \
+                           GROUP BY item_uid)",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .expect("corrected copy count + comm time");
+            assert_eq!(count, 207, "corrected distinct copy count");
+            assert!((comm_ms - 53.3).abs() < 0.1, "corrected comm time, got {comm_ms}");
+        }
+
+        // Tool path: the real gather_overview output must now surface the copies.
+        let overview = gather_overview(db).expect("gather_overview");
+        assert!(overview.contains("207 copies"), "overview should report 207 copies");
+        assert!(overview.contains("53.3"), "overview should report 53.3ms comm time");
+        assert!(
+            !overview.contains("No channel copies"),
+            "overview must no longer claim there are no copies"
+        );
 
         let _ = std::fs::remove_file(&tmp);
     }
