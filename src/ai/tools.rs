@@ -423,6 +423,377 @@ pub fn execute_read_code(code_root: &str, path: &str) -> Result<String, String> 
     })
 }
 
+// ── Wiki tools (JIT knowledge retrieval) ─────────────────────────────────────
+//
+// Three named tools give the agent on-demand access to a structured Legion wiki
+// (replacing the removed 126K knowledge injection with retrieval): `wiki_index`
+// (browse the corpus), `wiki_read` (read a page or one section), `wiki_search`
+// (find pages by keyword). All are pure functions that serve ONLY .md files under
+// the configured wiki root — never `raw/` and never outside the root. Path safety
+// mirrors `execute_read_code` AND validates against the enumerated page set.
+
+/// Default per-read character budget for `wiki_read`. Chosen from the corpus size
+/// distribution (median ~5.7 KB, p90 ~7.2 KB, max ~40 KB): 12_000 chars (~3K
+/// tokens) returns the vast majority of pages whole and caps only the handful of
+/// outliers (the application pages + the auto-generated meta lint report).
+const WIKI_READ_DEFAULT_MAX_CHARS: usize = 12_000;
+
+/// One wiki page's metadata, parsed once and cached. `path` is relative to the
+/// wiki root, forward-slashed (e.g. `concepts/mapper.md`).
+#[derive(Clone)]
+struct WikiPage {
+    /// Relative, forward-slashed path under the wiki root.
+    path: String,
+    /// Top-level section directory (concepts|pitfalls|workflows|glossary|meta|applications|…).
+    section: String,
+    /// Frontmatter `title` (falls back to a title-cased filename).
+    title: String,
+    /// Frontmatter `summary` — the universal one-line TL;DR (falls back to `title`).
+    summary: String,
+    /// Frontmatter `tags` (inline `[a, b]` array; empty when absent).
+    tags: Vec<String>,
+    /// The `## TL;DR` block body, lower-cased, for search matching only (empty when
+    /// the page has none — pitfalls/workflows/glossary/meta).
+    tldr_lc: String,
+    /// Coarse importance tier: `core` for concepts/pitfalls/workflows/applications,
+    /// `optional` for glossary/meta.
+    tier: &'static str,
+}
+
+/// Per-root corpus cache: the metadata walk runs once per wiki root, then every
+/// `wiki_*` call reuses it. Page CONTENT is never cached (read fresh on demand).
+static WIKI_CORPUS_CACHE: OnceLock<Mutex<HashMap<String, Arc<Vec<WikiPage>>>>> = OnceLock::new();
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+
+/// Coarse tier heuristic: glossary/meta are reference/bookkeeping (`optional`);
+/// everything else is `core`.
+fn wiki_tier(section: &str) -> &'static str {
+    match section {
+        "glossary" | "meta" => "optional",
+        _ => "core",
+    }
+}
+
+/// Title-case a `kebab-or_snake.md` filename into a readable fallback title.
+fn filename_to_title(name: &str) -> String {
+    let stem = name.strip_suffix(".md").unwrap_or(name);
+    stem.split(['-', '_'])
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut c = w.chars();
+            match c.next() {
+                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Extract `(title, summary, tags)` from a page's leading YAML frontmatter (the
+/// block between the first `---` and the next `---`). Only the flat single-line
+/// fields we care about are parsed; pages without frontmatter (the meta pages)
+/// return all-empty and the callers fall back to a filename-derived title.
+fn parse_frontmatter(content: &str) -> (Option<String>, Option<String>, Vec<String>) {
+    let after = match content.strip_prefix("---") {
+        Some(rest) => rest,
+        None => return (None, None, Vec::new()),
+    };
+    let end = match after.find("\n---") {
+        Some(i) => i,
+        None => return (None, None, Vec::new()),
+    };
+    let (mut title, mut summary, mut tags) = (None, None, Vec::new());
+    for line in after[..end].lines() {
+        let line = line.trim_end();
+        if let Some(v) = line.strip_prefix("title:") {
+            title = Some(v.trim().to_owned());
+        } else if let Some(v) = line.strip_prefix("summary:") {
+            summary = Some(v.trim().to_owned());
+        } else if let Some(v) = line.strip_prefix("tags:") {
+            let inner = v.trim().trim_start_matches('[').trim_end_matches(']');
+            tags = inner
+                .split(',')
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+    }
+    (title, summary, tags)
+}
+
+/// Extract a single `## <header>` block (header + body up to the next level-1/2
+/// heading or EOF). Case-insensitive on the header text. `None` if not found.
+fn extract_section(content: &str, header: &str) -> Option<String> {
+    let want = header.trim().trim_start_matches('#').trim().to_lowercase();
+    let lines: Vec<&str> = content.lines().collect();
+    let start = lines.iter().position(|l| {
+        l.strip_prefix("## ")
+            .is_some_and(|rest| rest.trim().to_lowercase() == want)
+    })?;
+    // Stop at the next level-1 (`# `) or level-2 (`## `) heading; keep `###`+ inside.
+    let end = lines[start + 1..]
+        .iter()
+        .position(|l| l.starts_with("## ") || l.starts_with("# "))
+        .map(|rel| start + 1 + rel)
+        .unwrap_or(lines.len());
+    Some(lines[start..end].join("\n"))
+}
+
+/// Cap `text` to `max_chars` characters, appending a machine-readable truncation
+/// marker (mirrors the `run_query` 50-row marker) with a `next_offset` so a caller
+/// can tell a clipped read from a whole one and knows how to get the rest.
+fn wiki_cap_with_marker(text: &str, max_chars: usize) -> String {
+    let total = text.chars().count();
+    if total <= max_chars {
+        return text.to_owned();
+    }
+    let shown: String = text.chars().take(max_chars).collect();
+    format!(
+        "{shown}\n\n[TRUNCATED] shown first {max_chars} of {total} chars \
+         (next_offset={max_chars}). To see more: re-call wiki_read with a larger \
+         max_chars, or pass `section` to read just one `## Header` block.",
+    )
+}
+
+/// Walk `dir` recursively, collecting every `.md` page's metadata into `out`.
+fn collect_wiki_pages(root: &Path, dir: &Path, out: &mut Vec<WikiPage>) {
+    let rd = match std::fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(_) => return,
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if path.is_dir() {
+            if !SKIP_DIRS.contains(&name.as_str()) {
+                collect_wiki_pages(root, &path, out);
+            }
+        } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let section = rel.split('/').next().unwrap_or("").to_owned();
+            let content = std::fs::read_to_string(&path).unwrap_or_default();
+            let (title, summary, tags) = parse_frontmatter(&content);
+            let title = title
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| filename_to_title(&name));
+            let summary = summary.filter(|s| !s.is_empty()).unwrap_or_else(|| title.clone());
+            let tldr_lc = extract_section(&content, "TL;DR")
+                .unwrap_or_default()
+                .to_lowercase();
+            let tier = wiki_tier(&section);
+            out.push(WikiPage {
+                path: rel,
+                section,
+                title,
+                summary,
+                tags,
+                tldr_lc,
+                tier,
+            });
+        }
+    }
+}
+
+/// Build (and memoize) the page-metadata corpus for `wiki_root`. Err if the root
+/// is missing/not-a-directory or contains no pages.
+fn wiki_corpus(wiki_root: &str) -> Result<Arc<Vec<WikiPage>>, String> {
+    if wiki_root.is_empty() {
+        return Err("Wiki path not configured.".into());
+    }
+    let cache = WIKI_CORPUS_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(c) = cache.lock().unwrap().get(wiki_root) {
+        return Ok(c.clone());
+    }
+    let root = Path::new(wiki_root);
+    if !root.is_dir() {
+        return Err(format!("Wiki root '{}' is not a directory.", wiki_root));
+    }
+    let mut pages = Vec::new();
+    collect_wiki_pages(root, root, &mut pages);
+    if pages.is_empty() {
+        return Err(format!("No .md pages found under wiki root '{}'.", wiki_root));
+    }
+    pages.sort_by(|a, b| a.path.cmp(&b.path));
+    let arc = Arc::new(pages);
+    cache
+        .lock()
+        .unwrap()
+        .insert(wiki_root.to_owned(), arc.clone());
+    Ok(arc)
+}
+
+/// `wiki_index`: a grouped, one-line-per-page table of the whole corpus (or one
+/// section). Each row is `path [tier] — summary`. Scan it, then `wiki_read` the
+/// pages you need.
+pub fn wiki_index(wiki_root: &str, section: Option<&str>) -> Result<String, String> {
+    let corpus = wiki_corpus(wiki_root)?;
+
+    let mut sections: Vec<&str> = corpus.iter().map(|p| p.section.as_str()).collect();
+    sections.sort_unstable();
+    sections.dedup();
+
+    if let Some(sec) = section {
+        if !sections.contains(&sec) {
+            return Err(format!(
+                "Unknown wiki section '{sec}'. Sections: {}.",
+                sections.join(", ")
+            ));
+        }
+    }
+
+    let mut out = String::with_capacity(40 * 1024);
+    out.push_str("# Legion Wiki Index\n");
+    out.push_str(
+        "Consumption loop: scan these one-line summaries → `wiki_read` the relevant page(s) → \
+         follow their `Related` links. Use `wiki_search` if unsure which page.\n\n",
+    );
+    for sec in &sections {
+        if section.is_some_and(|want| want != *sec) {
+            continue;
+        }
+        let pages: Vec<&WikiPage> = corpus.iter().filter(|p| &p.section == sec).collect();
+        out.push_str(&format!("## {} ({} pages)\n", sec, pages.len()));
+        for p in pages {
+            out.push_str(&format!("- `{}` [{}] — {}\n", p.path, p.tier, p.summary));
+        }
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+/// `wiki_read`: read a page verbatim (Related links intact), or just one `## Header`
+/// block when `section` is given. Capped at `max_chars` (default
+/// [`WIKI_READ_DEFAULT_MAX_CHARS`]) with a truncation marker when cut. Path-safe:
+/// rejects traversal/absolute paths AND requires the path to be an enumerated page.
+pub fn wiki_read(
+    wiki_root: &str,
+    path: &str,
+    section: Option<&str>,
+    max_chars: Option<usize>,
+) -> Result<String, String> {
+    // Path safety (mirrors execute_read_code): no traversal, no absolute prefix.
+    if path.contains("..") || path.starts_with('/') || path.starts_with('\\') {
+        return Err("Invalid wiki path: must be relative with no '..' or absolute prefix.".into());
+    }
+    let corpus = wiki_corpus(wiki_root)?;
+    let norm = path.replace('\\', "/");
+    // Second guard: the path must be one of the enumerated pages under the root.
+    if !corpus.iter().any(|p| p.path == norm) {
+        return Err(format!(
+            "Unknown wiki page '{path}'. Use wiki_index or wiki_search to find valid paths."
+        ));
+    }
+    let full = Path::new(wiki_root).join(&norm);
+    let content = std::fs::read_to_string(&full)
+        .map_err(|e| format!("Cannot read '{}': {}", full.display(), e))?;
+
+    let body = match section {
+        Some(header) => extract_section(&content, header).ok_or_else(|| {
+            format!("Section '## {header}' not found in '{norm}'. Read the page with no `section` to see its headers.")
+        })?,
+        None => content,
+    };
+
+    let max = max_chars.unwrap_or(WIKI_READ_DEFAULT_MAX_CHARS).max(1);
+    Ok(wiki_cap_with_marker(&body, max))
+}
+
+/// Weighted case-insensitive substring score for a page against a lower-cased
+/// query. Title > tags > summary > path; per-token hits in title/summary add a
+/// little more. Substring-only (v1); BM25/embeddings can replace this later.
+fn wiki_score(p: &WikiPage, q: &str) -> i64 {
+    let title = p.title.to_lowercase();
+    let summary = p.summary.to_lowercase();
+    let path = p.path.to_lowercase();
+    let mut score = 0i64;
+    if title.contains(q) {
+        score += 10;
+    }
+    if p.tags.iter().any(|t| t.to_lowercase().contains(q)) {
+        score += 5;
+    }
+    if summary.contains(q) {
+        score += 3;
+    }
+    if p.tldr_lc.contains(q) {
+        score += 2;
+    }
+    if path.contains(q) {
+        score += 2;
+    }
+    for tok in q.split_whitespace().filter(|t| t.len() >= 2) {
+        if title.contains(tok) {
+            score += 2;
+        }
+        if summary.contains(tok) || p.tldr_lc.contains(tok) {
+            score += 1;
+        }
+    }
+    score
+}
+
+/// `wiki_search`: rank pages by keyword/substring over titles, summaries, TL;DRs,
+/// and tags (optionally scoped to a section and/or a tag). Returns up to `limit`
+/// `{path, section, tldr, tags, score}` rows as JSON — PATHS to read, not prose.
+pub fn wiki_search(
+    wiki_root: &str,
+    query: &str,
+    section: Option<&str>,
+    tag: Option<&str>,
+    limit: usize,
+) -> Result<String, String> {
+    let corpus = wiki_corpus(wiki_root)?;
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return Err("wiki_search requires a non-empty query.".into());
+    }
+    let tag_lc = tag.map(|t| t.to_lowercase());
+
+    let mut scored: Vec<(i64, &WikiPage)> = corpus
+        .iter()
+        .filter(|p| section.is_none_or(|s| p.section == s))
+        .filter(|p| {
+            tag_lc
+                .as_deref()
+                .is_none_or(|t| p.tags.iter().any(|pt| pt.to_lowercase() == t))
+        })
+        .filter_map(|p| {
+            let s = wiki_score(p, &q);
+            (s > 0).then_some((s, p))
+        })
+        .collect();
+    // Rank: score desc, then path asc for a deterministic order.
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.path.cmp(&b.1.path)));
+    scored.truncate(limit.max(1));
+
+    if scored.is_empty() {
+        let scope = section.map(|s| format!(" in section '{s}'")).unwrap_or_default();
+        return Ok(format!(
+            "No wiki pages matched query '{query}'{scope}. Try wiki_index to browse, or broader terms."
+        ));
+    }
+    let arr: Vec<serde_json::Value> = scored
+        .iter()
+        .map(|(s, p)| {
+            serde_json::json!({
+                "path": p.path,
+                "section": p.section,
+                "tldr": p.summary,
+                "tags": p.tags,
+                "score": s,
+            })
+        })
+        .collect();
+    Ok(serde_json::to_string_pretty(&arr).unwrap_or_else(|_| "[]".to_owned()))
+}
+
 /// Gather a pre-computed overview of the profiling database.
 ///
 /// Runs several SQL queries and combines results into a structured text summary
@@ -1536,9 +1907,10 @@ pub fn slug_exists(duckdb_path: &str, slug: &str) -> bool {
 ///
 /// - `has_duckdb`: include `run_query` tool (only if duckdb feature AND path is set)
 /// - `has_code`: include `read_code` tool (only if code path is configured)
+/// - `has_wiki`: include `wiki_index`/`wiki_read`/`wiki_search` (only if a wiki root is configured)
 ///
 /// `screenshot` and `zoom_to` are included as stubs (Phase 3b implementation).
-pub fn tool_definitions(has_duckdb: bool, has_code: bool) -> Vec<serde_json::Value> {
+pub fn tool_definitions(has_duckdb: bool, has_code: bool, has_wiki: bool) -> Vec<serde_json::Value> {
     let mut tools = Vec::new();
 
     if has_duckdb {
@@ -1710,6 +2082,90 @@ pub fn tool_definitions(has_duckdb: bool, has_code: bool) -> Vec<serde_json::Val
                     }
                 },
                 "required": ["path"]
+            }
+        }));
+    }
+
+    if has_wiki {
+        tools.push(serde_json::json!({
+            "name": "wiki_index",
+            "description":
+                "Browse the structured Legion knowledge wiki: a grouped, one-line-per-page \
+                 listing (path, tier, summary) of every page. CONSUMPTION LOOP: call wiki_index \
+                 (or wiki_search) to find the right page → wiki_read it → follow its `Related` \
+                 links to neighbours. Consult the wiki for Legion concepts, pitfalls, and \
+                 diagnostic workflows instead of guessing. Pass `section` to list just one \
+                 section (concepts, pitfalls, workflows, glossary, meta, applications).",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "section": {
+                        "type": "string",
+                        "description": "Optional top-level section to scope the listing (e.g. 'pitfalls')."
+                    }
+                },
+                "required": []
+            }
+        }));
+
+        tools.push(serde_json::json!({
+            "name": "wiki_read",
+            "description":
+                "Read one wiki page (path as shown by wiki_index/wiki_search, e.g. \
+                 'concepts/mapper.md'). Returns the page verbatim with its `Related` links \
+                 intact — follow those to neighbouring pages. Pass `section` to return ONLY one \
+                 `## Header` block (e.g. 'Debug signals', 'Failure modes', 'TL;DR'). Long pages \
+                 are capped at max_chars (default 12000) with a truncation marker; raise \
+                 max_chars or read a specific section to see more.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Relative page path under the wiki root, e.g. 'concepts/mapper.md'."
+                    },
+                    "section": {
+                        "type": "string",
+                        "description": "Optional `## Header` to return just that block (e.g. 'Debug signals')."
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "Optional character cap (default 12000)."
+                    }
+                },
+                "required": ["path"]
+            }
+        }));
+
+        tools.push(serde_json::json!({
+            "name": "wiki_search",
+            "description":
+                "Search the wiki by keyword/substring over page titles, summaries, TL;DRs, and \
+                 tags. Returns up to `limit` ranked {path, section, tldr, tags, score} matches — \
+                 these are PAGES TO READ, not a synthesized answer; wiki_read the top hits. Use \
+                 this when you don't know which page covers a topic. Optional `section` and `tag` \
+                 narrow the search.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Keyword(s) to match (case-insensitive substring)."
+                    },
+                    "section": {
+                        "type": "string",
+                        "description": "Optional top-level section to scope the search."
+                    },
+                    "tag": {
+                        "type": "string",
+                        "description": "Optional tag to require (exact, case-insensitive)."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max results to return (default 5)."
+                    }
+                },
+                "required": ["query"]
             }
         }));
     }
@@ -2508,6 +2964,188 @@ mod tests {
         assert!((tool_comm - 49.8).abs() < 0.1, "tool-path comm == 49.8, got {tool_comm}");
 
         let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// Wiki-tool tests. NOT gated on `duckdb` — the `wiki_*` tools are pure file/string
+/// helpers and must work under `{ai}` alone. Soft-skip when the wiki tree is absent
+/// (it is an untracked fixture one level above the crate dir).
+#[cfg(test)]
+mod wiki_tests {
+    use super::*;
+
+    /// The Legion wiki root (`wiki-legion/wiki`, one level above the crate dir).
+    fn wiki_root() -> Option<String> {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../wiki-legion/wiki");
+        p.is_dir().then(|| p.to_string_lossy().into_owned())
+    }
+
+    /// First listed concept page that has BOTH a `## TL;DR` and a `## Debug signals`
+    /// section — picked from the live index so the tests don't hard-code a filename.
+    fn concept_with_debug_signals(root: &str) -> Option<String> {
+        let idx = wiki_index(root, Some("concepts")).ok()?;
+        for line in idx.lines() {
+            if let Some(rest) = line.strip_prefix("- `") {
+                if let Some(end) = rest.find('`') {
+                    let path = &rest[..end];
+                    if let Ok(content) = wiki_read(root, path, None, Some(usize::MAX)) {
+                        if content.contains("## TL;DR") && content.contains("## Debug signals") {
+                            return Some(path.to_owned());
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn test_wiki_index_full_lists_sections_and_pages() {
+        let Some(root) = wiki_root() else {
+            eprintln!("skipping: wiki root absent");
+            return;
+        };
+        let idx = wiki_index(&root, None).unwrap();
+
+        // Sections present as grouped headers.
+        for sec in ["concepts", "pitfalls", "workflows", "glossary"] {
+            assert!(idx.contains(&format!("## {sec} (")), "index missing section {sec}");
+        }
+        // Known page paths appear as rows.
+        assert!(idx.contains("concepts/"), "no concept rows");
+        assert!(idx.contains("pitfalls/"), "no pitfall rows");
+        // Every row carries a tier + a non-empty one-liner after the em dash.
+        let rows: Vec<&str> = idx.lines().filter(|l| l.starts_with("- `")).collect();
+        assert!(rows.len() >= 100, "expected >=100 pages, got {}", rows.len());
+        for r in &rows {
+            assert!(r.contains("[core]") || r.contains("[optional]"), "row lacks tier: {r}");
+            let oneliner = r.split(" — ").nth(1).unwrap_or("").trim();
+            assert!(!oneliner.is_empty(), "row lacks a one-liner: {r}");
+        }
+
+        // MEASURE + REPORT the full no-arg index size (visible with --nocapture).
+        let chars = idx.chars().count();
+        eprintln!(
+            "[wiki_index] full index: {} pages, {} chars (~{} tokens)",
+            rows.len(),
+            chars,
+            chars / 4
+        );
+        // It must fit comfortably within one context window (≪ 200K tokens), so the
+        // full form is kept (no compact fallback needed).
+        assert!(chars < 200_000, "index unexpectedly huge: {chars} chars");
+    }
+
+    #[test]
+    fn test_wiki_index_section_scopes() {
+        let Some(root) = wiki_root() else {
+            eprintln!("skipping: wiki root absent");
+            return;
+        };
+        let idx = wiki_index(&root, Some("pitfalls")).unwrap();
+        assert!(idx.contains("## pitfalls ("), "pitfalls header missing");
+        // No other section headers leak in.
+        assert!(!idx.contains("## concepts ("), "concepts leaked into pitfalls scope");
+        // Every listed row is under pitfalls/.
+        for r in idx.lines().filter(|l| l.starts_with("- `")) {
+            assert!(r.contains("`pitfalls/"), "non-pitfall row in scoped index: {r}");
+        }
+        // An unknown section is a clear error.
+        assert!(wiki_index(&root, Some("nope")).is_err());
+    }
+
+    #[test]
+    fn test_wiki_read_returns_tldr() {
+        let Some(root) = wiki_root() else {
+            eprintln!("skipping: wiki root absent");
+            return;
+        };
+        let Some(page) = concept_with_debug_signals(&root) else {
+            eprintln!("skipping: no concept page with TL;DR + Debug signals");
+            return;
+        };
+        let content = wiki_read(&root, &page, None, None).unwrap();
+        assert!(content.contains("## TL;DR"), "page read lacks TL;DR: {page}");
+        // Related links are preserved verbatim (no synthesis).
+        assert!(content.contains("## Related"), "Related section stripped: {page}");
+    }
+
+    #[test]
+    fn test_wiki_read_section_extracts_only_that_block() {
+        let Some(root) = wiki_root() else {
+            eprintln!("skipping: wiki root absent");
+            return;
+        };
+        let Some(page) = concept_with_debug_signals(&root) else {
+            eprintln!("skipping: no concept page with TL;DR + Debug signals");
+            return;
+        };
+        let block = wiki_read(&root, &page, Some("Debug signals"), None).unwrap();
+        assert!(block.starts_with("## Debug signals"), "block not headed correctly: {block:.40}");
+        // Only that block — other level-2 headers must not bleed in.
+        assert!(!block.contains("## TL;DR"), "TL;DR leaked into Debug-signals block");
+        assert!(!block.contains("## Related"), "Related leaked into Debug-signals block");
+        // A missing section is an explicit error.
+        assert!(wiki_read(&root, &page, Some("No Such Header"), None).is_err());
+    }
+
+    #[test]
+    fn test_wiki_read_truncation_marker() {
+        let Some(root) = wiki_root() else {
+            eprintln!("skipping: wiki root absent");
+            return;
+        };
+        let Some(page) = concept_with_debug_signals(&root) else {
+            eprintln!("skipping: no concept page");
+            return;
+        };
+        let tiny = wiki_read(&root, &page, None, Some(100)).unwrap();
+        assert!(tiny.contains("[TRUNCATED]"), "tiny read missing truncation marker");
+        assert!(tiny.contains("next_offset="), "marker missing next_offset");
+        // A generous cap leaves the page whole (no marker).
+        let whole = wiki_read(&root, &page, None, Some(usize::MAX)).unwrap();
+        assert!(!whole.contains("[TRUNCATED]"), "whole read wrongly marked truncated");
+    }
+
+    #[test]
+    fn test_wiki_search_ranks_matching_page() {
+        let Some(root) = wiki_root() else {
+            eprintln!("skipping: wiki root absent");
+            return;
+        };
+        // "mapper" appears in titles/summaries of multiple mapper pages.
+        let res = wiki_search(&root, "mapper", None, None, 5).unwrap();
+        assert!(res.contains("mapper"), "search for 'mapper' returned nothing relevant");
+        // Result is a JSON array of {path, tldr, section, score} — paths, not prose.
+        let parsed: serde_json::Value = serde_json::from_str(&res).unwrap();
+        let arr = parsed.as_array().expect("search result is a JSON array");
+        assert!(!arr.is_empty(), "no hits for 'mapper'");
+        assert!(arr.len() <= 5, "limit not honored");
+        let first = &arr[0];
+        for k in ["path", "tldr", "section", "score"] {
+            assert!(first.get(k).is_some(), "hit missing field {k}: {first}");
+        }
+        // Section scoping works.
+        let scoped = wiki_search(&root, "mapper", Some("pitfalls"), None, 5).unwrap();
+        if let Ok(serde_json::Value::Array(a)) = serde_json::from_str::<serde_json::Value>(&scoped) {
+            for hit in a {
+                assert_eq!(hit["section"], "pitfalls", "section scope leaked");
+            }
+        }
+    }
+
+    #[test]
+    fn test_wiki_read_path_safety_rejects_escape() {
+        let Some(root) = wiki_root() else {
+            eprintln!("skipping: wiki root absent");
+            return;
+        };
+        // Traversal / absolute paths are rejected before any read.
+        assert!(wiki_read(&root, "../CLAUDE.md", None, None).is_err());
+        assert!(wiki_read(&root, "../../etc/hosts", None, None).is_err());
+        assert!(wiki_read(&root, "/etc/hosts", None, None).is_err());
+        // A path that escapes via a non-".." but is simply not an enumerated page.
+        assert!(wiki_read(&root, "concepts/does-not-exist.md", None, None).is_err());
     }
 }
 

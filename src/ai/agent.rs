@@ -191,6 +191,8 @@ pub struct AgentSession {
     pub duckdb_path: String,
     /// Path to application source code root directory (used by read_code/list_files).
     pub code_path: String,
+    /// Path to the Legion wiki root (used by wiki_index/wiki_read/wiki_search).
+    pub wiki_path: String,
     /// Free-text application context from the user (e.g. goals, configuration).
     pub app_context: String,
     /// Maximum agent turns before forcing a summary response.
@@ -234,18 +236,21 @@ impl AgentSession {
     ///
     /// `event_tx` sends [`AgentEvent`]s to the UI thread (progressive status).
     /// `command_rx` receives [`UiCommand`]s from the UI thread (screenshot data).
+    #[allow(clippy::too_many_arguments)] // tool paths (duckdb/code/wiki) + channels
     pub fn new(
         api_key: String,
         model: String,
         duckdb_path: String,
         code_path: String,
+        wiki_path: String,
         app_context: String,
         event_tx: mpsc::Sender<AgentEvent>,
         command_rx: mpsc::Receiver<UiCommand>,
     ) -> Self {
         let has_duckdb = cfg!(feature = "duckdb") && !duckdb_path.is_empty();
         let has_code = !code_path.is_empty();
-        let tools = super::tools::tool_definitions(has_duckdb, has_code);
+        let has_wiki = !wiki_path.is_empty();
+        let tools = super::tools::tool_definitions(has_duckdb, has_code, has_wiki);
 
         let system_prompt = build_system_prompt();
 
@@ -255,6 +260,7 @@ impl AgentSession {
             model,
             duckdb_path,
             code_path,
+            wiki_path,
             app_context,
             max_turns: 25,
             system_prompt,
@@ -785,6 +791,39 @@ impl AgentSession {
                 super::tools::execute_read_code(&self.code_path, path)
             }
 
+            "wiki_index" => {
+                let section = input.get("section").and_then(|v| v.as_str());
+                super::tools::wiki_index(&self.wiki_path, section)
+            }
+
+            "wiki_read" => {
+                let path = input
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| "Missing 'path' parameter".to_owned())?;
+                let section = input.get("section").and_then(|v| v.as_str());
+                let max_chars = input
+                    .get("max_chars")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize);
+                super::tools::wiki_read(&self.wiki_path, path, section, max_chars)
+            }
+
+            "wiki_search" => {
+                let query = input
+                    .get("query")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| "Missing 'query' parameter".to_owned())?;
+                let section = input.get("section").and_then(|v| v.as_str());
+                let tag = input.get("tag").and_then(|v| v.as_str());
+                let limit = input
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize)
+                    .unwrap_or(5);
+                super::tools::wiki_search(&self.wiki_path, query, section, tag, limit)
+            }
+
             "screenshot" => self.request_screenshot(None),
 
             "zoom_to" => {
@@ -1309,6 +1348,7 @@ fn build_system_prompt() -> String {
 - `run_query`: read-only SQL over the DuckDB profiling database (tables `entries` and `items`; STRUCT columns via dot notation, e.g. `running.duration`). Write your own queries.
 - `overview`: a precomputed structured summary of the database (schema, counts, per-kind utilization, timeline bounds). Call it once for orientation when you need it.
 - `read_code` / `list_files`: read the application's source code.
+- `wiki_index` / `wiki_read` / `wiki_search`: a structured Legion knowledge wiki — search or scan the index, read the relevant page, follow its `Related` links; consult it for concepts, pitfalls, and diagnostic workflows instead of guessing.
 - `screenshot` / `zoom_to` / `pan` / `scroll_to` / `set_view`: inspect and move the timeline. Each returns a screenshot plus the visible time range (ns) and the entry_slugs on screen. `set_view` can also focus the view on specific processor kinds (`filter_kinds`), expand/collapse kinds (`expand_kinds`/`collapse_kinds`), and change row height (`vertical_scale`, 0.25–4.0).
 - `search`: set the timeline's search box to a string — matching tasks are highlighted in place and a match count is returned. Use this to *locate* tasks visually; use `run_query` for an exact list.
 - `reset_view`: zoom out to the whole profile and clear kind filters, search, and row scaling — a clean slate.
@@ -1535,6 +1575,7 @@ Found issues.
             String::new(),
             String::new(),
             String::new(),
+            String::new(),
             event_tx,
             command_rx,
         )
@@ -1592,6 +1633,7 @@ Found issues.
             "key".into(),
             "model".into(),
             db.to_str().unwrap().to_owned(),
+            String::new(),
             String::new(),
             String::new(),
             event_tx,

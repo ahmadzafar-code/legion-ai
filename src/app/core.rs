@@ -2790,7 +2790,7 @@ impl ProfApp {
             result
                 .cx
                 .chat_panel
-                .set_tool_paths(opts.ai_duckdb_path, opts.ai_code_path);
+                .set_tool_paths(opts.ai_duckdb_path, opts.ai_code_path, opts.ai_wiki_path);
 
             // Initialize agent tracing subscriber once at startup. Best-effort:
             // if the trace dir can't be created, log and continue without tracing.
@@ -3434,7 +3434,10 @@ impl eframe::App for ProfApp {
                 let bridge = cx
                     .ui_bridge(crate::ai::bridge::MCP_CONSUMER_ID)
                     .with_wake(move || egui_ctx.request_repaint());
-                if let Err(e) = crate::ai::viewer_mcp::spawn(duckdb_path, 8765, bridge) {
+                // Hand the configured wiki root to the server so it advertises +
+                // routes the wiki_* tools (mirrors how code_root gates read_code).
+                let wiki_root = cx.chat_panel.wiki_path();
+                if let Err(e) = crate::ai::viewer_mcp::spawn(duckdb_path, 8765, bridge, wiki_root) {
                     eprintln!("[legion-viewer] in-viewer MCP server failed to start: {e}");
                 }
                 cx.viewer_mcp_started = true;
@@ -4126,6 +4129,8 @@ pub struct StartOptions {
     pub ai_duckdb_path: Option<String>,
     /// Pre-fills the Co-Pilot's source-code path (from `--code`).
     pub ai_code_path: Option<String>,
+    /// Pre-fills the Co-Pilot's Legion wiki root (from `--wiki` or auto-detection).
+    pub ai_wiki_path: Option<String>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]

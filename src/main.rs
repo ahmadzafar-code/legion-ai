@@ -64,6 +64,7 @@ fn main() {
     let mut file_paths: Vec<String> = Vec::new();
     let mut duckdb_path: Option<String> = None;
     let mut code_path: Option<String> = None;
+    let mut wiki_path: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -74,6 +75,10 @@ fn main() {
             }
             "--code" => {
                 code_path = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--wiki" => {
+                wiki_path = args.get(i + 1).cloned();
                 i += 2;
             }
             s => {
@@ -109,11 +114,24 @@ fn main() {
         println!("Legion AI Co-Pilot code root: {code}");
     }
 
+    // Auto-detect the Legion wiki at `wiki-legion/wiki` (relative to the launch
+    // dir) when no --wiki was given, so the knowledge tools work out of the box.
+    if wiki_path.is_none() {
+        let cand = Path::new("wiki-legion").join("wiki");
+        if cand.is_dir() {
+            wiki_path = Some(cand.to_string_lossy().into_owned());
+        }
+    }
+    if let Some(ref wiki) = wiki_path {
+        println!("Legion AI Co-Pilot wiki root: {wiki}");
+    }
+
     legion_prof_viewer::app::start_with_options(
         ds,
         legion_prof_viewer::app::StartOptions {
             ai_duckdb_path: duckdb_path,
             ai_code_path: code_path,
+            ai_wiki_path: wiki_path,
         },
     );
 }

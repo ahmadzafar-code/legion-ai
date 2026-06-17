@@ -41,6 +41,10 @@ const VISUAL_TOOLS: &[&str] = &[
     "clear_highlights",
 ];
 
+/// The JIT wiki tools advertised ONLY when a `wiki_root` is configured. They give
+/// the client on-demand retrieval over the Legion knowledge wiki. (wiki-tool)
+const WIKI_TOOLS: &[&str] = &["wiki_index", "wiki_read", "wiki_search"];
+
 /// Valid `answer_type` values for the `final_answer` tool (the eval grader pins
 /// this enum).
 const ANSWER_TYPES: &[&str] = &["uid", "number", "set", "label", "tuple", "diagnosis"];
@@ -52,6 +56,9 @@ const ANSWER_TYPES: &[&str] = &["uid", "number", "set", "label", "tuple", "diagn
 pub struct ServerCtx {
     pub duckdb_path: String,
     pub code_root: Option<String>,
+    /// Legion wiki root. When set, the `wiki_*` tools are advertised + routed
+    /// (mirrors `code_root` gating `read_code`). (wiki-tool)
+    pub wiki_root: Option<String>,
     pub protocol_version: &'static str,
     /// Present only on the in-viewer HTTP server: enables the VISUAL tools, which
     /// drive the live timeline over this handle. Absent (stdio bin / eval) =>
@@ -66,6 +73,7 @@ impl ServerCtx {
         ServerCtx {
             duckdb_path,
             code_root,
+            wiki_root: None,
             protocol_version: DEFAULT_PROTOCOL_VERSION,
             ui_bridge: None,
         }
@@ -74,6 +82,12 @@ impl ServerCtx {
     /// Override the advertised protocol version (the HTTP transport uses this).
     pub fn with_protocol(mut self, version: &'static str) -> Self {
         self.protocol_version = version;
+        self
+    }
+
+    /// Attach a Legion wiki root, enabling the `wiki_*` tools. (wiki-tool)
+    pub fn with_wiki_root(mut self, wiki_root: Option<String>) -> Self {
+        self.wiki_root = wiki_root.filter(|r| !r.is_empty());
         self
     }
 
@@ -139,14 +153,17 @@ fn initialize_result(params: &Value, ctx: &ServerCtx) -> Value {
 /// definitions. Code tools are omitted unless a `code_root` was configured.
 fn tools_list_result(ctx: &ServerCtx) -> Value {
     let has_code = ctx.code_root.is_some();
+    let has_wiki = ctx.wiki_root.is_some();
     let has_bridge = ctx.ui_bridge.is_some();
-    let mut tools: Vec<Value> = tool_definitions(true, true)
+    let mut tools: Vec<Value> = tool_definitions(true, true, true)
         .into_iter()
         .filter(|t| {
             let name = t.get("name").and_then(Value::as_str).unwrap_or("");
             // Data tools (code tools only with a code root) ...
             (HEADLESS_TOOLS.contains(&name)
                 && (has_code || (name != "list_files" && name != "read_code")))
+                // ... the JIT wiki tools when a wiki root is configured ...
+                || (has_wiki && WIKI_TOOLS.contains(&name))
                 // ... plus the VISUAL tools when a UI bridge is attached.
                 || (has_bridge && VISUAL_TOOLS.contains(&name))
         })
@@ -279,6 +296,52 @@ fn tools_call_result(params: &Value, ctx: &ServerCtx) -> Value {
             },
             None => (
                 "read_code unavailable: server started without a code root.".to_owned(),
+                true,
+            ),
+        },
+        "wiki_index" => match &ctx.wiki_root {
+            Some(root) => {
+                let section = args.get("section").and_then(Value::as_str);
+                into_tool_result(super::tools::wiki_index(root, section))
+            }
+            None => (
+                "wiki_index unavailable: server started without a wiki root.".to_owned(),
+                true,
+            ),
+        },
+        "wiki_read" => match &ctx.wiki_root {
+            Some(root) => match args.get("path").and_then(Value::as_str) {
+                Some(path) => {
+                    let section = args.get("section").and_then(Value::as_str);
+                    let max_chars = args
+                        .get("max_chars")
+                        .and_then(Value::as_u64)
+                        .map(|n| n as usize);
+                    into_tool_result(super::tools::wiki_read(root, path, section, max_chars))
+                }
+                None => ("wiki_read requires path (string).".to_owned(), true),
+            },
+            None => (
+                "wiki_read unavailable: server started without a wiki root.".to_owned(),
+                true,
+            ),
+        },
+        "wiki_search" => match &ctx.wiki_root {
+            Some(root) => match args.get("query").and_then(Value::as_str) {
+                Some(query) => {
+                    let section = args.get("section").and_then(Value::as_str);
+                    let tag = args.get("tag").and_then(Value::as_str);
+                    let limit = args
+                        .get("limit")
+                        .and_then(Value::as_u64)
+                        .map(|n| n as usize)
+                        .unwrap_or(5);
+                    into_tool_result(super::tools::wiki_search(root, query, section, tag, limit))
+                }
+                None => ("wiki_search requires query (string).".to_owned(), true),
+            },
+            None => (
+                "wiki_search unavailable: server started without a wiki root.".to_owned(),
                 true,
             ),
         },
@@ -660,6 +723,58 @@ mod tests {
             .collect();
         assert!(names.iter().any(|n| n == "list_files"));
         assert!(names.iter().any(|n| n == "read_code"));
+    }
+
+    #[test]
+    fn test_tools_list_wiki_gated_on_wiki_root() {
+        // WITHOUT a wiki root: the wiki tools are not advertised.
+        let names_no_wiki: Vec<String> = handle_request(&req("tools/list", json!({})), &dummy_ctx())
+            .unwrap()["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_owned())
+            .collect();
+        for w in ["wiki_index", "wiki_read", "wiki_search"] {
+            assert!(!names_no_wiki.contains(&w.to_owned()), "wiki tool {w} leaked without a wiki root");
+        }
+
+        // WITH a wiki root: all three appear, with camelCase inputSchema (no leak).
+        let ctx = ServerCtx::new("unused".to_owned(), None).with_wiki_root(Some("/tmp".to_owned()));
+        let tools = handle_request(&req("tools/list", json!({})), &ctx).unwrap()["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        for w in ["wiki_index", "wiki_read", "wiki_search"] {
+            assert!(names.contains(&w), "tools/list missing {w} with a wiki root");
+        }
+        for t in tools.iter().filter(|t| {
+            let n = t["name"].as_str().unwrap();
+            n == "wiki_index" || n == "wiki_read" || n == "wiki_search"
+        }) {
+            assert!(t.get("inputSchema").is_some(), "{} missing inputSchema", t["name"]);
+            assert!(t.get("input_schema").is_none(), "{} leaked input_schema", t["name"]);
+        }
+    }
+
+    #[test]
+    fn test_wiki_call_routes_to_index() {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../wiki-legion/wiki");
+        if !p.is_dir() {
+            eprintln!("skipping: wiki root absent");
+            return;
+        }
+        let ctx = ServerCtx::new("unused".to_owned(), None)
+            .with_wiki_root(Some(p.to_string_lossy().into_owned()));
+        let (text, is_error) = call(&ctx, "wiki_index", json!({ "section": "pitfalls" }));
+        assert!(!is_error, "wiki_index should succeed: {text}");
+        assert!(text.contains("## pitfalls ("), "wiki_index output unexpected: {text:.80}");
+
+        // Routed without a wiki root => a clear isError result, not a protocol error.
+        let (text2, is_error2) = call(&dummy_ctx(), "wiki_index", json!({}));
+        assert!(is_error2, "wiki_index without a wiki root must be an error result");
+        assert!(text2.contains("without a wiki root"), "unexpected msg: {text2}");
     }
 
     #[test]

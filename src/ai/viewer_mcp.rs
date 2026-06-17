@@ -194,6 +194,7 @@ pub fn spawn(
     duckdb_path: String,
     port: u16,
     bridge: crate::ai::bridge::UiBridge,
+    wiki_root: Option<String>,
 ) -> std::io::Result<u16> {
     let listener = TcpListener::bind(("127.0.0.1", port))?;
     let bound = listener.local_addr()?.port();
@@ -206,6 +207,7 @@ pub fn spawn(
         .spawn(move || {
             let ctx = ServerCtx::new(duckdb_path, None)
                 .with_protocol(HTTP_PROTOCOL_VERSION)
+                .with_wiki_root(wiki_root)
                 .with_ui_bridge(bridge);
             for mut stream in listener.incoming().flatten() {
                 let _ = serve_one(&mut stream, &ctx);

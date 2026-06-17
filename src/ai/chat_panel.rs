@@ -408,6 +408,9 @@ pub struct ChatPanel {
     duckdb_path_buffer: String,
     /// Application code directory — required for `read_code` tool.
     code_path_buffer: String,
+    /// Legion wiki root — required for `wiki_index`/`wiki_read`/`wiki_search`.
+    /// Pre-filled from `--wiki` / auto-detection at startup (no settings widget).
+    wiki_path_buffer: String,
     /// Whether the tools setup popover is open.
     tools_popover_open: bool,
     /// Filesystem picker state for the DB path field.
@@ -466,6 +469,7 @@ impl Clone for ChatPanel {
             workspace_index: self.workspace_index.clone(),
             duckdb_path_buffer: self.duckdb_path_buffer.clone(),
             code_path_buffer: self.code_path_buffer.clone(),
+            wiki_path_buffer: self.wiki_path_buffer.clone(),
             tools_popover_open: self.tools_popover_open,
             db_picker: self.db_picker.clone(),
             code_picker: self.code_picker.clone(),
@@ -527,6 +531,7 @@ impl ChatPanel {
             workspace_index: WorkspaceIndex::default(),
             duckdb_path_buffer: String::new(),
             code_path_buffer: String::new(),
+            wiki_path_buffer: String::new(),
             tools_popover_open: false,
             db_picker: PathPicker::default(),
             code_picker: PathPicker::default(),
@@ -561,7 +566,12 @@ impl ChatPanel {
     }
 
     /// Pre-fill the tool paths (from CLI flags / auto-detection at startup).
-    pub fn set_tool_paths(&mut self, duckdb: Option<String>, code: Option<String>) {
+    pub fn set_tool_paths(
+        &mut self,
+        duckdb: Option<String>,
+        code: Option<String>,
+        wiki: Option<String>,
+    ) {
         if let Some(d) = duckdb {
             if !d.is_empty() {
                 self.duckdb_path_buffer = d;
@@ -570,6 +580,11 @@ impl ChatPanel {
         if let Some(c) = code {
             if !c.is_empty() {
                 self.code_path_buffer = c;
+            }
+        }
+        if let Some(w) = wiki {
+            if !w.is_empty() {
+                self.wiki_path_buffer = w;
             }
         }
     }
@@ -779,6 +794,14 @@ impl ChatPanel {
         (!trimmed.is_empty()).then(|| trimmed.to_owned())
     }
 
+    /// The configured wiki root, if any — handed to the in-viewer MCP server so it
+    /// advertises + routes the `wiki_*` tools (mirrors [`Self::duckdb_path`]).
+    #[cfg(feature = "viewer-mcp")]
+    pub fn wiki_path(&self) -> Option<String> {
+        let trimmed = self.wiki_path_buffer.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    }
+
     /// Derive the DB tool status from `duckdb_path_buffer`.
     ///
     /// Accepts any existing non-directory file. DuckDB files may have various
@@ -899,6 +922,7 @@ impl ChatPanel {
         // Tool paths from dedicated fields
         let duckdb_path = self.duckdb_path_buffer.trim().to_owned();
         let code_path = self.code_path_buffer.trim().to_owned();
+        let wiki_path = self.wiki_path_buffer.trim().to_owned();
 
         // Collect inline context from @ attachments (Part D)
         let mut context_section = String::new();
@@ -1030,6 +1054,7 @@ impl ChatPanel {
                     model,
                     duckdb_path,
                     code_path,
+                    wiki_path,
                     app_context,
                     event_tx.clone(),
                     cmd_rx,
