@@ -131,6 +131,37 @@ pub fn handle_request(req: &Value, ctx: &ServerCtx) -> Option<Value> {
     })
 }
 
+/// Build the MCP `instructions` briefing (the designed server→client channel an
+/// external agent reads on connect). Always includes the framing; the source-root
+/// and wiki clauses appear ONLY when those roots are configured. Generic — no task
+/// names and no absolute paths beyond the configured roots themselves.
+fn server_instructions(ctx: &ServerCtx) -> String {
+    let mut parts: Vec<String> = vec![
+        "Legion Profiler Co-Pilot — diagnose Legion task-based runtime performance from \
+         this profile. Verify every number with run_query before stating it; rank issues \
+         by share of total time, not ratios; state root causes as hypotheses, not \
+         certainties; never invent speedups."
+            .to_owned(),
+    ];
+    if let Some(code_root) = &ctx.code_root {
+        parts.push(format!(
+            "Application source root: `{code_root}`. Read the relevant task's source (your \
+             own file tools, or read_code/list_files) BEFORE explaining what a kernel \
+             computes or why it is slow."
+        ));
+    }
+    if ctx.wiki_root.is_some() {
+        parts.push(
+            "A curated Legion wiki is available via wiki_index / wiki_read / wiki_search. \
+             BEFORE asserting a Legion concept, a flag's meaning, or a diagnostic verdict \
+             (compute-/communication-/runtime-bound, mapper stall, lifecycle phases such as \
+             waiting vs deferred), consult it and follow the page's Related links."
+                .to_owned(),
+        );
+    }
+    parts.join("\n\n")
+}
+
 fn initialize_result(params: &Value, ctx: &ServerCtx) -> Value {
     if let Some(requested) = params.get("protocolVersion").and_then(Value::as_str) {
         if requested != ctx.protocol_version {
@@ -143,7 +174,8 @@ fn initialize_result(params: &Value, ctx: &ServerCtx) -> Value {
     json!({
         "protocolVersion": ctx.protocol_version,
         "capabilities": { "tools": {} },
-        "serverInfo": { "name": "legion-prof", "version": env!("CARGO_PKG_VERSION") }
+        "serverInfo": { "name": "legion-prof", "version": env!("CARGO_PKG_VERSION") },
+        "instructions": server_instructions(ctx)
     })
 }
 
@@ -278,7 +310,19 @@ fn tools_call_result(params: &Value, ctx: &ServerCtx) -> Value {
             }
             None => ("find_blockers requires start_uid (integer).".to_owned(), true),
         },
-        "overview" => into_tool_result(gather_overview(&ctx.duckdb_path)),
+        "overview" => {
+            // Reinforce the source-read habit with ONE concise line (no multi-line
+            // section — heeds the gather_overview-overflow lesson). gather_overview's
+            // signature is untouched; we only append here, in the MCP handler.
+            let mut res = into_tool_result(gather_overview(&ctx.duckdb_path));
+            if let (false, Some(code_root)) = (res.1, &ctx.code_root) {
+                res.0.push_str(&format!(
+                    "\nSource root: `{code_root}` — read the relevant task's source before \
+                     explaining what a kernel does or why it is slow."
+                ));
+            }
+            res
+        }
         "list_files" => match &ctx.code_root {
             Some(root) => {
                 let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
@@ -669,6 +713,80 @@ mod tests {
         let ctx = dummy_ctx().with_protocol("2025-03-26");
         let resp = handle_request(&req("initialize", json!({})), &ctx).unwrap();
         assert_eq!(resp["result"]["protocolVersion"], "2025-03-26");
+    }
+
+    /// initialize_result must carry an `instructions` briefing; the source-root and
+    /// wiki clauses are conditional on those roots being configured.
+    #[test]
+    fn test_initialize_instructions_both_roots() {
+        let ctx = ServerCtx::new("db".to_owned(), Some("/app/src".to_owned()))
+            .with_wiki_root(Some("/wiki".to_owned()));
+        let resp = handle_request(&req("initialize", json!({})), &ctx).unwrap();
+        let instr = resp["result"]["instructions"].as_str().expect("instructions present");
+        assert!(!instr.is_empty(), "instructions must be non-empty");
+        // Always-framing.
+        assert!(instr.contains("Legion Profiler Co-Pilot"), "missing framing");
+        assert!(instr.contains("run_query"), "missing the verify-with-run_query rule");
+        // Both conditional clauses present, with the code_root path interpolated.
+        assert!(instr.contains("/app/src"), "code_root path not interpolated");
+        assert!(instr.contains("Application source root"), "missing source clause");
+        assert!(instr.contains("wiki_index"), "missing wiki clause");
+    }
+
+    #[test]
+    fn test_initialize_instructions_no_roots() {
+        // dummy_ctx() has code_root=None, wiki_root=None.
+        let resp = handle_request(&req("initialize", json!({})), &dummy_ctx()).unwrap();
+        let instr = resp["result"]["instructions"].as_str().expect("instructions present");
+        assert!(instr.contains("Legion Profiler Co-Pilot"), "framing must still be present");
+        assert!(!instr.contains("Application source root"), "no source clause without code_root");
+        assert!(!instr.contains("wiki_index"), "no wiki clause without wiki_root");
+        assert!(!instr.contains("curated Legion wiki"), "no wiki clause without wiki_root");
+    }
+
+    #[test]
+    fn test_initialize_instructions_single_root() {
+        // Only wiki configured.
+        let wiki_only = ServerCtx::new("db".to_owned(), None).with_wiki_root(Some("/wiki".to_owned()));
+        let i = handle_request(&req("initialize", json!({})), &wiki_only).unwrap()["result"]
+            ["instructions"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(i.contains("wiki_index"), "wiki clause expected");
+        assert!(!i.contains("Application source root"), "no source clause without code_root");
+
+        // Only code configured (vice-versa).
+        let code_only = ServerCtx::new("db".to_owned(), Some("/only/code".to_owned()));
+        let j = handle_request(&req("initialize", json!({})), &code_only).unwrap()["result"]
+            ["instructions"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(j.contains("/only/code"), "source clause with path expected");
+        assert!(!j.contains("wiki_index"), "no wiki clause without wiki_root");
+    }
+
+    /// The MCP `overview` handler appends a one-line source-root reminder iff a
+    /// code root is configured. Needs a live DuckDB; soft-skips if absent.
+    #[test]
+    fn test_overview_appends_source_line_with_code_root() {
+        let Some(path) = test_db() else {
+            eprintln!("skipping: test DB absent");
+            return;
+        };
+        let with_code = ServerCtx::new(path.clone(), Some("/app/src".to_owned()));
+        let (text, is_error) = call(&with_code, "overview", json!({}));
+        assert!(!is_error, "overview should succeed: {text:.80}");
+        assert!(
+            text.contains("Source root: `/app/src`"),
+            "overview missing the source-root line with a code root"
+        );
+
+        let no_code = ServerCtx::new(path, None);
+        let (text2, is_error2) = call(&no_code, "overview", json!({}));
+        assert!(!is_error2, "overview should succeed: {text2:.80}");
+        assert!(!text2.contains("Source root:"), "source-root line must be absent without a code root");
     }
 
     #[test]
