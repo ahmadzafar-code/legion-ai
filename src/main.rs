@@ -103,10 +103,16 @@ fn main() {
         println!("Legion AI Co-Pilot DuckDB: {db}");
     }
 
-    // Default the code root to the launch directory (like Claude Code) when no
-    // --code was given, so the Co-Pilot can read source relative to the cwd.
+    // When no --code was given, prefer a `code_examples/` directory relative to the
+    // launch dir (the app source); fall back to the launch cwd so read_code/list_files
+    // still work. Explicit --code always overrides (code_path is already Some here).
     if code_path.is_none() {
-        if let Ok(cwd) = std::env::current_dir() {
+        let cand = Path::new("code_examples");
+        if cand.is_dir() {
+            let p = cand.to_string_lossy().into_owned();
+            println!("Legion AI Co-Pilot source root: {p}");
+            code_path = Some(p);
+        } else if let Ok(cwd) = std::env::current_dir() {
             code_path = Some(cwd.to_string_lossy().into_owned());
         }
     }
