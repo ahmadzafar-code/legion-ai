@@ -195,6 +195,7 @@ pub fn spawn(
     port: u16,
     bridge: crate::ai::bridge::UiBridge,
     wiki_root: Option<String>,
+    code_root: Option<String>,
 ) -> std::io::Result<u16> {
     let listener = TcpListener::bind(("127.0.0.1", port))?;
     let bound = listener.local_addr()?.port();
@@ -205,7 +206,7 @@ pub fn spawn(
     std::thread::Builder::new()
         .name("legion-viewer-mcp".to_owned())
         .spawn(move || {
-            let ctx = ServerCtx::new(duckdb_path, None)
+            let ctx = ServerCtx::new(duckdb_path, code_root)
                 .with_protocol(HTTP_PROTOCOL_VERSION)
                 .with_wiki_root(wiki_root)
                 .with_ui_bridge(bridge);
@@ -298,6 +299,33 @@ mod tests {
         let v: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["result"]["protocolVersion"], "2025-03-26");
         assert_eq!(v["result"]["serverInfo"]["name"], "legion-prof");
+        // The briefing channel is populated even with no roots (always-framing).
+        let instr = v["result"]["instructions"].as_str().expect("instructions over HTTP");
+        assert!(instr.contains("Legion Profiler Co-Pilot"), "framing must reach the client");
+        assert!(!instr.contains("Application source root"), "no source clause without a code root");
+    }
+
+    /// Regression: a code root configured on the in-viewer server (as `spawn` now
+    /// wires it from `chat_panel.code_path()`) must reach the external agent — the
+    /// `instructions` source clause AND the read_code/list_files advertisement.
+    #[test]
+    fn test_http_code_root_briefs_source() {
+        let ctx = ServerCtx::new("unused".to_owned(), Some("/app/src".to_owned()))
+            .with_protocol(HTTP_PROTOCOL_VERSION);
+
+        let init = post(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#, None);
+        let (_s, body) = split_response(&handle_http_request(&init, &ctx));
+        let v: Value = serde_json::from_str(&body).unwrap();
+        let instr = v["result"]["instructions"].as_str().unwrap();
+        assert!(instr.contains("Application source root: `/app/src`"), "source clause must reach the agent");
+
+        let list = post(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#, None);
+        let (_s2, body2) = split_response(&handle_http_request(&list, &ctx));
+        let v2: Value = serde_json::from_str(&body2).unwrap();
+        let names: Vec<&str> =
+            v2["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"read_code"), "read_code advertised with a code root");
+        assert!(names.contains(&"list_files"), "list_files advertised with a code root");
     }
 
     #[test]

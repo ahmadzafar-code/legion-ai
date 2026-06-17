@@ -72,7 +72,9 @@ impl ServerCtx {
     pub fn new(duckdb_path: String, code_root: Option<String>) -> Self {
         ServerCtx {
             duckdb_path,
-            code_root,
+            // Normalize an empty code root to None (consistent with `with_wiki_root`)
+            // so the source clause / source-line / code tools are never gated on "".
+            code_root: code_root.filter(|r| !r.is_empty()),
             wiki_root: None,
             protocol_version: DEFAULT_PROTOCOL_VERSION,
             ui_bridge: None,

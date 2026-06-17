@@ -802,6 +802,15 @@ impl ChatPanel {
         (!trimmed.is_empty()).then(|| trimmed.to_owned())
     }
 
+    /// The configured source-code root, if any — handed to the in-viewer MCP server
+    /// so it briefs the external agent on the source and advertises read_code /
+    /// list_files (mirrors [`Self::wiki_path`]).
+    #[cfg(feature = "viewer-mcp")]
+    pub fn code_path(&self) -> Option<String> {
+        let trimmed = self.code_path_buffer.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    }
+
     /// Derive the DB tool status from `duckdb_path_buffer`.
     ///
     /// Accepts any existing non-directory file. DuckDB files may have various

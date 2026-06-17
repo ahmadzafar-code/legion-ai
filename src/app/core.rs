@@ -3434,10 +3434,14 @@ impl eframe::App for ProfApp {
                 let bridge = cx
                     .ui_bridge(crate::ai::bridge::MCP_CONSUMER_ID)
                     .with_wake(move || egui_ctx.request_repaint());
-                // Hand the configured wiki root to the server so it advertises +
-                // routes the wiki_* tools (mirrors how code_root gates read_code).
+                // Hand the configured wiki + source roots to the server so it briefs
+                // the external agent (MCP `instructions` + overview source line) and
+                // advertises wiki_* / read_code / list_files.
                 let wiki_root = cx.chat_panel.wiki_path();
-                if let Err(e) = crate::ai::viewer_mcp::spawn(duckdb_path, 8765, bridge, wiki_root) {
+                let code_root = cx.chat_panel.code_path();
+                if let Err(e) =
+                    crate::ai::viewer_mcp::spawn(duckdb_path, 8765, bridge, wiki_root, code_root)
+                {
                     eprintln!("[legion-viewer] in-viewer MCP server failed to start: {e}");
                 }
                 cx.viewer_mcp_started = true;
