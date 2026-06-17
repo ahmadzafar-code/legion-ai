@@ -16,7 +16,7 @@ rust-version = "1.85"
 
 [features]
 default = ["client"]
-duckdb = ["dep:duckdb"]
+duckdb = ["dep:duckdb", "dep:sha2"]  # sha2 rides on duckdb so {} and {ai} never pull it
 client = ["dep:reqwest", "dep:url"]
 server = ["dep:actix-cors", "dep:actix-web"]
 nvtxw = ["dep:nvtxw"]
@@ -63,6 +63,10 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["j
 # which disables on-demand extension autoloading. See execute_run_query_raw.
 duckdb = { version = "1.4.0", features = ["appender-arrow", "bundled", "json"], optional = true }
 
+# eval bin: sha-pin case .duckdb files (gated under the `duckdb` feature above so
+# {} and {ai} never compile it).
+sha2 = { version = "0.10", optional = true }
+
 # client:
 url = { version = "2", optional = true }
 
@@ -103,6 +107,14 @@ clap = { version = "4", features = ["cargo", "derive"] }
 [[bin]]
 name = "mcp"
 path = "src/bin/mcp.rs"
+required-features = ["ai", "duckdb"]
+
+# Oracle-graded tool-correctness eval: drives a question through Claude Code via
+# the mcp bin, captures final_answer, computes ground truth on a SEPARATE direct
+# duckdb connection, and grades. required-features skips it for the other combos.
+[[bin]]
+name = "eval"
+path = "src/bin/eval.rs"
 required-features = ["ai", "duckdb"]
 
 [profile.release]

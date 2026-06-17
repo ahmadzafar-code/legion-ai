@@ -1,0 +1,29 @@
+schema_version = 1
+case_id        = "L1-longest-in-range-001"
+question       = "Which task ran the longest within the highlighted time range?"
+level          = "L1"
+# Points at the shared bg4N2 fixture (relative to this case.toml) so we do not copy
+# the multi-MB .duckdb into the repo. External cases ship their own co-located file.
+duckdb_relpath = "../../../multinoderuns/bg4N2/profcbN2g4b.duckdb"
+sha256         = "93d2066d564706a8ea06015603ead75816075697838ccf13b0d3d3ff54bbb427"
+range_ns       = [1000000000, 1500000000]
+answer_type    = "uid"
+tolerance      = 0.0
+
+# Oracle runs on a DIRECT connection (independent answer key). SEMANTICS (user
+# decision): "ran the longest" = the longest single contiguous RUNNING SLICE
+# overlapping the window; scope = application procs only (cpu/gpudev). Per-slice
+# (NO any_value) so it is deterministic; tiebreak on item_uid. The any_value-over-
+# grain form was non-deterministic (flapped uid 48 <-> 221).
+oracle_sql = """
+SELECT item_uid
+FROM (SELECT DISTINCT item_uid, entry_slug,
+             running.start AS s, running.stop AS e, running.duration AS dur
+      FROM items
+      WHERE running.start IS NOT NULL
+        AND (entry_slug LIKE '%_cpu_%' OR entry_slug LIKE '%_gpudev_%'))
+WHERE s < 1500000000 AND e > 1000000000
+ORDER BY dur DESC, item_uid ASC
+LIMIT 1
+"""
+expected = "48"
