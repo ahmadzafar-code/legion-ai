@@ -185,6 +185,29 @@ pub fn execute_run_query(duckdb_path: &str, sql: &str) -> Result<String, String>
     }
 }
 
+/// Make the 50-row cap VISIBLE. `execute_run_query_raw` probes one past the cap
+/// (`LIMIT 51`); if the wrapped `json_group_array` result parses to an array of
+/// MORE than 50 elements, keep the first 50 and append ONE marker object so the
+/// agent can tell a truncated result from a full 50-row one. In EVERY other case
+/// — parse fails, a scalar/non-array, `len <= 50`, or empty `[]` — the original
+/// string is returned UNCHANGED. The `json_group_array(...)`-in-one-row aggregates
+/// (`slug_exists`, `gather_overview` sections) are a single row → len 1 → never marked.
+#[cfg(feature = "duckdb")]
+fn mark_truncation_if_over(result: String) -> String {
+    match serde_json::from_str::<Vec<serde_json::Value>>(&result) {
+        Ok(mut arr) if arr.len() > 50 => {
+            arr.truncate(50);
+            arr.push(serde_json::json!({
+                "_truncated": true,
+                "_shown": 50,
+                "_hint": "result capped at 50 rows; refine with aggregation or a narrower filter"
+            }));
+            serde_json::to_string(&arr).unwrap_or(result)
+        }
+        _ => result,
+    }
+}
+
 /// Execute a query and return raw JSON array string.
 /// Used internally by gather_overview() which parses the JSON itself.
 #[cfg(feature = "duckdb")]
@@ -229,14 +252,16 @@ pub fn execute_run_query_raw(duckdb_path: &str, sql: &str) -> Result<String, Str
         }
     };
 
+    // Probe one PAST the 50-row cap (LIMIT 51) so a truncated result can be
+    // distinguished from a full one — see mark_truncation_if_over.
     let wrapped = format!(
         "SELECT COALESCE(CAST(json_group_array(to_json(t)) AS VARCHAR), '[]') \
-         FROM ({sql_for_wrap} LIMIT 50) AS t",
+         FROM ({sql_for_wrap} LIMIT 51) AS t",
     );
 
     match conn.query_row(&wrapped, [], |row| row.get::<_, String>(0)) {
         Ok(result) if result == "null" || result.is_empty() => Ok("[]".into()),
-        Ok(result) => Ok(result),
+        Ok(result) => Ok(mark_truncation_if_over(result)),
         Err(e) => {
             let err_str = e.to_string();
             let mut msg = format!("Query failed: {}\n", err_str);
@@ -1522,6 +1547,10 @@ pub fn tool_definitions(has_duckdb: bool, has_code: bool) -> Vec<serde_json::Val
             "description":
                 "Execute a read-only SQL query against the Legion profiling DuckDB database. \
                  Returns up to 50 rows as JSON. Do NOT include a trailing semicolon.\n\n\
+                 TRUNCATION: results are capped at 50 rows. If MORE rows matched, the JSON array \
+                 holds the first 50 plus a final marker object {\"_truncated\": true, \"_shown\": 50, ...} — \
+                 when you see it, the result is INCOMPLETE; refine with aggregation (GROUP BY/COUNT/SUM) \
+                 or a narrower filter rather than trusting the 50 shown.\n\n\
                  SCHEMA REMINDER: Two tables — `entries` (entry_slug, short_name, long_name, parent_slug, type) \
                  and `items` (entry_slug, item_uid, title, plus STRUCT columns). \
                  All STRUCT columns use dot notation: running.start, running.duration, critical_path.item_uid, etc.\n\n\
@@ -1940,6 +1969,59 @@ mod tests {
     fn test_db_path() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../multinoderuns/bg4N2/profcbN2g4b.duckdb")
+    }
+
+    /// Task 2 unit (no DB): the 50-row cap is marked only when MORE than 50 rows
+    /// were present; everything else is returned UNCHANGED.
+    #[test]
+    fn test_mark_truncation_if_over() {
+        // <= 50, empty, scalar, non-JSON -> unchanged.
+        let small = r#"[{"a":1},{"a":2}]"#.to_string();
+        assert_eq!(mark_truncation_if_over(small.clone()), small);
+        assert_eq!(mark_truncation_if_over("[]".into()), "[]");
+        assert_eq!(mark_truncation_if_over("42".into()), "42"); // scalar (e.g. json_group_array NULL guard)
+        assert_eq!(mark_truncation_if_over("not json".into()), "not json");
+
+        // Exactly 50 -> unchanged (boundary).
+        let fifty =
+            serde_json::to_string(&(0..50).map(|i| serde_json::json!({ "a": i })).collect::<Vec<_>>()).unwrap();
+        assert_eq!(mark_truncation_if_over(fifty.clone()), fifty);
+
+        // 51 -> first 50 kept + ONE marker appended (51 elements total).
+        let over =
+            serde_json::to_string(&(0..51).map(|i| serde_json::json!({ "a": i })).collect::<Vec<_>>()).unwrap();
+        let marked: Vec<serde_json::Value> =
+            serde_json::from_str(&mark_truncation_if_over(over)).unwrap();
+        assert_eq!(marked.len(), 51, "50 data + 1 marker");
+        assert_eq!(marked[49]["a"], serde_json::json!(49), "last real row preserved");
+        assert_eq!(marked[50]["_truncated"], serde_json::json!(true));
+        assert_eq!(marked[50]["_shown"], serde_json::json!(50));
+    }
+
+    /// Task 2 integration: a >50-row query is marked; a small one is not.
+    /// `json_group_array`-in-one-row aggregates are len 1 → never marked.
+    #[test]
+    fn test_run_query_truncation_marker_live() {
+        let db = test_db_path();
+        if !db.exists() {
+            eprintln!("skipping test_run_query_truncation_marker_live: test DB absent");
+            return;
+        }
+        let db = db.to_str().unwrap();
+
+        // bg4N2 has 68 entries (> 50) -> 50 data rows + a marker.
+        let out = execute_run_query_raw(db, "SELECT entry_slug FROM entries").expect("query");
+        let arr: Vec<serde_json::Value> = serde_json::from_str(&out).expect("JSON array");
+        assert_eq!(arr.len(), 51, "50 rows + 1 marker, got {}", arr.len());
+        assert!(arr[..50].iter().all(|r| r.get("entry_slug").is_some() && r.get("_truncated").is_none()));
+        assert_eq!(arr[50]["_truncated"], serde_json::json!(true));
+        assert_eq!(arr[50]["_shown"], serde_json::json!(50));
+
+        // A small aggregate is returned UNCHANGED (no marker).
+        let small = execute_run_query_raw(db, "SELECT COUNT(*) AS n FROM items").expect("query");
+        assert!(!small.contains("_truncated"), "small result must NOT be marked: {small}");
+        let sa: Vec<serde_json::Value> = serde_json::from_str(&small).unwrap();
+        assert_eq!(sa.len(), 1);
     }
 
     /// SIZE GUARD (overview-compact regression): `gather_overview` must stay
