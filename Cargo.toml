@@ -97,6 +97,14 @@ getrandom = { version = "0.2", features = ["js"] }
 clap = { version = "4", features = ["cargo", "derive"] }
 
 
+# Headless MCP server exposing the data tools (run_query/overview/find_blockers/
+# read_code/final_answer) over hand-rolled sync stdio JSON-RPC. required-features
+# skips the bin for {}, {ai}, {duckdb}, so all 4 cargo-check combos still pass.
+[[bin]]
+name = "mcp"
+path = "src/bin/mcp.rs"
+required-features = ["ai", "duckdb"]
+
 [profile.release]
 opt-level = 2 # fast and small wasm
 
