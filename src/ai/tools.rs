@@ -1100,10 +1100,13 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     out.push('\n');
 
     // ── Copy-to-compute ratio ──────────────────────────────────────────────
-    // Copy time = SUM(lifetime.duration) on channels, dedup'd by item_uid (copies
-    // have no `running`; the old `SUM(running)` on chan was always 0). Compute
-    // time keeps `running` on cpu/gpu non-util — already correct and unaffected by
-    // slice duplication (dedup'd == naive == 2263.1ms on bg4N2).
+    // Copy time = SUM(lifetime.duration) on channels, dedup'd by item_uid: copies
+    // have no `running` (old `SUM(running)` on chan was always 0), and a copy's
+    // rows are the SAME transfer on 2 channel slugs sharing ONE lifetime — true
+    // duplication, so dedup is required. Compute time keeps the NAIVE
+    // `SUM(running.duration)` on cpu/gpu non-util (2263.1ms on bg4N2): compute
+    // items repeat as genuine RE-EXECUTIONS (distinct running slices), so the raw
+    // sum is correct and collapsing per item_uid would wrongly drop them.
     let copy_ratio = execute_run_query_raw(
         duckdb_path,
         "WITH copy_time AS ( \
@@ -2241,11 +2244,15 @@ mod tests {
         std::fs::copy(&src, &tmp).expect("copy test DB to a writable temp file");
         let db = tmp.to_str().unwrap();
 
-        let compute_sql = "WITH d AS (SELECT DISTINCT item_uid, entry_slug, running FROM items \
-             WHERE running IS NOT NULL AND (entry_slug LIKE '%cpu%' OR entry_slug LIKE '%gpudev%')), \
-             g AS (SELECT item_uid, any_value(running.start) s, any_value(running.stop) e, \
-                   any_value(running.duration) dur FROM d GROUP BY item_uid) \
-             SELECT ROUND(SUM(dur) / 1e6, 1) AS ms FROM g WHERE s < 2300000000 AND e > 1800000000";
+        // DETERMINISTIC per-slice sum (NOT any_value over the dedup grain, which
+        // can decorrelate start/stop/dur across an item's slices). Compute items
+        // repeat as genuine re-executions (distinct running slices), so each slice
+        // whose own interval overlaps the window is summed once. uids 48/221 have
+        // NO single slice overlapping [1.8s,2.3s], so they are correctly excluded.
+        let compute_sql = "WITH d AS (SELECT DISTINCT item_uid, entry_slug, running.start AS s, \
+             running.stop AS e, running.duration AS dur FROM items \
+             WHERE running IS NOT NULL AND (entry_slug LIKE '%cpu%' OR entry_slug LIKE '%gpudev%')) \
+             SELECT ROUND(SUM(dur) / 1e6, 1) AS ms FROM d WHERE s < 2300000000 AND e > 1800000000";
         // comm dedups by item_uid (any_value over single-lifetime chan copies is
         // deterministic; a per-slice SUM would double-count the 28 cross-slug copies).
         let comm_sql = "WITH d AS (SELECT DISTINCT item_uid, entry_slug, lifetime FROM items \
@@ -2261,7 +2268,7 @@ mod tests {
             let m = conn.query_row(comm_sql, [], |r| r.get(0)).expect("oracle comm");
             (c, m)
         };
-        assert!((oracle_compute - 478.7).abs() < 0.5, "oracle compute, got {oracle_compute}");
+        assert!((oracle_compute - 478.7).abs() < 0.1, "oracle compute, got {oracle_compute}");
         assert!((oracle_comm - 49.8).abs() < 0.1, "oracle comm, got {oracle_comm}");
         assert!(
             oracle_compute > oracle_comm,
