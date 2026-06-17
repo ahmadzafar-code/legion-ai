@@ -379,6 +379,12 @@ struct Context {
     #[cfg(feature = "ai")]
     #[serde(skip)]
     mcp_awaiting_screenshot: Option<(u64, std::sync::mpsc::Sender<crate::ai::UiCommand>)>,
+
+    /// V1.1: whether the in-viewer HTTP MCP server (data tools) has been started.
+    /// One spawn attempt is made once a DuckDB path is configured.
+    #[cfg(feature = "viewer-mcp")]
+    #[serde(skip)]
+    viewer_mcp_started: bool,
 }
 
 #[cfg(feature = "ai")]
@@ -3163,6 +3169,20 @@ impl eframe::App for ProfApp {
             last_update,
             ..
         } = self;
+
+        // V1.1: start the in-viewer HTTP MCP server (data tools only) once a DuckDB
+        // path is configured. Runs on its OWN thread — never the egui main thread.
+        // One spawn attempt; serves run_query/overview/find_blockers over HTTP so
+        // Claude Code can connect to this live process.
+        #[cfg(feature = "viewer-mcp")]
+        if !cx.viewer_mcp_started {
+            if let Some(duckdb_path) = cx.chat_panel.duckdb_path() {
+                if let Err(e) = crate::ai::viewer_mcp::spawn(duckdb_path, 8765) {
+                    eprintln!("[legion-viewer] in-viewer MCP server failed to start: {e}");
+                }
+                cx.viewer_mcp_started = true;
+            }
+        }
 
         if let Some(mut source) = pending_data_sources.pop_front() {
             // We made one request, so we know there is always zero or one

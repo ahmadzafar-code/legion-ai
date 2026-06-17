@@ -728,6 +728,15 @@ impl ChatPanel {
 
     // ── Tool status helpers ────────────────────────────────────────────────
 
+    /// The configured DuckDB path (trimmed, non-empty), if any — the database the
+    /// in-viewer MCP server (V1.1) serves `run_query`/`overview`/`find_blockers`
+    /// against.
+    #[cfg(feature = "viewer-mcp")]
+    pub fn duckdb_path(&self) -> Option<String> {
+        let trimmed = self.duckdb_path_buffer.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    }
+
     /// Derive the DB tool status from `duckdb_path_buffer`.
     ///
     /// Accepts any existing non-directory file. DuckDB files may have various

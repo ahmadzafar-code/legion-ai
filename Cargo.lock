@@ -2794,6 +2794,7 @@ dependencies = [
  "egui_extras",
  "env_logger",
  "getrandom 0.2.16",
+ "httparse",
  "image",
  "itertools 0.14.0",
  "log",

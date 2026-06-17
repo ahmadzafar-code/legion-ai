@@ -7,8 +7,14 @@
 pub mod agent;
 pub mod bridge;
 mod chat_panel;
+/// Transport-agnostic MCP dispatch core (needs duckdb for the query tools); wrapped
+/// by the stdio bin and the in-viewer HTTP server.
+#[cfg(feature = "duckdb")]
+pub mod mcp_core;
 pub mod tools;
 pub mod trace;
+#[cfg(feature = "viewer-mcp")]
+pub mod viewer_mcp;
 
 use crate::timestamp::Interval;
 

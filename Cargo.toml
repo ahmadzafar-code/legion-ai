@@ -21,6 +21,11 @@ client = ["dep:reqwest", "dep:url"]
 server = ["dep:actix-cors", "dep:actix-web"]
 nvtxw = ["dep:nvtxw"]
 ai = ["dep:ureq", "dep:serde_json", "dep:image", "dep:base64", "dep:tracing", "dep:tracing-subscriber"]  # AI analysis + screenshot encoding + agent tracing
+# In-viewer HTTP MCP server (V1.1). OFF by default — the 4 standard combos skip it.
+# Verified surface (empirical, claude-code 2.1.150): plain POST /mcp, Content-Length
+# JSON, single application/json response, Connection: close, no SSE/keep-alive/
+# session-id needed -> httparse + std::net::TcpListener (smallest network surface).
+viewer-mcp = ["ai", "duckdb", "dep:httparse"]
 
 [dependencies]
 egui = "0.29.0"
@@ -66,6 +71,10 @@ duckdb = { version = "1.4.0", features = ["appender-arrow", "bundled", "json"], 
 # eval bin: sha-pin case .duckdb files (gated under the `duckdb` feature above so
 # {} and {ai} never compile it).
 sha2 = { version = "0.10", optional = true }
+
+# viewer-mcp: minimal HTTP/1.x request parser for the in-viewer MCP server. Pulled
+# only by the (off-by-default) `viewer-mcp` feature.
+httparse = { version = "1.10", optional = true }
 
 # client:
 url = { version = "2", optional = true }
