@@ -49,6 +49,27 @@ pub trait EventSink {
     ) {
     }
     fn on_clear_highlights(&mut self) {}
+
+    /// MCP-driven (V1.2) highlight request: apply the overlay to the live timeline
+    /// and ACK on `reply_tx` (`UiCommand::Ack`). Default no-op until the live sink
+    /// is wired (V1.3); the embedded agent never emits the triggering event.
+    #[allow(clippy::too_many_arguments)]
+    fn on_highlight(
+        &mut self,
+        _request_id: u64,
+        _entry_slug: String,
+        _start_ns: i64,
+        _stop_ns: i64,
+        _severity: String,
+        _label: String,
+        _reply_tx: &Sender<UiCommand>,
+    ) {
+    }
+
+    /// MCP-driven (V1.2) clear-highlights request: clear overlays and ACK on
+    /// `reply_tx`. Default no-op until the live sink is wired (V1.3).
+    fn on_clear_highlights_request(&mut self, _request_id: u64, _reply_tx: &Sender<UiCommand>) {}
+
     fn on_complete(&mut self, _response: AgentResponse) {}
     fn on_error(&mut self, _error: String) {}
 }
@@ -106,6 +127,19 @@ pub fn apply_agent_event<S: EventSink>(sink: &mut S, event: AgentEvent, reply_tx
             sink.on_question(request_id, question, options, reply_tx)
         }
         AgentEvent::ClearHighlights => sink.on_clear_highlights(),
+        AgentEvent::HighlightRequest {
+            request_id,
+            entry_slug,
+            start_ns,
+            stop_ns,
+            severity,
+            label,
+        } => sink.on_highlight(
+            request_id, entry_slug, start_ns, stop_ns, severity, label, reply_tx,
+        ),
+        AgentEvent::ClearHighlightsRequest { request_id } => {
+            sink.on_clear_highlights_request(request_id, reply_tx)
+        }
         AgentEvent::Complete(response) => sink.on_complete(response),
         AgentEvent::Error(error) => sink.on_error(error),
     }

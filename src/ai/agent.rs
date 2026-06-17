@@ -111,6 +111,20 @@ pub enum AgentEvent {
     },
     /// Agent wants all timeline highlight overlays cleared.
     ClearHighlights,
+    /// MCP-driven (V1.2): apply a highlight overlay to the live timeline, then ACK
+    /// via `UiCommand::Ack`. The embedded agent accumulates highlights in
+    /// `run_highlights` and never emits this — only the in-viewer MCP bridge does.
+    HighlightRequest {
+        request_id: u64,
+        entry_slug: String,
+        start_ns: i64,
+        stop_ns: i64,
+        severity: String,
+        label: String,
+    },
+    /// MCP-driven (V1.2): clear all highlight overlays, then ACK via
+    /// `UiCommand::Ack`. The embedded agent emits the reply-less `ClearHighlights`.
+    ClearHighlightsRequest { request_id: u64 },
     /// Agentic loop finished successfully.
     Complete(AgentResponse),
     /// Agentic loop failed with an error.
@@ -132,6 +146,10 @@ pub enum UiCommand {
     },
     /// The user's answer to a `QuestionForUser`.
     UserAnswer { request_id: u64, answer: String },
+    /// Acknowledgement for a non-screenshot bridge request (highlight / clear).
+    /// `message` is the model-readable confirmation text. Used only by the
+    /// in-viewer MCP bridge path (V1.2).
+    Ack { request_id: u64, message: String },
 }
 
 // ── Agent session ────────────────────────────────────────────────────────────

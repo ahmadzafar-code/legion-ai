@@ -23,36 +23,64 @@ use serde_json::{json, Value};
 pub const DEFAULT_PROTOCOL_VERSION: &str = "2024-11-05";
 
 /// The headless data tools advertised to clients (a subset of `tool_definitions`).
-/// GUI/view tools (screenshot, zoom_to, highlight, ask_user, …) have no pure
-/// backing fn and are NEVER advertised.
 const HEADLESS_TOOLS: &[&str] = &["run_query", "overview", "list_files", "read_code"];
+
+/// The VISUAL tools advertised ONLY when a [`UiBridge`](super::bridge::UiBridge) is
+/// present (the in-viewer HTTP server). They drive the live timeline over the
+/// bridge. `ask_user` (no human at the MCP end) and `update_findings`
+/// (embedded-only scratchpad) are intentionally NOT exposed. (V1.2)
+const VISUAL_TOOLS: &[&str] = &[
+    "screenshot",
+    "zoom_to",
+    "pan",
+    "scroll_to",
+    "set_view",
+    "search",
+    "reset_view",
+    "highlight",
+    "clear_highlights",
+];
 
 /// Valid `answer_type` values for the `final_answer` tool (the eval grader pins
 /// this enum).
 const ANSWER_TYPES: &[&str] = &["uid", "number", "set", "label", "tuple", "diagnosis"];
 
 /// Server context: which case DB to query, an optional source root for the code
-/// tools, and the protocol version this transport advertises. Held immutably
-/// across requests.
+/// tools, the protocol version this transport advertises, and an optional
+/// [`UiBridge`](super::bridge::UiBridge) to drive the live viewer. Held immutably
+/// across requests (the bridge's `request` takes `&self`).
 pub struct ServerCtx {
     pub duckdb_path: String,
     pub code_root: Option<String>,
     pub protocol_version: &'static str,
+    /// Present only on the in-viewer HTTP server: enables the VISUAL tools, which
+    /// drive the live timeline over this handle. Absent (stdio bin / eval) =>
+    /// data tools only, unchanged.
+    pub ui_bridge: Option<super::bridge::UiBridge>,
 }
 
 impl ServerCtx {
-    /// Construct a context with the default (stdio) protocol version.
+    /// Construct a context with the default (stdio) protocol version and NO UI
+    /// bridge (data tools only).
     pub fn new(duckdb_path: String, code_root: Option<String>) -> Self {
         ServerCtx {
             duckdb_path,
             code_root,
             protocol_version: DEFAULT_PROTOCOL_VERSION,
+            ui_bridge: None,
         }
     }
 
     /// Override the advertised protocol version (the HTTP transport uses this).
     pub fn with_protocol(mut self, version: &'static str) -> Self {
         self.protocol_version = version;
+        self
+    }
+
+    /// Attach a [`UiBridge`](super::bridge::UiBridge), enabling the VISUAL tools.
+    /// Used by the in-viewer HTTP server (wired live in V1.3).
+    pub fn with_ui_bridge(mut self, bridge: super::bridge::UiBridge) -> Self {
+        self.ui_bridge = Some(bridge);
         self
     }
 }
@@ -111,12 +139,16 @@ fn initialize_result(params: &Value, ctx: &ServerCtx) -> Value {
 /// definitions. Code tools are omitted unless a `code_root` was configured.
 fn tools_list_result(ctx: &ServerCtx) -> Value {
     let has_code = ctx.code_root.is_some();
+    let has_bridge = ctx.ui_bridge.is_some();
     let mut tools: Vec<Value> = tool_definitions(true, true)
         .into_iter()
         .filter(|t| {
             let name = t.get("name").and_then(Value::as_str).unwrap_or("");
-            HEADLESS_TOOLS.contains(&name)
-                && (has_code || (name != "list_files" && name != "read_code"))
+            // Data tools (code tools only with a code root) ...
+            (HEADLESS_TOOLS.contains(&name)
+                && (has_code || (name != "list_files" && name != "read_code")))
+                // ... plus the VISUAL tools when a UI bridge is attached.
+                || (has_bridge && VISUAL_TOOLS.contains(&name))
         })
         .map(|mut t| {
             if let Some(obj) = t.as_object_mut() {
@@ -179,6 +211,19 @@ fn tools_call_result(params: &Value, ctx: &ServerCtx) -> Value {
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
     let args = params.get("arguments").cloned().unwrap_or(Value::Null);
 
+    // VISUAL tools drive the live viewer over the UI bridge (present only on the
+    // in-viewer HTTP server). A "viewport busy"/timeout from the bridge is a tool
+    // RESULT with isError:true (model-readable), not a protocol error.
+    if VISUAL_TOOLS.contains(&name) {
+        return match &ctx.ui_bridge {
+            Some(bridge) => visual_tool_result(name, &args, bridge),
+            None => text_result(
+                &format!("visual tool '{name}' is unavailable: this server has no UI bridge."),
+                true,
+            ),
+        };
+    }
+
     let (text, is_error) = match name {
         "run_query" => {
             let sql = args.get("sql").and_then(Value::as_str).unwrap_or("");
@@ -218,9 +263,171 @@ fn tools_call_result(params: &Value, ctx: &ServerCtx) -> Value {
         other => (format!("unknown tool: {other}"), true),
     };
 
+    text_result(&text, is_error)
+}
+
+/// An MCP `tools/call` result with a single text content block.
+fn text_result(text: &str, is_error: bool) -> Value {
     json!({
         "content": [{ "type": "text", "text": text }],
         "isError": is_error
+    })
+}
+
+/// Execute a VISUAL tool by translating its args into the corresponding
+/// [`AgentEvent`](super::agent::AgentEvent) (mirroring `agent.rs` `execute_tool`'s
+/// GUI arms), driving the live viewer over `bridge`, and translating the reply:
+/// a screenshot -> an MCP image block; an `Ack` -> text; a `viewport busy`/timeout
+/// -> `isError:true`. Typed args only (start_uid/entry_slug/range) — no model SQL.
+fn visual_tool_result(name: &str, args: &Value, bridge: &super::bridge::UiBridge) -> Value {
+    use super::agent::{AgentEvent, UiCommand};
+    use super::bridge::DEFAULT_REQUEST_TIMEOUT;
+
+    let i64_arg = |k: &str| args.get(k).and_then(Value::as_i64);
+    let str_array = |k: &str| -> Option<Vec<String>> {
+        args.get(k).and_then(|v| v.as_array()).map(|a| {
+            a.iter().filter_map(|x| x.as_str().map(str::to_owned)).collect()
+        })
+    };
+
+    // Build the event for this tool (or return an arg-error result). request_id is
+    // injected by the bridge.
+    let builder: Box<dyn FnOnce(u64) -> AgentEvent> = match name {
+        "screenshot" => Box::new(|rid| AgentEvent::ScreenshotRequest { request_id: rid }),
+
+        "zoom_to" => {
+            let (Some(start_ns), Some(stop_ns)) = (i64_arg("start_ns"), i64_arg("stop_ns")) else {
+                return text_result("zoom_to requires start_ns and stop_ns (integers).", true);
+            };
+            Box::new(move |rid| AgentEvent::ZoomRequest { request_id: rid, start_ns, stop_ns })
+        }
+
+        "pan" => {
+            let Some(direction) = args.get("direction").and_then(Value::as_str) else {
+                return text_result("pan requires direction (\"left\" or \"right\").", true);
+            };
+            if direction != "left" && direction != "right" {
+                return text_result("pan direction must be \"left\" or \"right\".", true);
+            }
+            let percent = args.get("percent").and_then(Value::as_f64).unwrap_or(25.0).clamp(1.0, 200.0);
+            let direction = direction.to_owned();
+            Box::new(move |rid| AgentEvent::PanRequest { request_id: rid, direction, percent })
+        }
+
+        "scroll_to" => {
+            let Some(slug) = args.get("entry_slug").and_then(Value::as_str) else {
+                return text_result("scroll_to requires entry_slug (string).", true);
+            };
+            let entry_slug = slug.to_owned();
+            Box::new(move |rid| AgentEvent::ScrollToRequest { request_id: rid, entry_slug })
+        }
+
+        "set_view" => {
+            let (Some(start_ns), Some(stop_ns)) = (i64_arg("start_ns"), i64_arg("stop_ns")) else {
+                return text_result("set_view requires start_ns and stop_ns (integers).", true);
+            };
+            let entry_slug = args.get("entry_slug").and_then(Value::as_str).map(str::to_owned);
+            let filter_kinds = str_array("filter_kinds");
+            let expand_kinds = str_array("expand_kinds");
+            let collapse_kinds = str_array("collapse_kinds");
+            let vertical_scale = args.get("vertical_scale").and_then(Value::as_f64);
+            Box::new(move |rid| AgentEvent::SetViewRequest {
+                request_id: rid,
+                start_ns,
+                stop_ns,
+                entry_slug,
+                filter_kinds,
+                expand_kinds,
+                collapse_kinds,
+                vertical_scale,
+            })
+        }
+
+        "search" => {
+            let Some(query) = args.get("query").and_then(Value::as_str) else {
+                return text_result("search requires query (string).", true);
+            };
+            let query = query.to_owned();
+            Box::new(move |rid| AgentEvent::SearchRequest { request_id: rid, query })
+        }
+
+        "reset_view" => Box::new(|rid| AgentEvent::ResetViewRequest { request_id: rid }),
+
+        "highlight" => {
+            let Some(slug) = args.get("entry_slug").and_then(Value::as_str) else {
+                return text_result("highlight requires entry_slug (string).", true);
+            };
+            let (Some(start_ns), Some(stop_ns)) = (i64_arg("start_ns"), i64_arg("stop_ns")) else {
+                return text_result("highlight requires start_ns and stop_ns (integers).", true);
+            };
+            let severity = args.get("severity").and_then(Value::as_str).unwrap_or("medium").to_owned();
+            let label = args.get("label").and_then(Value::as_str).unwrap_or("").to_owned();
+            let entry_slug = slug.to_owned();
+            Box::new(move |rid| AgentEvent::HighlightRequest {
+                request_id: rid,
+                entry_slug,
+                start_ns,
+                stop_ns,
+                severity,
+                label,
+            })
+        }
+
+        "clear_highlights" => Box::new(|rid| AgentEvent::ClearHighlightsRequest { request_id: rid }),
+
+        other => return text_result(&format!("unknown visual tool: {other}"), true),
+    };
+
+    // Drive the live viewer, matching the reply by the bridge-assigned request_id.
+    // The viewport token guarantees a single outstanding request, but matching by
+    // id is still robust against a stale reply from a prior timed-out request.
+    let rid = std::cell::Cell::new(u64::MAX);
+    let reply = bridge.request(
+        |id| {
+            rid.set(id);
+            builder(id)
+        },
+        |cmd| reply_request_id(cmd) == Some(rid.get()),
+        DEFAULT_REQUEST_TIMEOUT,
+    );
+
+    match reply {
+        Ok(UiCommand::ScreenshotData { png_bytes, metadata, .. }) => {
+            screenshot_result(&png_bytes, &metadata)
+        }
+        Ok(UiCommand::Ack { message, .. }) => text_result(&message, false),
+        Ok(other) => text_result(&format!("unexpected viewport reply: {other:?}"), true),
+        // "viewport busy" / timeout / disconnect -> model-readable tool error.
+        Err(e) => text_result(&e, true),
+    }
+}
+
+/// The request_id carried by any [`UiCommand`](super::agent::UiCommand) reply.
+fn reply_request_id(cmd: &super::agent::UiCommand) -> Option<u64> {
+    use super::agent::UiCommand;
+    match cmd {
+        UiCommand::ScreenshotData { request_id, .. }
+        | UiCommand::UserAnswer { request_id, .. }
+        | UiCommand::Ack { request_id, .. } => Some(*request_id),
+    }
+}
+
+/// Build an MCP image content block from RAW PNG bytes. Claude Code requires the
+/// `data` field to be BARE base64 (no `data:image/png;base64,` URI prefix). We
+/// encode the raw bytes ourselves, so it is bare by construction; the prefix strip
+/// is a defensive guard in case a future reply path ever carries a data-URI string.
+/// The visible time-range / entry-slug metadata rides along as a text block so the
+/// model can issue follow-up zoom/queries.
+fn screenshot_result(png_bytes: &[u8], metadata: &str) -> Value {
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(png_bytes);
+    let bare = encoded.strip_prefix("data:image/png;base64,").unwrap_or(&encoded);
+    json!({
+        "content": [
+            { "type": "image", "data": bare, "mimeType": "image/png" },
+            { "type": "text", "text": metadata }
+        ],
+        "isError": false
     })
 }
 
@@ -419,5 +626,171 @@ mod tests {
         // answer_type not in the enum -> error.
         let (_t, is_error) = call(&ctx, "final_answer", json!({ "answer_type": "bogus", "value": 1 }));
         assert!(is_error, "bogus answer_type must be rejected");
+    }
+
+    // ── V1.2 visual tools (stub UiBridge — no live window) ───────────────────
+    use crate::ai::agent::{AgentEvent, UiCommand};
+    use crate::ai::bridge::{UiBridge, ViewportGuard, ViewportToken, MCP_CONSUMER_ID};
+    use std::sync::mpsc::channel;
+
+    /// The request_id any of the visual events carries (test helper).
+    fn event_request_id(ev: &AgentEvent) -> u64 {
+        match ev {
+            AgentEvent::ScreenshotRequest { request_id }
+            | AgentEvent::ZoomRequest { request_id, .. }
+            | AgentEvent::PanRequest { request_id, .. }
+            | AgentEvent::ScrollToRequest { request_id, .. }
+            | AgentEvent::SetViewRequest { request_id, .. }
+            | AgentEvent::SearchRequest { request_id, .. }
+            | AgentEvent::ResetViewRequest { request_id }
+            | AgentEvent::HighlightRequest { request_id, .. }
+            | AgentEvent::ClearHighlightsRequest { request_id } => *request_id,
+            other => panic!("unexpected visual event: {other:?}"),
+        }
+    }
+
+    /// A ctx with a bridge whose UI-side channels dangle — fine for `tools/list`
+    /// (which never drives the bridge).
+    fn ctx_with_dangling_bridge() -> ServerCtx {
+        let (event_tx, _event_rx) = channel::<AgentEvent>();
+        let (_cmd_tx, cmd_rx) = channel::<UiCommand>();
+        let bridge = UiBridge::new(event_tx, cmd_rx, ViewportToken::new(), MCP_CONSUMER_ID);
+        ServerCtx::new("unused".into(), None).with_ui_bridge(bridge)
+    }
+
+    /// A ctx with a bridge + a stub UI thread that handles ONE event and replies
+    /// with `reply(&event)`. The join handle yields the event the server emitted,
+    /// for assertions.
+    fn ctx_with_stub_ui(
+        reply: impl Fn(&AgentEvent) -> UiCommand + Send + 'static,
+    ) -> (ServerCtx, std::thread::JoinHandle<AgentEvent>) {
+        let (event_tx, event_rx) = channel::<AgentEvent>();
+        let (cmd_tx, cmd_rx) = channel::<UiCommand>();
+        let bridge = UiBridge::new(event_tx, cmd_rx, ViewportToken::new(), MCP_CONSUMER_ID);
+        let handle = std::thread::spawn(move || {
+            let ev = event_rx.recv().expect("stub UI: event");
+            let _ = cmd_tx.send(reply(&ev));
+            ev
+        });
+        (ServerCtx::new("unused".into(), None).with_ui_bridge(bridge), handle)
+    }
+
+    #[test]
+    fn test_tools_list_visual_only_with_bridge() {
+        // WITHOUT a bridge: the 9 visual tools are NOT advertised (regression — the
+        // stdio path is unchanged).
+        let resp = handle_request(&req("tools/list", json!({})), &dummy_ctx()).unwrap();
+        let none: Vec<&str> =
+            resp["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        for v in VISUAL_TOOLS {
+            assert!(!none.contains(v), "no-bridge tools/list must NOT advertise {v}");
+        }
+
+        // WITH a bridge: all 9 visual tools advertised, alongside the data tools.
+        let resp = handle_request(&req("tools/list", json!({})), &ctx_with_dangling_bridge()).unwrap();
+        let tools = resp["result"]["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        for v in VISUAL_TOOLS {
+            assert!(names.contains(v), "bridge tools/list must advertise visual tool {v}");
+        }
+        for want in ["run_query", "overview", "final_answer"] {
+            assert!(names.contains(&want), "data tool {want} still present");
+        }
+        // ask_user / update_findings are NEVER exposed over MCP.
+        assert!(!names.contains(&"ask_user"), "ask_user must not be exposed");
+        assert!(!names.contains(&"update_findings"), "update_findings must not be exposed");
+        // camelCase inputSchema, no snake_case leak (incl. the visual tools).
+        for t in tools {
+            assert!(t.get("inputSchema").is_some(), "tool {} missing inputSchema", t["name"]);
+            assert!(t.get("input_schema").is_none(), "tool {} leaked input_schema", t["name"]);
+        }
+    }
+
+    #[test]
+    fn test_visual_highlight_routes_and_acks() {
+        // The stub UI asserts the event is a HighlightRequest with the right typed
+        // fields, then ACKs.
+        let (ctx, handle) = ctx_with_stub_ui(|ev| {
+            let rid = event_request_id(ev);
+            match ev {
+                AgentEvent::HighlightRequest { entry_slug, start_ns, stop_ns, severity, .. } => {
+                    assert_eq!(entry_slug, "n0_gpu_g0");
+                    assert_eq!((*start_ns, *stop_ns), (100, 200));
+                    assert_eq!(severity, "high");
+                }
+                other => panic!("expected HighlightRequest, got {other:?}"),
+            }
+            UiCommand::Ack { request_id: rid, message: "Highlight added on n0_gpu_g0.".into() }
+        });
+
+        let (text, is_error) = call(
+            &ctx,
+            "highlight",
+            json!({ "entry_slug": "n0_gpu_g0", "start_ns": 100, "stop_ns": 200, "severity": "high" }),
+        );
+        assert!(!is_error, "highlight should ACK success: {text}");
+        assert!(text.contains("Highlight added"), "ACK text echoed: {text}");
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_visual_screenshot_returns_image_block() {
+        let png = vec![0x89, 0x50, 0x4E, 0x47]; // \x89PNG magic
+        let png_for_thread = png.clone();
+        let (ctx, handle) = ctx_with_stub_ui(move |ev| {
+            assert!(matches!(ev, AgentEvent::ScreenshotRequest { .. }), "expected ScreenshotRequest");
+            UiCommand::ScreenshotData {
+                request_id: event_request_id(ev),
+                png_bytes: png_for_thread.clone(),
+                metadata: "range=[0,1000] slugs=[n0_gpu_g0]".into(),
+            }
+        });
+
+        let resp = handle_request(
+            &req("tools/call", json!({ "name": "screenshot", "arguments": {} })),
+            &ctx,
+        )
+        .unwrap();
+        let result = &resp["result"];
+        assert_eq!(result["isError"], false);
+        let content = result["content"].as_array().unwrap();
+        // First block is the image: bare base64 of the PNG, mimeType image/png.
+        assert_eq!(content[0]["type"], "image");
+        assert_eq!(content[0]["mimeType"], "image/png");
+        use base64::Engine;
+        let want_b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+        assert_eq!(content[0]["data"], want_b64, "image data is bare base64 of the PNG");
+        assert!(!content[0]["data"].as_str().unwrap().starts_with("data:"), "no data-URI prefix");
+        // Metadata rides along as a text block for follow-up queries.
+        assert_eq!(content[1]["type"], "text");
+        assert!(content[1]["text"].as_str().unwrap().contains("range="));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_visual_viewport_busy_is_tool_error() {
+        // Another consumer holds the viewport -> the bridge's request returns
+        // "viewport busy", surfaced as a tool RESULT with isError:true (not a
+        // protocol error) so the model can read it and retry.
+        let (event_tx, _event_rx) = channel::<AgentEvent>();
+        let (_cmd_tx, cmd_rx) = channel::<UiCommand>();
+        let token = ViewportToken::new();
+        let _held: ViewportGuard = token.try_claim(99).unwrap(); // someone else owns it
+        let bridge = UiBridge::new(event_tx, cmd_rx, token, MCP_CONSUMER_ID);
+        let ctx = ServerCtx::new("unused".into(), None).with_ui_bridge(bridge);
+
+        let (text, is_error) = call(&ctx, "screenshot", json!({}));
+        assert!(is_error, "viewport busy must be a tool error");
+        assert!(text.contains("viewport busy"), "busy message is model-readable: {text}");
+    }
+
+    #[test]
+    fn test_visual_bad_args_is_tool_error() {
+        // zoom_to without the required integers -> tool error, and the bridge is
+        // never driven (stub UI thread would block forever, so use a dangling one).
+        let ctx = ctx_with_dangling_bridge();
+        let (text, is_error) = call(&ctx, "zoom_to", json!({ "start_ns": 5 }));
+        assert!(is_error, "missing stop_ns must be a tool error");
+        assert!(text.contains("zoom_to requires"), "actionable message: {text}");
     }
 }
