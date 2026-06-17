@@ -152,14 +152,22 @@ impl ViewportToken {
     /// [`ViewportGuard`] releases the viewport when dropped — on ANY exit path.
     pub fn try_claim(&self, consumer_id: u64) -> Result<ViewportGuard, &'static str> {
         let mut slot = self.0.lock().unwrap();
-        match *slot {
-            None => *slot = Some(consumer_id),
-            Some(owner) if owner == consumer_id => {}
+        // `owns` distinguishes the guard that actually took the slot from a
+        // re-entrant (already-held) view. Only the OWNING guard releases on drop,
+        // so a re-entrant guard dropping first cannot prematurely free a claim that
+        // the original holder still owns.
+        let owns = match *slot {
+            None => {
+                *slot = Some(consumer_id);
+                true
+            }
+            Some(owner) if owner == consumer_id => false,
             Some(_) => return Err("viewport busy"),
-        }
+        };
         Ok(ViewportGuard {
             token: Arc::clone(&self.0),
             consumer_id,
+            owns,
         })
     }
 
@@ -177,10 +185,16 @@ impl ViewportToken {
 pub struct ViewportGuard {
     token: Arc<Mutex<Option<u64>>>,
     consumer_id: u64,
+    /// True only for the guard that actually claimed the slot; re-entrant guards
+    /// are non-owning and do not release.
+    owns: bool,
 }
 
 impl Drop for ViewportGuard {
     fn drop(&mut self) {
+        if !self.owns {
+            return;
+        }
         let mut slot = self.token.lock().unwrap();
         if *slot == Some(self.consumer_id) {
             *slot = None;
@@ -348,11 +362,16 @@ mod tests {
         // B is locked out while A holds it.
         assert_eq!(token.try_claim(2).err(), Some("viewport busy"));
 
-        // A is re-entrant (same consumer can re-claim).
-        assert!(token.try_claim(1).is_ok());
+        // A is re-entrant, but the re-entrant guard is NON-OWNING: dropping it must
+        // NOT release A's claim (pins the premature-release fix).
+        {
+            let _reentrant = token.try_claim(1).expect("re-entrant claim by the same consumer");
+            assert_eq!(token.current_owner(), Some(1));
+        }
+        assert_eq!(token.current_owner(), Some(1), "re-entrant drop must not release A");
 
         drop(guard_a);
-        assert_eq!(token.current_owner(), None, "release on drop");
+        assert_eq!(token.current_owner(), None, "owning guard releases on drop");
         assert!(token.try_claim(2).is_ok(), "B claims after A releases");
     }
 
