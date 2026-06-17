@@ -2152,5 +2152,133 @@ mod tests {
 
         let _ = std::fs::remove_file(&tmp);
     }
+
+    /// Parse an execute_run_query_raw JSON array and return the `item_uid` of the
+    /// row with the greatest `dur_ms` (argmax computed in Rust — robust to row
+    /// order through the json_group_array wrap).
+    fn argmax_uid_by_dur(json: &str) -> Option<u64> {
+        let rows: Vec<serde_json::Value> = serde_json::from_str(json).ok()?;
+        rows.iter()
+            .filter_map(|r| Some((r.get("item_uid")?.as_u64()?, r.get("dur_ms")?.as_f64()?)))
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(uid, _)| uid)
+    }
+
+    /// First row's `key` as f64 from an execute_run_query_raw JSON array.
+    fn first_f64(json: &str, key: &str) -> Option<f64> {
+        let rows: Vec<serde_json::Value> = serde_json::from_str(json).ok()?;
+        rows.first()?.get(key)?.as_f64()
+    }
+
+    /// P1.A(2) L1: "which task in [1.0s,1.5s] ran longest?" — scope matters. Uses a
+    /// DETERMINISTIC per-slice argmax oracle (NOT `any_value` over multi-slice
+    /// items, which is non-deterministic: uid 48 has ~33 running slices, uid 1 is a
+    /// long-lived io thread). app-procs scope (cpu/gpudev) -> uid 48; all-items
+    /// scope (no proc filter) -> uid 1. Asserts oracle == tool-path on both, and
+    /// that the two scopes disagree. (The spec's 221/1461 were `any_value`
+    /// artifacts — see executor log P1.A(2).)
+    #[test]
+    fn test_l1_longest_in_range_scope_matters() {
+        let src = test_db_path();
+        if !src.exists() {
+            eprintln!("skipping L1: test DB absent at {}", src.display());
+            return;
+        }
+        let tmp = std::env::temp_dir().join("legion_p1a_l1.duckdb");
+        let _ = std::fs::remove_file(&tmp);
+        std::fs::copy(&src, &tmp).expect("copy test DB to a writable temp file");
+        let db = tmp.to_str().unwrap();
+
+        // Per-slice argmax of running.duration over slices overlapping [1.0s,1.5s].
+        let app_sql = "WITH d AS (SELECT DISTINCT item_uid, entry_slug, running.start AS s, \
+             running.stop AS e, running.duration AS dur FROM items \
+             WHERE running IS NOT NULL AND (entry_slug LIKE '%cpu%' OR entry_slug LIKE '%gpudev%')) \
+             SELECT item_uid, ROUND(dur / 1e6, 4) AS dur_ms FROM d \
+             WHERE s < 1500000000 AND e > 1000000000 ORDER BY dur_ms DESC";
+        let all_sql = "WITH d AS (SELECT DISTINCT item_uid, entry_slug, running.start AS s, \
+             running.stop AS e, running.duration AS dur FROM items WHERE running IS NOT NULL) \
+             SELECT item_uid, ROUND(dur / 1e6, 4) AS dur_ms FROM d \
+             WHERE s < 1500000000 AND e > 1000000000 ORDER BY dur_ms DESC";
+
+        // Oracle: direct connection, LIMIT 1.
+        let (oracle_app, oracle_all): (u64, u64) = {
+            let conn = duckdb::Connection::open(&tmp).expect("open temp");
+            let app = conn
+                .query_row(&format!("{app_sql} LIMIT 1"), [], |r| r.get(0))
+                .expect("oracle app");
+            let all = conn
+                .query_row(&format!("{all_sql} LIMIT 1"), [], |r| r.get(0))
+                .expect("oracle all");
+            (app, all)
+        };
+        assert_eq!(oracle_app, 48, "app-scope longest in [1.0s,1.5s]");
+        assert_eq!(oracle_all, 1, "all-items longest in [1.0s,1.5s]");
+        assert_ne!(oracle_app, oracle_all, "scope matters: app-scope != all-items");
+
+        // Tool path: same questions through execute_run_query_raw must agree.
+        let tool_app = argmax_uid_by_dur(&execute_run_query_raw(db, app_sql).expect("tool app"));
+        let tool_all = argmax_uid_by_dur(&execute_run_query_raw(db, all_sql).expect("tool all"));
+        assert_eq!(tool_app, Some(oracle_app), "tool-path app == oracle");
+        assert_eq!(tool_all, Some(oracle_all), "tool-path all == oracle");
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// P1.A(2) L3: compute- vs communication-bound in [1.8s,2.3s]. compute =
+    /// SUM(running) on cpu/gpudev (dedup'd) ~= 478.7ms; comm = SUM(lifetime) on
+    /// chan (dedup'd) ~= 49.8ms -> computation-bound. The comm side is the key
+    /// parity check: the tool-path (lifetime-based) comm query must equal the
+    /// direct oracle, proving the agent's copy path is correct.
+    #[test]
+    fn test_l3_compute_vs_comm_bound() {
+        let src = test_db_path();
+        if !src.exists() {
+            eprintln!("skipping L3: test DB absent at {}", src.display());
+            return;
+        }
+        let tmp = std::env::temp_dir().join("legion_p1a_l3.duckdb");
+        let _ = std::fs::remove_file(&tmp);
+        std::fs::copy(&src, &tmp).expect("copy test DB to a writable temp file");
+        let db = tmp.to_str().unwrap();
+
+        let compute_sql = "WITH d AS (SELECT DISTINCT item_uid, entry_slug, running FROM items \
+             WHERE running IS NOT NULL AND (entry_slug LIKE '%cpu%' OR entry_slug LIKE '%gpudev%')), \
+             g AS (SELECT item_uid, any_value(running.start) s, any_value(running.stop) e, \
+                   any_value(running.duration) dur FROM d GROUP BY item_uid) \
+             SELECT ROUND(SUM(dur) / 1e6, 1) AS ms FROM g WHERE s < 2300000000 AND e > 1800000000";
+        // comm dedups by item_uid (any_value over single-lifetime chan copies is
+        // deterministic; a per-slice SUM would double-count the 28 cross-slug copies).
+        let comm_sql = "WITH d AS (SELECT DISTINCT item_uid, entry_slug, lifetime FROM items \
+             WHERE entry_slug LIKE '%chan%'), \
+             g AS (SELECT item_uid, any_value(lifetime.start) s, any_value(lifetime.stop) e, \
+                   any_value(lifetime.duration) dur FROM d GROUP BY item_uid) \
+             SELECT ROUND(SUM(dur) / 1e6, 1) AS ms FROM g WHERE s < 2300000000 AND e > 1800000000";
+
+        // Oracle: direct connection.
+        let (oracle_compute, oracle_comm): (f64, f64) = {
+            let conn = duckdb::Connection::open(&tmp).expect("open temp");
+            let c = conn.query_row(compute_sql, [], |r| r.get(0)).expect("oracle compute");
+            let m = conn.query_row(comm_sql, [], |r| r.get(0)).expect("oracle comm");
+            (c, m)
+        };
+        assert!((oracle_compute - 478.7).abs() < 0.5, "oracle compute, got {oracle_compute}");
+        assert!((oracle_comm - 49.8).abs() < 0.1, "oracle comm, got {oracle_comm}");
+        assert!(
+            oracle_compute > oracle_comm,
+            "verdict computation-bound: {oracle_compute} > {oracle_comm}"
+        );
+
+        // Tool path: the comm query (lifetime-based) through execute_run_query_raw
+        // must equal the oracle — proving the agent's copy path handles copies.
+        let tool_comm = first_f64(&execute_run_query_raw(db, comm_sql).expect("tool comm"), "ms")
+            .expect("parse tool comm");
+        assert!(
+            (tool_comm - oracle_comm).abs() < 0.1,
+            "tool-path comm parity: {tool_comm} vs oracle {oracle_comm}"
+        );
+        assert!((tool_comm - 49.8).abs() < 0.1, "tool-path comm == 49.8, got {tool_comm}");
+
+        let _ = std::fs::remove_file(&tmp);
+    }
 }
 
