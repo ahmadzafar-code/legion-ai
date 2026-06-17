@@ -1871,6 +1871,45 @@ fn apply_navigation(cx: &mut Context, windows: &mut [Window], nav: &crate::ai::P
 }
 
 /// The `request_id` carried by any navigation variant.
+/// A1: build the header "Selected:" banner line from a `selection_snapshot`
+/// (`items`, `range`). Pure + egui-free so it is unit-testable, and it reads the
+/// SAME snapshot `get_selection` returns, so the header and the MCP agent agree on
+/// what is selected. Returns `None` when nothing is selected (the header then
+/// renders no empty chrome). At most the first 2 task bars are shown in full; the
+/// rest collapse to "+N more".
+#[cfg(feature = "ai")]
+fn format_selection_banner(
+    items: &[crate::ai::SelectedItemInfo],
+    range: &Option<(String, i64, i64)>,
+) -> Option<String> {
+    use crate::timestamp::Timestamp;
+    if items.is_empty() && range.is_none() {
+        return None;
+    }
+    const SHOWN: usize = 2;
+    let mut parts: Vec<String> = Vec::new();
+    if let Some((label, start, stop)) = range {
+        parts.push(format!("{}–{} ({label})", Timestamp(*start), Timestamp(*stop)));
+    }
+    for it in items.iter().take(SHOWN) {
+        let title = if it.title.is_empty() {
+            format!("uid {}", it.item_uid)
+        } else {
+            it.title.clone()
+        };
+        let slug = it.entry_slug.as_deref().unwrap_or("?");
+        parts.push(format!(
+            "{title} @ {}–{} ({slug})",
+            Timestamp(it.start_ns),
+            Timestamp(it.stop_ns)
+        ));
+    }
+    if items.len() > SHOWN {
+        parts.push(format!("+{} more", items.len() - SHOWN));
+    }
+    Some(format!("Selected: {}", parts.join("  ·  ")))
+}
+
 #[cfg(feature = "ai")]
 fn pending_nav_request_id(nav: &crate::ai::PendingNavigation) -> u64 {
     use crate::ai::PendingNavigation;
@@ -3379,6 +3418,16 @@ impl eframe::App for ProfApp {
             *last_update = Some(now);
         }
 
+        // A1: header "Selected:" banner — always visible when something is selected,
+        // INDEPENDENT of whether the chat panel is open. Computed before the panel
+        // closure (immutable snapshot read) so the closure can still mutably toggle
+        // the chat panel.
+        #[cfg(feature = "ai")]
+        let selection_banner = {
+            let (items, range) = cx.chat_panel.selection_snapshot();
+            format_selection_banner(&items, &range)
+        };
+
         #[cfg(not(target_arch = "wasm32"))]
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
@@ -3409,6 +3458,19 @@ impl eframe::App for ProfApp {
                     }
                 });
             });
+
+            // A1: compact, centered "Selected:" line under the menu bar — shown only
+            // when something is selected (no empty chrome otherwise).
+            #[cfg(feature = "ai")]
+            if let Some(banner) = &selection_banner {
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new(banner)
+                            .size(12.0)
+                            .color(egui::Color32::from_rgb(59, 130, 246)),
+                    );
+                });
+            }
         });
 
         egui::SidePanel::left("side_panel").show(ctx, |ui| {
@@ -4123,5 +4185,56 @@ mod mcp_sink_tests {
         let (rid, _tx) = sink.pending_selection.expect("get_selection must be RECORDED, not a no-op");
         assert_eq!(rid, 13);
         assert!(sink.pending.is_none() && sink.pending_highlight.is_none() && sink.pending_clear.is_none());
+    }
+}
+
+/// A1: pins the header "Selected:" banner formatting (egui-free).
+#[cfg(all(test, feature = "ai"))]
+mod banner_tests {
+    use super::format_selection_banner;
+    use crate::ai::SelectedItemInfo;
+
+    fn item(uid: u64, title: &str) -> SelectedItemInfo {
+        SelectedItemInfo {
+            item_uid: uid,
+            entry_slug: Some("n0_cpu_c1".into()),
+            title: title.into(),
+            start_ns: 1_000_000_000,
+            stop_ns: 1_200_000_000,
+        }
+    }
+
+    #[test]
+    fn test_format_selection_banner_empty() {
+        // Nothing selected -> None (header renders no chrome).
+        assert_eq!(format_selection_banner(&[], &None), None);
+    }
+
+    #[test]
+    fn test_format_selection_banner_range_only() {
+        let b = format_selection_banner(&[], &Some(("n0_cpu_c2".into(), 1_000_000_000, 1_500_000_000)))
+            .expect("range -> Some");
+        assert!(b.starts_with("Selected:"), "banner: {b}");
+        assert!(b.contains("n0_cpu_c2"), "range label shown: {b}");
+        assert!(!b.contains("more"), "no overflow for a range-only selection: {b}");
+    }
+
+    #[test]
+    fn test_format_selection_banner_items() {
+        let b = format_selection_banner(&[item(48, "top_level <6>")], &None).expect("items -> Some");
+        assert!(b.starts_with("Selected:"));
+        assert!(b.contains("top_level <6>"), "title shown: {b}");
+        assert!(b.contains('@') && b.contains("n0_cpu_c1"), "interval + slug shown: {b}");
+        assert!(!b.contains("more"));
+    }
+
+    #[test]
+    fn test_format_selection_banner_many_items() {
+        // 3 items, SHOWN=2 -> first two in full, the rest collapse to "+1 more".
+        let many = vec![item(1, "alpha"), item(2, "beta"), item(3, "gamma")];
+        let b = format_selection_banner(&many, &None).expect("items -> Some");
+        assert!(b.contains("alpha") && b.contains("beta"), "first two shown: {b}");
+        assert!(!b.contains("gamma"), "3rd item collapsed, not shown by title: {b}");
+        assert!(b.contains("+1 more"), "overflow summarized: {b}");
     }
 }
