@@ -452,16 +452,23 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     out.push_str(&format!("## Timeline Bounds\n{bounds}\n\n"));
 
     // ── Task distribution ─────────────────────────────────────────────────────
+    // Top-10 headline (was 15) — orientation, not an exhaustive distribution; the
+    // agent uses run_query for the full GROUP BY when it needs it. The LIMIT is
+    // wrapped in a subquery because execute_run_query_raw strips a TRAILING
+    // `LIMIT n` and re-applies its own 50-row cap — so an un-wrapped `LIMIT 10`
+    // would still return up to 50 task types (the pre-compaction behavior).
     let dist = execute_run_query_raw(
         duckdb_path,
-        "SELECT title, COUNT(*) AS cnt, \
-         ROUND(AVG(running.duration)/1e6, 2) AS avg_run_ms, \
-         ROUND(MAX(running.duration)/1e6, 2) AS max_run_ms \
-         FROM items WHERE running IS NOT NULL \
-         GROUP BY title ORDER BY cnt DESC LIMIT 15",
+        "SELECT * FROM (\
+           SELECT title, COUNT(*) AS cnt, \
+           ROUND(AVG(running.duration)/1e6, 2) AS avg_run_ms, \
+           ROUND(MAX(running.duration)/1e6, 2) AS max_run_ms \
+           FROM items WHERE running IS NOT NULL \
+           GROUP BY title ORDER BY cnt DESC LIMIT 10\
+         ) s",
     )
     .unwrap_or_else(|e| format!("[{{\"error\": {:?}}}]", e));
-    out.push_str(&format!("## Top Task Types (by count)\n{dist}\n\n"));
+    out.push_str(&format!("## Top Task Types (by count, top 10)\n{dist}\n\n"));
 
     // ── Slot counts by kind ───────────────────────────────────────────────────
     let slots = execute_run_query_raw(
@@ -472,10 +479,23 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     .unwrap_or_else(|e| format!("[{{\"error\": {:?}}}]", e));
     out.push_str(&format!("## Slots by Kind\n{slots}\n\n"));
 
-    // ── Sample item ───────────────────────────────────────────────────────────
-    let sample = execute_run_query_raw(duckdb_path, "SELECT * FROM items LIMIT 1")
-        .unwrap_or_else(|e| format!("[{{\"error\": {:?}}}]", e));
-    out.push_str(&format!("## Sample Item Row\n{sample}\n\n"));
+    // ── Sample item (compact) ─────────────────────────────────────────────────
+    // `SELECT *` dumped every lifecycle + cross-ref STRUCT for one row — ~63 KB on
+    // bg4N2 (85% of the old overview, and overflowed the MCP tool-result budget).
+    // The Schema section already lists the columns; a 4-column projection still
+    // shows the populated STRUCT SHAPE (a lifecycle struct + a cross-ref struct)
+    // without the dump. Full rows are one `run_query` away.
+    // The inner LIMIT 1 is wrapped in a subquery: execute_run_query_raw strips a
+    // TRAILING `LIMIT n` and re-applies its 50-row cap, so a bare `... LIMIT 1`
+    // returned 50 FULL rows (the old 63 KB / 85%-of-output dump).
+    let sample = execute_run_query_raw(
+        duckdb_path,
+        "SELECT item_uid, title, running, critical_path FROM (\
+           SELECT * FROM items WHERE running IS NOT NULL LIMIT 1\
+         ) s",
+    )
+    .unwrap_or_else(|e| format!("[{{\"error\": {:?}}}]", e));
+    out.push_str(&format!("## Sample Item Row (shape; SELECT * via run_query)\n{sample}\n\n"));
 
     // ── Profile classification (human-readable) ──────────────────────────────
     let classification = execute_run_query_raw(
@@ -1920,6 +1940,86 @@ mod tests {
     fn test_db_path() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../multinoderuns/bg4N2/profcbN2g4b.duckdb")
+    }
+
+    /// SIZE GUARD (overview-compact regression): `gather_overview` must stay
+    /// INLINE-consumable for the MCP tool-result budget. Before compaction it was
+    /// ~73,558 chars (~18.4K tokens) and overflowed Claude Code's ~25K-token
+    /// MCP_OUTPUT budget → spilled to a file and went unread. The dominant bloat was
+    /// `SELECT * FROM items LIMIT 1`, which (because execute_run_query_raw strips a
+    /// trailing LIMIT and re-caps at 50) returned 50 FULL rows ≈ 63 KB (85%). After
+    /// compaction it is ~7.3 KB (~1.8K tokens). This 16 KB cap leaves room for new
+    /// signals yet still catches a re-bloat (the old dump alone was 4× this).
+    #[test]
+    fn test_overview_fits_inline_budget() {
+        let db = test_db_path();
+        if !db.exists() {
+            eprintln!("skipping test_overview_fits_inline_budget: test DB absent");
+            return;
+        }
+        let out = gather_overview(db.to_str().unwrap()).expect("gather_overview");
+        assert!(
+            out.len() < 16_000,
+            "overview must stay inline-consumable; was {} chars (~{} tokens) — re-bloat?",
+            out.len(),
+            out.len() / 4
+        );
+    }
+
+    /// SIGNALS PRESERVED: compaction trimmed only verbosity (the per-item sample and
+    /// the task-type distribution), never an orientation SIGNAL. Every high-value
+    /// section the agent re-derived by hand must still be present, and the trimmed
+    /// sections must be in their compact form (not the old dumps). Exact numeric
+    /// fidelity of the copy signal is pinned separately by
+    /// `test_channel_copy_lifetime_fix` (it asserts the Copy-to-Compute numbers via
+    /// gather_overview) — that SQL was not touched here.
+    #[test]
+    fn test_overview_preserves_signals() {
+        let db = test_db_path();
+        if !db.exists() {
+            eprintln!("skipping test_overview_preserves_signals: test DB absent");
+            return;
+        }
+        let out = gather_overview(db.to_str().unwrap()).expect("gather_overview");
+        for header in [
+            "## Profile Classification",
+            "## Per-Kind Utilization",
+            "## Copy-to-Compute Ratio",
+            "## Application Processor Balance",
+            "## Navigation Anchors",
+            "## Schema",
+            "## Row Counts",
+            "## Timeline Bounds",
+            "## Tracing Status",
+            "## Deferred Health",
+        ] {
+            assert!(out.contains(header), "kept signal section missing: {header}");
+        }
+        // The trimmed sample is compact (the old 50-row `SELECT *` dump was ~63 KB).
+        let sample = section_body(&out, "## Sample Item Row");
+        assert!(
+            sample.len() < 1_000,
+            "Sample Item Row must be a compact shape sample, was {} chars",
+            sample.len()
+        );
+        // It is exactly ONE row, not the old 50-row dump. (Count the array length —
+        // not `"item_uid"` occurrences, since the critical_path struct nests its own.)
+        let rows: Vec<serde_json::Value> =
+            serde_json::from_str(sample.trim()).expect("sample is a JSON array");
+        assert_eq!(rows.len(), 1, "sample must be exactly one row, got {}", rows.len());
+    }
+
+    /// Return the text of `## <name>` up to the next `## ` header (test helper).
+    fn section_body<'a>(overview: &'a str, header: &str) -> &'a str {
+        let start = overview.find(header).expect("section present");
+        let rest = &overview[start..];
+        // Skip this header line, then cut at the next "\n## ".
+        let after_hdr = rest.find('\n').map(|i| start + i).unwrap_or(overview.len());
+        let body = &overview[after_hdr..];
+        match body.find("\n## ") {
+            Some(i) => &body[..i],
+            None => body,
+        }
     }
 
     /// P0(a): the read-only + `enable_external_access(false)` hardening must block
