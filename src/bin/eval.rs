@@ -284,7 +284,9 @@ fn parse_uid(s: &str) -> Option<i64> {
 /// Grade `agent` vs `oracle` by `answer_type`, normalizing both sides.
 fn grade(answer_type: &str, agent: &str, oracle: &str, tolerance: f64) -> Grade {
     let pass = match answer_type {
-        "uid" => {
+        // `uid` = an item identifier, `int` = a count; both grade as exact integer
+        // equality (tolerant of an integer-valued float, e.g. an LLM's "6.0").
+        "uid" | "int" => {
             let a = parse_uid(agent);
             a.is_some() && a == parse_uid(oracle)
         }
@@ -750,6 +752,16 @@ mod tests {
         // divergence localizes the miss
         let g = grade("uid", "999", "48", 0.0);
         assert_eq!(g.divergence.unwrap()["oracle"], "48");
+    }
+
+    #[test]
+    fn test_grade_int() {
+        // `int` (counts) grades exactly like `uid` — exact integer equality.
+        assert!(grade("int", "6", "6", 0.0).pass);
+        assert!(!grade("int", "7", "6", 0.0).pass);
+        assert!(grade("int", "6.0", "6", 0.0).pass); // integer-valued float tolerated
+        assert!(!grade("int", "abc", "6", 0.0).pass);
+        assert!(!grade("int", "abc", "xyz", 0.0).pass); // no None==None false-positive
     }
 
     #[test]
