@@ -1879,13 +1879,63 @@ fn pending_nav_request_id(nav: &crate::ai::PendingNavigation) -> u64 {
     }
 }
 
-/// Sink for draining the SECOND event source (the future in-viewer MCP). It only
-/// records navigation requests — that consumer drives the view, it does not emit
-/// chat events. At most one nav is serviced per frame (single screenshot pipeline).
+/// Apply ONE AI highlight to the live timeline state shared with the embedded
+/// path (`window.config.ai_highlights`): expand the row, dedup-push the overlay,
+/// enable rendering. Returns the matched `EntryID` (for scroll-to). Mirrors the
+/// embedded highlight-action application (kept separate to leave the embedded
+/// sole-driver path byte-for-byte unchanged); used by the MCP source. (V1.3)
+#[cfg(feature = "ai")]
+fn apply_one_highlight(windows: &mut [Window], hl: &crate::ai::Highlight) -> Option<EntryID> {
+    let mut found = None;
+    for window in windows.iter_mut() {
+        let slug_map = build_slug_map(window);
+        if let Some(entry_id) = slug_map.get(&hl.entry_slug) {
+            window.expand_slot(entry_id);
+            let ai_hl = highlight_to_ai(hl);
+            let entry = window.config.ai_highlights.entry(entry_id.clone()).or_default();
+            let dup = entry.iter().any(|h| {
+                h.interval.start.0 == ai_hl.interval.start.0
+                    && h.interval.stop.0 == ai_hl.interval.stop.0
+                    && h.label == ai_hl.label
+            });
+            if !dup {
+                entry.push(ai_hl);
+            }
+            window.config.ai_highlights_enabled = true;
+            if found.is_none() {
+                found = Some(entry_id.clone());
+            }
+        }
+    }
+    found
+}
+
+/// Clear ALL AI highlight overlays from every window. Returns the number of rows
+/// that had highlights (for a truthful ACK). (V1.3)
+#[cfg(feature = "ai")]
+fn clear_all_highlights(windows: &mut [Window]) -> usize {
+    let mut n = 0;
+    for window in windows.iter_mut() {
+        n += window.config.ai_highlights.len();
+        window.config.ai_highlights.clear();
+    }
+    n
+}
+
+/// Sink for draining the SECOND event source (the in-viewer MCP). Records the ONE
+/// request serviced per drain (the viewport token guarantees a single outstanding
+/// request across both sources): a navigation/screenshot (applied via the shared
+/// screenshot pipeline) OR a highlight / clear-highlights (applied + ACKed by the
+/// drain region). It does not emit chat events.
 #[cfg(feature = "ai")]
 #[derive(Default)]
 struct McpDrainSink {
     pending: Option<(crate::ai::PendingNavigation, std::sync::mpsc::Sender<crate::ai::UiCommand>)>,
+    /// (highlight, request_id, reply channel) — applied to the live state + ACKed.
+    pending_highlight:
+        Option<(crate::ai::Highlight, u64, std::sync::mpsc::Sender<crate::ai::UiCommand>)>,
+    /// (request_id, reply channel) for a clear-highlights request.
+    pending_clear: Option<(u64, std::sync::mpsc::Sender<crate::ai::UiCommand>)>,
 }
 
 #[cfg(feature = "ai")]
@@ -1896,6 +1946,31 @@ impl crate::ai::bridge::EventSink for McpDrainSink {
         reply_tx: &std::sync::mpsc::Sender<crate::ai::UiCommand>,
     ) {
         self.pending = Some((nav, reply_tx.clone()));
+    }
+
+    fn on_highlight(
+        &mut self,
+        request_id: u64,
+        entry_slug: String,
+        start_ns: i64,
+        stop_ns: i64,
+        severity: String,
+        label: String,
+        reply_tx: &std::sync::mpsc::Sender<crate::ai::UiCommand>,
+    ) {
+        self.pending_highlight = Some((
+            crate::ai::Highlight { entry_slug, start_ns, stop_ns, severity, label },
+            request_id,
+            reply_tx.clone(),
+        ));
+    }
+
+    fn on_clear_highlights_request(
+        &mut self,
+        request_id: u64,
+        reply_tx: &std::sync::mpsc::Sender<crate::ai::UiCommand>,
+    ) {
+        self.pending_clear = Some((request_id, reply_tx.clone()));
     }
 }
 
@@ -3184,7 +3259,12 @@ impl eframe::App for ProfApp {
         #[cfg(feature = "viewer-mcp")]
         if !cx.viewer_mcp_started {
             if let Some(duckdb_path) = cx.chat_panel.duckdb_path() {
-                if let Err(e) = crate::ai::viewer_mcp::spawn(duckdb_path, 8765) {
+                // V1.3: mint a UiBridge (consumer MCP_CONSUMER_ID) and hand it to the
+                // server so it advertises + routes the 9 VISUAL tools, driving this
+                // live window. The bridge's UI-side ends (mcp_event_rx / mcp_cmd_tx)
+                // are drained + replied to by the per-frame second-source loop below.
+                let bridge = cx.ui_bridge(crate::ai::bridge::MCP_CONSUMER_ID);
+                if let Err(e) = crate::ai::viewer_mcp::spawn(duckdb_path, 8765, bridge) {
                     eprintln!("[legion-viewer] in-viewer MCP server failed to start: {e}");
                 }
                 cx.viewer_mcp_started = true;
@@ -3536,22 +3616,42 @@ impl eframe::App for ProfApp {
             // until a `UiBridge` is minted, so this is dormant for the embedded
             // agent. Only runs when the screenshot pipeline is free this frame.
             if cx.awaiting_screenshot.is_none() && cx.mcp_awaiting_screenshot.is_none() {
-                let drained = {
+                let mut sink = McpDrainSink::default();
+                {
                     let guard = cx.mcp_event_rx.lock().unwrap();
-                    match (guard.as_ref(), cx.mcp_cmd_tx.clone()) {
-                        (Some(rx), Some(reply_tx)) => {
-                            let mut sink = McpDrainSink::default();
-                            crate::ai::bridge::drain_source(rx, &reply_tx, &mut sink);
-                            sink.pending
-                        }
-                        _ => None,
+                    if let (Some(rx), Some(reply_tx)) = (guard.as_ref(), cx.mcp_cmd_tx.clone()) {
+                        crate::ai::bridge::drain_source(rx, &reply_tx, &mut sink);
                     }
-                };
-                if let Some((nav, reply_tx)) = drained {
+                }
+                // Navigation / screenshot: drive the view + capture, reply with the PNG.
+                if let Some((nav, reply_tx)) = sink.pending {
                     let request_id = pending_nav_request_id(&nav);
                     apply_navigation(cx, windows, &nav);
                     ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
                     cx.mcp_awaiting_screenshot = Some((request_id, reply_tx));
+                }
+                // Highlight: apply to the SAME shared state the embedded path writes,
+                // scroll to it, ACK (no screenshot — mirrors the embedded text result).
+                if let Some((hl, request_id, reply_tx)) = sink.pending_highlight {
+                    let entry = apply_one_highlight(windows, &hl);
+                    if let Some(entry_id) = entry {
+                        cx.ai_scroll_to_entry = Some(entry_id);
+                    }
+                    let message = format!(
+                        "Highlight added on {} [{}, {}].",
+                        hl.entry_slug, hl.start_ns, hl.stop_ns
+                    );
+                    let _ = reply_tx.send(crate::ai::UiCommand::Ack { request_id, message });
+                }
+                // Clear highlights: clear the shared state, ACK the count.
+                if let Some((request_id, reply_tx)) = sink.pending_clear {
+                    let n = clear_all_highlights(windows);
+                    let message = if n == 0 {
+                        "No highlights to clear.".to_owned()
+                    } else {
+                        format!("Cleared highlights on {n} row(s).")
+                    };
+                    let _ = reply_tx.send(crate::ai::UiCommand::Ack { request_id, message });
                 }
             }
         }
@@ -3892,4 +3992,77 @@ pub fn start(data_sources: Vec<Box<dyn DeferredDataSource>>) {
             }
         }
     });
+}
+
+/// V1.3: pins that the in-viewer MCP sink (`McpDrainSink`) RECORDS each visual
+/// variant rather than silently no-op'ing (the default `EventSink` methods are
+/// no-ops; an unrecorded request would block `UiBridge::request` to timeout). The
+/// actual UI application (`apply_navigation` / `apply_one_highlight`) needs a live
+/// window and is covered by the end-to-end smoke.
+#[cfg(all(test, feature = "ai"))]
+mod mcp_sink_tests {
+    use super::McpDrainSink;
+    use crate::ai::bridge::apply_agent_event;
+    use crate::ai::AgentEvent;
+    use std::sync::mpsc::channel;
+
+    /// Drive one event into a fresh sink, return the sink.
+    fn drive(ev: AgentEvent) -> McpDrainSink {
+        let (tx, _rx) = channel();
+        let mut sink = McpDrainSink::default();
+        apply_agent_event(&mut sink, ev, &tx);
+        sink
+    }
+
+    #[test]
+    fn test_mcp_sink_records_every_navigation_variant() {
+        let evs = vec![
+            AgentEvent::ScreenshotRequest { request_id: 1 },
+            AgentEvent::ZoomRequest { request_id: 2, start_ns: 0, stop_ns: 10 },
+            AgentEvent::PanRequest { request_id: 3, direction: "left".into(), percent: 25.0 },
+            AgentEvent::ScrollToRequest { request_id: 4, entry_slug: "n0_cpu_c1".into() },
+            AgentEvent::SetViewRequest {
+                request_id: 5,
+                start_ns: 0,
+                stop_ns: 10,
+                entry_slug: None,
+                filter_kinds: None,
+                expand_kinds: None,
+                collapse_kinds: None,
+                vertical_scale: None,
+            },
+            AgentEvent::SearchRequest { request_id: 6, query: "x".into() },
+            AgentEvent::ResetViewRequest { request_id: 7 },
+        ];
+        for ev in evs {
+            let sink = drive(ev);
+            assert!(sink.pending.is_some(), "nav variant must be RECORDED, not a no-op");
+            assert!(sink.pending_highlight.is_none() && sink.pending_clear.is_none());
+        }
+    }
+
+    #[test]
+    fn test_mcp_sink_records_highlight() {
+        let sink = drive(AgentEvent::HighlightRequest {
+            request_id: 9,
+            entry_slug: "n0_cpu_c1".into(),
+            start_ns: 1,
+            stop_ns: 2,
+            severity: "high".into(),
+            label: "blk".into(),
+        });
+        let (hl, rid, _tx) = sink.pending_highlight.expect("highlight must be RECORDED, not a no-op");
+        assert_eq!(rid, 9);
+        assert_eq!(hl.entry_slug, "n0_cpu_c1");
+        assert_eq!((hl.start_ns, hl.stop_ns), (1, 2));
+        assert!(sink.pending.is_none() && sink.pending_clear.is_none());
+    }
+
+    #[test]
+    fn test_mcp_sink_records_clear() {
+        let sink = drive(AgentEvent::ClearHighlightsRequest { request_id: 11 });
+        let (rid, _tx) = sink.pending_clear.expect("clear must be RECORDED, not a no-op");
+        assert_eq!(rid, 11);
+        assert!(sink.pending.is_none() && sink.pending_highlight.is_none());
+    }
 }

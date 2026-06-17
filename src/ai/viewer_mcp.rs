@@ -178,19 +178,35 @@ fn serve_one(stream: &mut TcpStream, ctx: &ServerCtx) -> std::io::Result<()> {
 
 /// Start the in-viewer HTTP MCP server on its OWN thread (never the egui main
 /// thread). Binds 127.0.0.1 only. Returns the bound port. Logs the
-/// `claude mcp add` line. Data tools only — `code_root` is None and no visual
-/// tools are served this phase.
-pub fn spawn(duckdb_path: String, port: u16) -> std::io::Result<u16> {
+/// `claude mcp add` line.
+///
+/// `bridge` is the [`UiBridge`](crate::ai::bridge::UiBridge) minted via
+/// `Context::ui_bridge(MCP_CONSUMER_ID)`; attaching it to the `ServerCtx` (V1.3)
+/// flips the server to advertise + route the 9 VISUAL tools, driving the live
+/// timeline. The single accept loop processes ONE connection at a time, so MCP
+/// `tools/call`s are SERIALIZED — there is no concurrent access to the bridge's
+/// reply channel or the egui screenshot slot. The `ViewportToken` additionally
+/// makes the embedded chat agent and this server mutually exclusive. CONTRACT:
+/// single external driver at a time; do NOT make this loop multi-threaded without
+/// per-connection viewport serialization (all MCP requests share MCP_CONSUMER_ID,
+/// so concurrent same-id claims would be re-entrant, not mutually exclusive).
+pub fn spawn(
+    duckdb_path: String,
+    port: u16,
+    bridge: crate::ai::bridge::UiBridge,
+) -> std::io::Result<u16> {
     let listener = TcpListener::bind(("127.0.0.1", port))?;
     let bound = listener.local_addr()?.port();
-    eprintln!("[legion-viewer] in-viewer MCP (data tools) on http://127.0.0.1:{bound}/mcp");
+    eprintln!("[legion-viewer] in-viewer MCP (data + visual tools) on http://127.0.0.1:{bound}/mcp");
     eprintln!(
         "[legion-viewer] register: claude mcp add --transport http legion-viewer http://127.0.0.1:{bound}/mcp"
     );
     std::thread::Builder::new()
         .name("legion-viewer-mcp".to_owned())
         .spawn(move || {
-            let ctx = ServerCtx::new(duckdb_path, None).with_protocol(HTTP_PROTOCOL_VERSION);
+            let ctx = ServerCtx::new(duckdb_path, None)
+                .with_protocol(HTTP_PROTOCOL_VERSION)
+                .with_ui_bridge(bridge);
             for mut stream in listener.incoming().flatten() {
                 let _ = serve_one(&mut stream, &ctx);
             }
