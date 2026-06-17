@@ -1949,6 +1949,12 @@ pub fn tool_definitions(has_duckdb: bool, has_code: bool, has_wiki: bool) -> Vec
             "description":
                 "Execute a read-only SQL query against the Legion profiling DuckDB database. \
                  Returns up to 50 rows as JSON. Do NOT include a trailing semicolon.\n\n\
+                 RANGE QUERIES — READ FIRST: when the question says \"in the range\", \
+                 \"in the highlighted region\", \"in the selection\", or \"longest / most time \
+                 within a window\", you MUST CLIP each item to the window with \
+                 SUM(LEAST(running.stop, {hi_ns}) - GREATEST(running.start, {lo_ns})) (see example #10) — \
+                 do NOT use the plain time-range FILTER (example #2), and do NOT compare full \
+                 durations: an item mostly OUTSIDE the window must not win.\n\n\
                  TRUNCATION: results are capped at 50 rows. If MORE rows matched, the JSON array \
                  holds the first 50 plus a final marker object {\"_truncated\": true, \"_shown\": 50, ...} — \
                  when you see it, the result is INCOMPLETE; refine with aggregation (GROUP BY/COUNT/SUM) \
@@ -2125,7 +2131,12 @@ pub fn tool_definitions(has_duckdb: bool, has_code: bool, has_wiki: bool) -> Vec
                  (or wiki_search) to find the right page → wiki_read it → follow its `Related` \
                  links to neighbours. Consult the wiki for Legion concepts, pitfalls, and \
                  diagnostic workflows instead of guessing. Pass `section` to list just one \
-                 section (concepts, pitfalls, workflows, glossary, meta, applications).",
+                 section (concepts, pitfalls, workflows, glossary, meta, applications). \
+                 USE THIS WHEN the question asks for a performance CLASSIFICATION \
+                 (compute-/communication-/runtime-bound), a LIFECYCLE phase meaning (waiting vs \
+                 deferred vs ready), a flag/concept/pitfall definition, or a ROOT-CAUSE verdict — \
+                 consult the wiki BEFORE asserting any such claim from prior knowledge. DON'T use \
+                 it for raw per-task numbers (use run_query) or to re-read a page you already read.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -2146,7 +2157,12 @@ pub fn tool_definitions(has_duckdb: bool, has_code: bool, has_wiki: bool) -> Vec
                  intact — follow those to neighbouring pages. Pass `section` to return ONLY one \
                  `## Header` block (e.g. 'Debug signals', 'Failure modes', 'TL;DR'). Long pages \
                  are capped at max_chars (default 12000) with a truncation marker; raise \
-                 max_chars or read a specific section to see more.",
+                 max_chars or read a specific section to see more. \
+                 USE THIS WHEN the question asks for a performance CLASSIFICATION \
+                 (compute-/communication-/runtime-bound), a LIFECYCLE phase meaning (waiting vs \
+                 deferred vs ready), a flag/concept/pitfall definition, or a ROOT-CAUSE verdict — \
+                 consult the wiki BEFORE asserting any such claim from prior knowledge. DON'T use \
+                 it for raw per-task numbers (use run_query) or to re-read a page you already read.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -2174,7 +2190,15 @@ pub fn tool_definitions(has_duckdb: bool, has_code: bool, has_wiki: bool) -> Vec
                  tags. Returns up to `limit` ranked {path, section, tldr, tags, score} matches — \
                  these are PAGES TO READ, not a synthesized answer; wiki_read the top hits. Use \
                  this when you don't know which page covers a topic. Optional `section` and `tag` \
-                 narrow the search.",
+                 narrow the search. \
+                 USE THIS WHEN the question asks for a performance CLASSIFICATION \
+                 (compute-/communication-/runtime-bound), a LIFECYCLE phase meaning (waiting vs \
+                 deferred vs ready), a flag/concept/pitfall definition, or a ROOT-CAUSE verdict — \
+                 consult the wiki BEFORE asserting any such claim from prior knowledge. DON'T use \
+                 it for raw per-task numbers (use run_query) or to re-read a page you already read. \
+                 If the question contains words like 'bound', 'stall', 'overhead', \
+                 'waiting/deferred/ready/lifecycle', 'mapper', or 'critical path' — wiki_search \
+                 that term and wiki_read the top hits before answering.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -3213,6 +3237,52 @@ Trailing prose after the fence.
         assert!(wiki_read(&root, "/etc/hosts", None, None).is_err());
         // A path that escapes via a non-".." but is simply not an enumerated page.
         assert!(wiki_read(&root, "concepts/does-not-exist.md", None, None).is_err());
+    }
+}
+
+/// Lock-in tests for the when-to-use trigger text in tool descriptions (tool-descriptions
+/// task). `tool_definitions` is a pure JSON builder, so these run under {ai} alone — they
+/// guard against a future edit silently dropping the triggers that drive tool selection.
+#[cfg(test)]
+mod tool_description_tests {
+    use super::*;
+
+    /// Description string for a tool, with run_query + wiki tools forced on.
+    fn desc(name: &str) -> String {
+        tool_definitions(true, false, true)
+            .into_iter()
+            .find(|t| t["name"] == name)
+            .and_then(|t| t["description"].as_str().map(str::to_owned))
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn test_run_query_range_trigger_precedes_filter_example() {
+        let d = desc("run_query");
+        assert!(d.contains("in the range"), "run_query missing the range-trigger phrase");
+        assert!(d.contains("LEAST") && d.contains("GREATEST"), "run_query missing the CLIP formula");
+        // The trigger must come BEFORE the plain-filter example #2, or the agent reads
+        // the wrong pattern first.
+        let trig = d.find("in the range").expect("range trigger present");
+        let ex2 = d.find("Tasks in a time range").expect("example #2 present");
+        assert!(trig < ex2, "range trigger must precede example #2 (trig={trig}, ex2={ex2})");
+    }
+
+    #[test]
+    fn test_wiki_descriptions_have_when_to_use() {
+        for name in ["wiki_index", "wiki_read", "wiki_search"] {
+            assert!(
+                desc(name).contains("USE THIS WHEN"),
+                "{name} description missing the WHEN-to-use trigger"
+            );
+        }
+    }
+
+    #[test]
+    fn test_wiki_search_has_keyword_cues() {
+        let d = desc("wiki_search");
+        assert!(d.contains("bound"), "wiki_search missing the 'bound' keyword cue");
+        assert!(d.contains("mapper"), "wiki_search missing the 'mapper' keyword cue");
     }
 }
 
