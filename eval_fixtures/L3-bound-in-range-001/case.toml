@@ -1,6 +1,6 @@
 schema_version = 1
 case_id        = "L3-bound-in-range-001"
-question       = "In the highlighted time range, is this run compute-bound or communication-bound?"
+question       = "In the highlighted time range, is this run computation-bound or communication-bound? Answer with exactly one label: computation-bound or communication-bound."
 level          = "L3"
 duckdb_relpath = "../../../multinoderuns/bg4N2/profcbN2g4b.duckdb"
 sha256         = "93d2066d564706a8ea06015603ead75816075697838ccf13b0d3d3ff54bbb427"

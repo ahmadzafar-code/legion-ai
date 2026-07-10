@@ -379,8 +379,10 @@ pub const DATA_SIZE_EVIDENCE_SQL: &str = "WITH sized AS ( \
 SELECT COUNT(*) AS sized_copies, \
   ROUND(MAX(mib), 1) AS max_mib, \
   ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY mib), 3) AS p50_mib, \
-  ROUND(SUM(mib) / 1024.0, 2) AS total_gib \
+  ROUND(SUM(mib), 2) AS total_mib \
 FROM sized WHERE mib IS NOT NULL";
+// total is in MiB (rendered adaptively as GiB when large): rounding to GiB in
+// SQL destroyed small totals — bg4N2's 6.73 MiB became a useless "0.01 GiB".
 
 /// Companion to [`DATA_SIZE_EVIDENCE_SQL`]: the 3 largest DISTINCT copy sizes
 /// with counts — the per-copy figures a sizing verdict must reconcile against
@@ -1325,9 +1327,16 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
                     } else {
                         let max = row.get("max_mib").and_then(|v| v.as_f64()).unwrap_or(0.0);
                         let p50 = row.get("p50_mib").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                        let gib = row.get("total_gib").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let mib = row.get("total_mib").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        // Adaptive units so small totals stay PRECISE (channel
+                        // volume on bg4N2 is 6.73 MiB — "0.01 GiB" is useless).
+                        let total = if mib >= 1024.0 {
+                            format!("{:.2} GiB", mib / 1024.0)
+                        } else {
+                            format!("{mib:.2} MiB")
+                        };
                         out.push_str(&format!(
-                            "- {n} sized copies | max: {max:.1} MiB | p50: {p50:.3} MiB | total moved: {gib:.2} GiB\n"
+                            "- {n} sized copies (channels only — instances/fills also carry `size`; don't mix) | max: {max:.1} MiB | p50: {p50:.3} MiB | total moved: {total}\n"
                         ));
                         if let Ok(Ok(tops)) = top_sizes
                             .as_ref()
@@ -2112,7 +2121,10 @@ pub fn tool_definitions(has_duckdb: bool, has_code: bool, has_wiki: bool) -> Vec
                       ROUND(AVG(running.duration) / 1e6, 2) AS avg_run_ms\n\
                     FROM items WHERE running IS NOT NULL\n\
                     GROUP BY title ORDER BY avg_wait_ms DESC LIMIT 10\n\n\
-                 7. Channel copy analysis (copies use lifetime + size, NEVER running; dedup by item_uid):\n\
+                 7. Channel copy analysis (copies use lifetime + size, NEVER running; dedup by item_uid).\n\
+                    For copy VOLUME, sum `size` on %chan% rows ONLY — instances/fills on other rows also\n\
+                    carry `size` and must not be mixed into channel totals; `size` is a unit-suffixed\n\
+                    string ('76.000 KiB', '96 B') so parse units before summing:\n\
                     SELECT entry_slug, COUNT(*) AS copy_count,\n\
                       ROUND(SUM(ld) / 1e6, 1) AS total_ms\n\
                     FROM (SELECT item_uid, min(entry_slug) AS entry_slug,\n\
@@ -2641,14 +2653,14 @@ mod tests {
         let rows: Vec<serde_json::Value> = serde_json::from_str(&out).unwrap();
         let row = rows.first().expect("one aggregate row");
         let max_mib = row.get("max_mib").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let total_gib = row.get("total_gib").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let total_mib = row.get("total_mib").and_then(|v| v.as_f64()).unwrap_or(0.0);
         assert!(
             max_mib > 150.0,
             "MiniAero's largest ghost-exchange copies (~175.8 MiB) must surface; got {max_mib}"
         );
         assert!(
-            total_gib > 30.0,
-            "MiniAero moves ~57 GiB total; got {total_gib}"
+            total_mib > 30_000.0,
+            "MiniAero moves ~57 GiB (~58,000 MiB) total; got {total_mib}"
         );
 
         let tops = execute_run_query_raw(&db, DATA_SIZE_TOP_SQL).unwrap();

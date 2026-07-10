@@ -1,6 +1,6 @@
 schema_version = 1
 case_id        = "L3-busiest-proc-kind-002"
-question       = "Which processor kind was busiest over the whole run by total active (running) time — the CPU compute processors, the GPU compute processors, or the runtime's utility processors? Sum how long each kind's tasks were actually running and name the busiest. Ignore IO/system service threads, channels, and host-side GPU proxy processors."
+question       = "Which processor kind was busiest over the whole run by total active (running) time — the CPU compute processors, the GPU compute processors, or the runtime's utility processors? Sum how long each kind's tasks were actually running and name the busiest. Ignore IO/system service threads, channels, and host-side GPU proxy processors. Answer with exactly one label: cpu, gpu, or utility."
 level          = "L3"
 duckdb_relpath = "../../../multinoderuns/bg4N2/profcbN2g4b.duckdb"
 sha256         = "93d2066d564706a8ea06015603ead75816075697838ccf13b0d3d3ff54bbb427"

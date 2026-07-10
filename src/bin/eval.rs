@@ -877,11 +877,90 @@ fn run_eval(
 }
 
 const USAGE: &str =
-    "usage: eval run --case <DIR_or_ID> --harness <mcp|embedded> --seed <N> [--out <path.jsonl>] [--model <id>]";
+    "usage: eval run --case <DIR_or_ID> --harness <mcp|embedded> --seed <N> [--out <path.jsonl>] [--model <id>]\n       eval run-all --harness <mcp|embedded> [--seed <N>] [--out <path.jsonl>] [--model <id>]";
+
+/// List every fixture case id under eval_fixtures/, sorted for determinism.
+fn list_fixture_ids() -> Result<Vec<String>, String> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("eval_fixtures");
+    let mut ids: Vec<String> = std::fs::read_dir(&root)
+        .map_err(|e| format!("read {}: {e}", root.display()))?
+        .flatten()
+        .filter(|e| e.path().join("case.toml").is_file())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    ids.sort();
+    Ok(ids)
+}
+
+/// THE LOCAL EVAL GATE (`eval run-all`): run every fixture on one harness and
+/// fail loud. This is deliberately a LOCAL gate, not CI — the runs hit a live
+/// model (cost + auth + minutes), and a flaky/expensive CI gate is one a solo
+/// maintainer disables within a week. Discipline: run it before shipping any
+/// change to the agent loop, prompts, or tool layer.
+///
+/// Exit: 0 only if at least one case RAN and none graded fail/error. Zero-ran
+/// (everything skipped) is a FAILURE — the old soft-skip trap must not let a
+/// clean checkout pretend it was gated.
+fn run_all(
+    harness: &str,
+    seed: u64,
+    out: Option<&str>,
+    model: Option<String>,
+) -> Result<i32, String> {
+    let ids = list_fixture_ids()?;
+    if ids.is_empty() {
+        return Err("no fixtures found under eval_fixtures/".into());
+    }
+    let (mut pass, mut fail, mut error, mut skip) = (0u32, 0u32, 0u32, 0u32);
+    let n = ids.len();
+    for (i, id) in ids.iter().enumerate() {
+        eprint!("[{:>2}/{n}] {id} ... ", i + 1);
+        match run_eval(id, harness, seed, out, model.clone()) {
+            Ok(Some(row)) => {
+                eprintln!(
+                    "{} ({:.1}s, {} turns{})",
+                    row.graded.to_uppercase(),
+                    row.duration_s,
+                    row.turns_used,
+                    row.error.as_deref().map(|e| {
+                        let e: String = e.chars().take(80).collect();
+                        format!("; {e}")
+                    }).unwrap_or_default()
+                );
+                match row.graded.as_str() {
+                    "pass" => pass += 1,
+                    "fail" => fail += 1,
+                    _ => error += 1,
+                }
+            }
+            Ok(None) => {
+                eprintln!("SKIP (duckdb absent)");
+                skip += 1;
+            }
+            Err(e) => {
+                eprintln!("ERROR ({e})");
+                error += 1;
+            }
+        }
+    }
+    let ran = pass + fail + error;
+    eprintln!("\n== eval gate: {pass} pass / {fail} fail / {error} error / {skip} skip (of {n}) ==");
+    if ran == 0 {
+        eprintln!("GATE FAIL: zero cases actually ran — fixtures missing? (soft-skip is not a pass)");
+        return Ok(1);
+    }
+    if fail > 0 || error > 0 {
+        eprintln!("GATE FAIL");
+        return Ok(1);
+    }
+    eprintln!("GATE PASS");
+    Ok(0)
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) != Some("run") {
+    let mode = args.first().map(String::as_str);
+    if mode != Some("run") && mode != Some("run-all") {
         eprintln!("{USAGE}");
         std::process::exit(2);
     }
@@ -900,11 +979,22 @@ fn main() {
         }
     }
 
+    let harness = harness.unwrap_or_else(|| "mcp".to_string());
+
+    if mode == Some("run-all") {
+        match run_all(&harness, seed, out.as_deref(), model) {
+            Ok(code) => std::process::exit(code),
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(2);
+            }
+        }
+    }
+
     let Some(case) = case else {
         eprintln!("error: --case is required\n{USAGE}");
         std::process::exit(2);
     };
-    let harness = harness.unwrap_or_else(|| "mcp".to_string());
 
     match run_eval(&case, &harness, seed, out.as_deref(), model) {
         Ok(Some(_row)) => {}
