@@ -75,6 +75,10 @@ pub trait EventSink {
     /// token). Default no-op; the live sink (`McpDrainSink`) overrides it.
     fn on_get_selection(&mut self, _request_id: u64, _reply_tx: &Sender<UiCommand>) {}
 
+    /// Backend B (P4): interim assistant text streamed mid-turn. Default no-op —
+    /// only the chat panel renders it (the MCP drain sink has no transcript).
+    fn on_interim_text(&mut self, _text: String) {}
+
     fn on_complete(&mut self, _response: AgentResponse) {}
     fn on_error(&mut self, _error: String) {}
 }
@@ -146,6 +150,7 @@ pub fn apply_agent_event<S: EventSink>(sink: &mut S, event: AgentEvent, reply_tx
             sink.on_clear_highlights_request(request_id, reply_tx)
         }
         AgentEvent::GetSelection { request_id } => sink.on_get_selection(request_id, reply_tx),
+        AgentEvent::InterimText { text } => sink.on_interim_text(text),
         AgentEvent::Complete(response) => sink.on_complete(response),
         AgentEvent::Error(error) => sink.on_error(error),
     }

@@ -118,20 +118,42 @@ fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-/// Kill seam: on Windows, `child.kill()` does not kill the process TREE — the
-/// npm `.cmd` shim can orphan the real node process. TODO(P5): job-object /
-/// `taskkill /T /F` tree-kill. Unix `kill()` is sufficient (claude does not
-/// daemonize).
+/// Kill seam. Unix `kill()` suffices (claude does not daemonize). On Windows,
+/// `child.kill()` alone would kill the npm `.cmd` shim and ORPHAN the real node
+/// process, so kill the whole tree via `taskkill /T /F` first (P5; written per
+/// the plan, not yet exercised on a Windows box — the seam keeps it isolated).
 fn kill_child(child: &mut Child) {
     #[cfg(windows)]
     {
-        // TODO(P5): tree-kill via job object or `taskkill /T /F /PID`.
-        let _ = child.kill();
+        let _ = std::process::Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &child.id().to_string()])
+            .output();
+        let _ = child.kill(); // belt & braces; also settles the handle state
     }
     #[cfg(not(windows))]
     {
         let _ = child.kill();
     }
+}
+
+/// Preflight (P3/P5): is `claude` on PATH, and which version? Returns the
+/// version string for the "Started…" message. Deliberately does NOT probe auth
+/// (that would cost a model call) — a missing login surfaces on the first turn
+/// as the actionable 401 message from the parser.
+pub fn preflight_claude() -> Result<String, String> {
+    let out = Command::new("claude").arg("--version").output().map_err(|_| {
+        "Claude Code (`claude`) was not found on PATH. Install it and log in \
+         (`claude login`), or switch the backend to Native in ⚙ Settings."
+            .to_owned()
+    })?;
+    if !out.status.success() {
+        return Err(format!(
+            "`claude --version` failed (status {}). Reinstall Claude Code or switch \
+             the backend to Native.",
+            out.status
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
 }
 
 /// A persistent `claude` subprocess driving the in-viewer MCP server — the
@@ -277,7 +299,7 @@ impl SubprocessAgent {
             .name("cc-backend-stdout".into())
             .spawn(move || {
                 let mut reader = BufReader::new(stdout);
-                let mut names: HashMap<String, String> = HashMap::new();
+                let mut st = MapState::default();
                 let mut buf: Vec<u8> = Vec::new();
                 loop {
                     buf.clear();
@@ -313,7 +335,7 @@ impl SubprocessAgent {
                     if !buf.is_empty() {
                         activity.store(now_secs(), Ordering::Relaxed);
                         let line = String::from_utf8_lossy(&buf);
-                        for ev in map_line(&line, &mut names) {
+                        for ev in map_line(&line, &mut st) {
                             let terminal =
                                 matches!(ev, AgentEvent::Complete(_) | AgentEvent::Error(_));
                             let _ = event_tx.send(ev);
@@ -394,9 +416,30 @@ impl SubprocessAgent {
                           exited — check the transcript for an error)".to_string())
     }
 
+    /// BEST-EFFORT turn interrupt (P5): a stream-json `control_request` with
+    /// subtype `interrupt` on the child's stdin — the shape Claude Code's own
+    /// SDK uses. Unproven across all CLI versions (the P0 gate exercised user
+    /// turns only): if the CLI ignores it, the turn simply continues, and
+    /// `hard_stop` / "↺ New session" remains the guaranteed cancel.
+    pub fn interrupt_turn(&self) -> Result<(), String> {
+        let line = json!({
+            "type": "control_request",
+            "request_id": format!("interrupt-{}", now_secs()),
+            "request": { "subtype": "interrupt" }
+        })
+        .to_string();
+        self.stdin_tx
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or("Claude Code backend is shutting down")?
+            .send(line)
+            .map_err(|_| "Claude Code subprocess is no longer accepting input".to_string())
+    }
+
     /// HARD STOP: kill the child now (used by "New session" / backend switch).
-    /// Distinct from a turn-level interrupt (TODO(P3): stream-json interrupt
-    /// control message) and NEVER conflated with Drop — Drop also reaps+joins.
+    /// Distinct from the best-effort `interrupt_turn` above and NEVER conflated
+    /// with Drop — Drop also reaps+joins.
     pub fn hard_stop(&self) {
         self.stopping.store(true, Ordering::Relaxed);
         *self.stdin_tx.lock().unwrap() = None; // EOF first
@@ -442,16 +485,27 @@ fn input_preview(input: &Value) -> String {
     p
 }
 
-/// Map ONE stream-json stdout line to zero or more [`AgentEvent`]s (v1 renders
-/// on the `result` message only; interim assistant TEXT is dropped by design —
-/// the plan's P2b scope). `names` correlates `tool_use` ids to names so the
-/// matching `tool_result` can be labeled.
+/// Parser state threaded across stdout lines (one per child): `names`
+/// correlates `tool_use` ids to names so the matching `tool_result` can be
+/// labeled; `last_text` deduplicates the final `result` text against the last
+/// streamed [`AgentEvent::InterimText`] (claude's `result` field repeats the
+/// final assistant message — without dedup the answer would render twice).
+#[derive(Default)]
+struct MapState {
+    names: HashMap<String, String>,
+    last_text: Option<String>,
+}
+
+/// Map ONE stream-json stdout line to zero or more [`AgentEvent`]s. Assistant
+/// TEXT blocks stream as `InterimText` (P4 — narration renders live between
+/// tool calls); the terminal `result` becomes `Complete`, with its text
+/// emptied when it merely repeats the last interim message.
 ///
 /// Message shapes are the ones OBSERVED live in the P0 gate (`bin/cc_spike.rs`
 /// prints each): `system(init)`, `rate_limit_event`, `assistant` (tool_use /
 /// text blocks), `user` (tool_result blocks), `result` (with `is_error`,
 /// `api_error_status`, `result`, `num_turns`), `control_*`.
-fn map_line(line: &str, names: &mut HashMap<String, String>) -> Vec<AgentEvent> {
+fn map_line(line: &str, st: &mut MapState) -> Vec<AgentEvent> {
     let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
         return Vec::new(); // unparseable / truncated-by-cap line: skip, never panic
     };
@@ -460,15 +514,26 @@ fn map_line(line: &str, names: &mut HashMap<String, String>) -> Vec<AgentEvent> 
         Some("assistant") => {
             if let Some(blocks) = v.pointer("/message/content").and_then(Value::as_array) {
                 for b in blocks {
-                    if b.get("type").and_then(Value::as_str) == Some("tool_use") {
-                        let raw = b.get("name").and_then(Value::as_str).unwrap_or("");
-                        let id = b.get("id").and_then(Value::as_str).unwrap_or("");
-                        let name = display_tool_name(raw);
-                        names.insert(id.to_string(), name.clone());
-                        out.push(AgentEvent::ToolCall {
-                            name,
-                            purpose: input_preview(b.get("input").unwrap_or(&Value::Null)),
-                        });
+                    match b.get("type").and_then(Value::as_str) {
+                        Some("tool_use") => {
+                            let raw = b.get("name").and_then(Value::as_str).unwrap_or("");
+                            let id = b.get("id").and_then(Value::as_str).unwrap_or("");
+                            let name = display_tool_name(raw);
+                            st.names.insert(id.to_string(), name.clone());
+                            out.push(AgentEvent::ToolCall {
+                                name,
+                                purpose: input_preview(b.get("input").unwrap_or(&Value::Null)),
+                            });
+                        }
+                        Some("text") => {
+                            if let Some(t) = b.get("text").and_then(Value::as_str) {
+                                if !t.trim().is_empty() {
+                                    st.last_text = Some(t.to_owned());
+                                    out.push(AgentEvent::InterimText { text: t.to_owned() });
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -478,7 +543,7 @@ fn map_line(line: &str, names: &mut HashMap<String, String>) -> Vec<AgentEvent> 
                 for b in blocks {
                     if b.get("type").and_then(Value::as_str) == Some("tool_result") {
                         let id = b.get("tool_use_id").and_then(Value::as_str).unwrap_or("");
-                        let name = names.remove(id).unwrap_or_else(|| "tool".into());
+                        let name = st.names.remove(id).unwrap_or_else(|| "tool".into());
                         let full = b
                             .get("content")
                             .map(|c| c.to_string())
@@ -509,12 +574,21 @@ fn map_line(line: &str, names: &mut HashMap<String, String>) -> Vec<AgentEvent> 
                     text
                 }));
             } else {
+                // Dedup: `result` repeats the final assistant text, which already
+                // streamed as InterimText — empty it so the panel doesn't render
+                // the answer twice (the sink skips empty Complete bubbles).
+                let final_text = if st.last_text.as_deref() == Some(text.as_str()) {
+                    String::new()
+                } else {
+                    text
+                };
                 out.push(AgentEvent::Complete(AgentResponse {
-                    text,
+                    text: final_text,
                     highlights: Vec::new(), // Backend B highlights land LIVE via the MCP bridge
                     queries_executed: 0,
                     turns_used: v.get("num_turns").and_then(Value::as_u64).unwrap_or(0) as usize,
                 }));
+                st.last_text = None; // fresh turn, fresh dedup state
             }
         }
         // system(init), rate_limit_event, control_request/control_cancel_request
@@ -561,7 +635,7 @@ mod tests {
 
     #[test]
     fn map_assistant_tool_use_emits_toolcall_and_remembers_name() {
-        let mut names = HashMap::new();
+        let mut names = MapState::default();
         let line = r#"{"type":"assistant","message":{"model":"claude-opus-4-8","id":"msg_x","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_01A","name":"mcp__legion-viewer__overview","input":{}}]},"session_id":"s"}"#;
         let evs = map_line(line, &mut names);
         assert_eq!(evs.len(), 1);
@@ -569,13 +643,13 @@ mod tests {
             AgentEvent::ToolCall { name, .. } => assert_eq!(name, "overview"),
             other => panic!("expected ToolCall, got {other:?}"),
         }
-        assert_eq!(names.get("toolu_01A").map(String::as_str), Some("overview"));
+        assert_eq!(names.names.get("toolu_01A").map(String::as_str), Some("overview"));
     }
 
     #[test]
     fn map_tool_result_correlates_name_and_summarizes() {
-        let mut names = HashMap::new();
-        names.insert("toolu_01A".to_string(), "overview".to_string());
+        let mut names = MapState::default();
+        names.names.insert("toolu_01A".to_string(), "overview".to_string());
         let line = r####"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01A","content":[{"type":"text","text":"## Schema\nentries: 42"}]}]},"session_id":"s"}"####;
         let evs = map_line(line, &mut names);
         assert_eq!(evs.len(), 1);
@@ -587,12 +661,12 @@ mod tests {
             }
             other => panic!("expected ToolResult, got {other:?}"),
         }
-        assert!(names.is_empty(), "consumed the id→name entry");
+        assert!(names.names.is_empty(), "consumed the id→name entry");
     }
 
     #[test]
     fn map_result_success_is_complete_with_turns() {
-        let mut names = HashMap::new();
+        let mut names = MapState::default();
         let line = r#"{"type":"result","subtype":"success","is_error":false,"api_error_status":null,"duration_ms":4704,"num_turns":3,"result":"DONE","stop_reason":"end_turn","session_id":"s"}"#;
         let evs = map_line(line, &mut names);
         assert_eq!(evs.len(), 1);
@@ -608,7 +682,7 @@ mod tests {
 
     #[test]
     fn map_result_401_is_actionable_error() {
-        let mut names = HashMap::new();
+        let mut names = MapState::default();
         let line = r#"{"type":"result","subtype":"success","is_error":true,"api_error_status":401,"num_turns":1,"result":"Failed to authenticate. API Error: 401 Invalid authentication credentials","session_id":"s"}"#;
         let evs = map_line(line, &mut names);
         match &evs[0] {
@@ -619,7 +693,7 @@ mod tests {
 
     #[test]
     fn map_noise_lines_emit_nothing() {
-        let mut names = HashMap::new();
+        let mut names = MapState::default();
         for line in [
             r#"{"type":"system","subtype":"init","tools":["Bash"],"session_id":"s"}"#,
             r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"},"session_id":"s"}"#,
@@ -629,6 +703,38 @@ mod tests {
             "", // truncated-by-cap lines parse to nothing
         ] {
             assert!(map_line(line, &mut names).is_empty(), "line should be silent: {line}");
+        }
+    }
+
+    /// P4 streaming: assistant TEXT blocks stream as InterimText, and the
+    /// terminal `result` (which repeats the final assistant text) arrives as a
+    /// Complete with EMPTY text — no double-rendered answer. A result that does
+    /// NOT match the last interim keeps its text. Dedup state resets per turn.
+    #[test]
+    fn map_interim_text_streams_and_result_dedups() {
+        let mut st = MapState::default();
+        // narration + tool call in one assistant message
+        let narr = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Let me check the overview."},{"type":"tool_use","id":"t1","name":"mcp__legion-viewer__overview","input":{}}]},"session_id":"s"}"#;
+        let evs = map_line(narr, &mut st);
+        assert_eq!(evs.len(), 2);
+        assert!(matches!(&evs[0], AgentEvent::InterimText { text } if text.contains("overview")));
+        assert!(matches!(&evs[1], AgentEvent::ToolCall { .. }));
+
+        // final assistant message (text only), then result repeating it
+        let fin = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"The run is communication-bound."}]},"session_id":"s"}"#;
+        assert_eq!(map_line(fin, &mut st).len(), 1);
+        let result = r#"{"type":"result","subtype":"success","is_error":false,"num_turns":2,"result":"The run is communication-bound.","session_id":"s"}"#;
+        let evs = map_line(result, &mut st);
+        match &evs[0] {
+            AgentEvent::Complete(r) => assert!(r.text.is_empty(), "duplicate final text must be emptied"),
+            other => panic!("expected Complete, got {other:?}"),
+        }
+
+        // NEXT turn: a result with no preceding interim keeps its text
+        let result2 = r#"{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"fresh answer","session_id":"s"}"#;
+        match &map_line(result2, &mut st)[0] {
+            AgentEvent::Complete(r) => assert_eq!(r.text, "fresh answer"),
+            other => panic!("expected Complete, got {other:?}"),
         }
     }
 
@@ -665,12 +771,23 @@ mod tests {
             .send_turn("Call the overview tool exactly once, then reply with exactly: DONE")
             .expect("send");
         let deadline = std::time::Instant::now() + Duration::from_secs(180);
-        let (mut saw_tool, mut saw_complete) = (false, false);
+        let (mut saw_tool, mut saw_complete, mut saw_done) = (false, false, false);
         while std::time::Instant::now() < deadline {
             match rx.recv_timeout(Duration::from_secs(5)) {
                 Ok(AgentEvent::ToolCall { name, .. }) if name == "overview" => saw_tool = true,
+                // P4: the final text streams as InterimText; Complete's text is
+                // deduplicated to empty when it repeats the last interim.
+                Ok(AgentEvent::InterimText { text }) => {
+                    if text.contains("DONE") {
+                        saw_done = true;
+                    }
+                }
                 Ok(AgentEvent::Complete(r)) => {
-                    assert!(r.text.contains("DONE"), "final text: {}", r.text);
+                    assert!(
+                        saw_done || r.text.contains("DONE"),
+                        "DONE must arrive via interim stream or final text; final: {}",
+                        r.text
+                    );
                     saw_complete = true;
                     break;
                 }

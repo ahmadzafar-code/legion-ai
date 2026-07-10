@@ -130,6 +130,11 @@ pub enum AgentEvent {
     /// WITHOUT claiming the viewport token. The embedded agent reads its own
     /// selection state directly (`build_selection_preamble`) and never emits this.
     GetSelection { request_id: u64 },
+    /// Backend B (P4): an INTERIM assistant text message from the streamed
+    /// transcript — narration between tool calls, rendered progressively so the
+    /// chat feels alive during long runs. The final turn text still arrives via
+    /// `Complete` (deduplicated by the emitter). The native agent never emits this.
+    InterimText { text: String },
     /// Agentic loop finished successfully.
     Complete(AgentResponse),
     /// Agentic loop failed with an error.

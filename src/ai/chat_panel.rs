@@ -870,6 +870,20 @@ impl ChatPanel {
         self.mcp_endpoint = endpoint;
     }
 
+    /// End-of-turn receiver cleanup — CHANNEL-LIFETIME critical (see
+    /// [`ChatBackendKind`]): Native uses per-turn channels, so dropping the
+    /// receiver after Complete/Error is correct. Backend B's channel is
+    /// once-at-spawn and must OUTLIVE turns — dropping it would orphan the
+    /// persistent child's event stream (turn 2 would never render). Keep the
+    /// receiver installed while a ClaudeCode child is alive.
+    fn end_of_turn_channel_cleanup(&mut self) {
+        #[cfg(feature = "viewer-mcp")]
+        if self.cc_agent.lock().unwrap().is_some() {
+            return;
+        }
+        *self.event_rx.lock().unwrap() = None;
+    }
+
     /// Derive the DB tool status from `duckdb_path_buffer`.
     ///
     /// Accepts any existing non-directory file. DuckDB files may have various
@@ -1011,8 +1025,19 @@ impl ChatPanel {
                 return;
             };
 
-            // Lazy once-per-session spawn (once-at-spawn channels).
+            // Lazy once-per-session spawn (once-at-spawn channels), with a
+            // preflight so "claude isn't installed" is a friendly message, not a
+            // spawn error. Auth is deliberately NOT probed (it would cost a model
+            // call) — a missing `claude login` surfaces on the first turn as the
+            // parser's actionable 401 message.
             if self.cc_agent.lock().unwrap().is_none() {
+                let version = match crate::ai::claude_code::preflight_claude() {
+                    Ok(v) => v,
+                    Err(e) => {
+                        self.add_message(ChatMessageKind::System, format!("⚠ {e}"));
+                        return;
+                    }
+                };
                 let (event_tx, event_rx) = mpsc::channel::<AgentEvent>();
                 match crate::ai::claude_code::SubprocessAgent::spawn(
                     port,
@@ -1026,8 +1051,10 @@ impl ChatPanel {
                         self.add_message(
                             ChatMessageKind::System,
                             format!(
-                                "Started your Claude Code against the profiler's MCP \
-                                 server (port {port}, bearer-token protected)."
+                                "Started your Claude Code ({version}) against the \
+                                 profiler's MCP server (port {port}, bearer-token \
+                                 protected). One-time setup if the first turn fails \
+                                 to authenticate: run `claude login` in a terminal."
                             ),
                         );
                     }
@@ -1489,9 +1516,49 @@ impl ChatPanel {
                     self.settings_open = !self.settings_open;
                 }
                 // New session button
+                // Best-effort turn interrupt (Backend B only): a stream-json
+                // interrupt control on the child's stdin. If the CLI ignores it
+                // the turn just continues — ↺ remains the guaranteed cancel.
+                #[cfg(feature = "viewer-mcp")]
+                {
+                    let cc_busy =
+                        self.pending_request && self.cc_agent.lock().unwrap().is_some();
+                    if ui
+                        .add_enabled(cc_busy, egui::Button::new("⏹"))
+                        .on_hover_text("Interrupt the current turn (best-effort)")
+                        .clicked()
+                    {
+                        let sent = self
+                            .cc_agent
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .map(|a| a.interrupt_turn());
+                        self.add_message(
+                            ChatMessageKind::System,
+                            match sent {
+                                Some(Ok(())) => {
+                                    "Interrupt sent (best-effort — ↺ force-stops if ignored)."
+                                        .to_owned()
+                                }
+                                Some(Err(e)) => format!("⚠ interrupt failed: {e}"),
+                                None => "⚠ no Claude Code session to interrupt".to_owned(),
+                            },
+                        );
+                    }
+                }
+                // ↺ is the guaranteed cancel for Backend B, so it stays clickable
+                // MID-turn while a Claude Code child exists (hard_stop kills the
+                // child; the reader sees EOF). Native keeps the original
+                // disabled-while-pending behavior (its thread can't be stopped).
+                #[cfg(feature = "viewer-mcp")]
+                let can_reset =
+                    !self.pending_request || self.cc_agent.lock().unwrap().is_some();
+                #[cfg(not(feature = "viewer-mcp"))]
+                let can_reset = !self.pending_request;
                 if ui
-                    .add_enabled(!self.pending_request, egui::Button::new("↺"))
-                    .on_hover_text("New session")
+                    .add_enabled(can_reset, egui::Button::new("↺"))
+                    .on_hover_text("New session (force-stops a running Claude Code turn)")
                     .clicked()
                 {
                     *self.agent_session.lock().unwrap() = None;
@@ -1501,6 +1568,7 @@ impl ChatPanel {
                     if let Some(agent) = self.cc_agent.lock().unwrap().take() {
                         agent.hard_stop();
                         *self.event_rx.lock().unwrap() = None;
+                        self.pending_request = false;
                     }
                     self.add_message(ChatMessageKind::System, "Session cleared.");
                 }
@@ -1662,8 +1730,9 @@ impl ChatPanel {
                             )
                             .on_hover_text(
                                 "Drives your own `claude` as a subprocess over the \
-                                 in-viewer MCP server. No API key — uses your Claude \
-                                 Code login. (Subprocess driver lands in P2.)",
+                                 in-viewer MCP server. No API key — requires Claude \
+                                 Code installed AND logged in (one-time `claude login` \
+                                 in a terminal).",
                             );
                         });
                     });
@@ -2966,6 +3035,15 @@ impl crate::ai::bridge::EventSink for ChatPanel {
         self.add_message(ChatMessageKind::System, "Cleared timeline highlights.");
     }
 
+    /// Backend B (P4): interim assistant narration streamed mid-turn — rendered
+    /// immediately as an Analysis bubble so long runs feel alive. The emitter
+    /// (claude_code::map_line) deduplicates the FINAL text against `Complete`.
+    fn on_interim_text(&mut self, text: String) {
+        if !text.trim().is_empty() {
+            self.add_message(ChatMessageKind::Analysis, text);
+        }
+    }
+
     fn on_complete(&mut self, response: AgentResponse) {
         let display = if response.text.len() > 10_000 {
             format!(
@@ -2989,31 +3067,40 @@ impl crate::ai::bridge::EventSink for ChatPanel {
             });
         }
 
-        // Embed highlights in the Analysis message as clickable chips.
-        self.messages.push(ChatMessage {
-            kind: ChatMessageKind::Analysis,
-            text: display,
-            highlights,
-            expandable_content: None,
-        });
+        // Embed highlights in the Analysis message as clickable chips. Backend B
+        // deduplicates the final text against its streamed interim messages, so
+        // an empty text here means "already rendered" — skip the empty bubble.
+        if !display.trim().is_empty() || !highlights.is_empty() {
+            self.messages.push(ChatMessage {
+                kind: ChatMessageKind::Analysis,
+                text: display,
+                highlights,
+                expandable_content: None,
+            });
+        }
         self.scroll_to_bottom = true;
 
-        self.add_message(
-            ChatMessageKind::System,
-            format!(
-                "Done. {} quer{} executed.",
-                response.queries_executed,
-                if response.queries_executed == 1 { "y" } else { "ies" }
-            ),
-        );
+        if response.queries_executed > 0 {
+            self.add_message(
+                ChatMessageKind::System,
+                format!(
+                    "Done. {} quer{} executed.",
+                    response.queries_executed,
+                    if response.queries_executed == 1 { "y" } else { "ies" }
+                ),
+            );
+        } else {
+            // Backend B: queries run inside the MCP server, uncounted here.
+            self.add_message(ChatMessageKind::System, "Done.");
+        }
         self.pending_request = false;
-        *self.event_rx.lock().unwrap() = None;
+        self.end_of_turn_channel_cleanup();
     }
 
     fn on_error(&mut self, error: String) {
         self.add_message(ChatMessageKind::System, format!("Error: {error}"));
         self.pending_request = false;
-        *self.event_rx.lock().unwrap() = None;
+        self.end_of_turn_channel_cleanup();
     }
 }
 
