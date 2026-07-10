@@ -450,7 +450,7 @@ ORDER BY w.depth"
 /// The path must be relative and within `code_root` — path traversal (`..`) is rejected.
 pub fn execute_read_code(code_root: &str, path: &str) -> Result<String, String> {
     if code_root.is_empty() {
-        return Err("Code path not configured. Set it in the Settings panel.".into());
+        return Err("Code path not configured. Set it in the 🔧 Tools popover (or launch with --code).".into());
     }
 
     if path.contains("..") || path.starts_with('/') || path.starts_with('\\') {
@@ -458,6 +458,19 @@ pub fn execute_read_code(code_root: &str, path: &str) -> Result<String, String> 
     }
 
     let full_path = Path::new(code_root).join(path);
+    // S3b: reject symlink/canonicalization escapes. The `..` string check above does
+    // NOT stop a symlink INSIDE the root pointing at, e.g., ~/.ssh/id_rsa; the resolved
+    // target must stay under the resolved root. Only enforced when the target exists —
+    // a not-found path falls through to the helpful "Available files" tree below.
+    if let Ok(canon_target) = full_path.canonicalize() {
+        if let Ok(canon_root) = Path::new(code_root).canonicalize() {
+            if !canon_target.starts_with(&canon_root) {
+                return Err(format!(
+                    "Invalid path: '{path}' resolves outside the configured code root."
+                ));
+            }
+        }
+    }
     std::fs::read_to_string(&full_path).map_err(|e| {
         let mut msg = format!("Cannot read '{}': {}", full_path.display(), e);
         // On file-not-found, show the recursive file tree so the agent can self-correct.

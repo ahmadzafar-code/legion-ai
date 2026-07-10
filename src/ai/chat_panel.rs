@@ -1049,10 +1049,15 @@ impl ChatPanel {
                     }
                 };
                 let (event_tx, event_rx) = mpsc::channel::<AgentEvent>();
+                // Grant the harness's own Read/Glob/Grep access to the profiled app's
+                // source (via --add-dir), so Backend B can read code with the full
+                // harness rather than only the MCP read_code tool.
+                let code_root = self.code_path();
                 match crate::ai::claude_code::SubprocessAgent::spawn(
                     port,
                     &token,
                     &self.model_selection,
+                    code_root.as_deref(),
                     event_tx,
                 ) {
                     Ok(agent) => {
