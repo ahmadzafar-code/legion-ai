@@ -320,22 +320,17 @@ impl Default for ChatPanel {
 }
 
 impl ChatPanel {
-    /// Create a new chat panel with a welcome message.
+    /// Create a new chat panel. The transcript starts EMPTY — the centered
+    /// empty-state screen (headline + suggestion cards) is the welcome.
     pub fn new() -> Self {
         Self {
             visible: false,
-            messages: vec![ChatMessage {
-                kind: ChatMessageKind::System,
-                text: "Ask me anything about this profile, or try a suggestion below."
-                    .into(),
-                highlights: vec![],
-                expandable_content: None,
-            }],
+            messages: Vec::new(),
             input_buffer: String::new(),
             selection: None,
             selected_items: Vec::new(),
             scroll_to_bottom: false,
-            settings_open: true,
+            settings_open: false,
             attachments: Vec::new(),
             duckdb_path_buffer: String::new(),
             code_path_buffer: String::new(),
@@ -1167,7 +1162,8 @@ impl ChatPanel {
                     if let Some(broker) = &self.approval_broker {
                         broker.reset();
                     }
-                    self.add_message(ChatMessageKind::System, "Session cleared.");
+                    // Back to the welcome screen (empty transcript = empty state).
+                    self.messages.clear();
                 }
             });
         });
@@ -1363,8 +1359,88 @@ impl ChatPanel {
             });
     }
 
+    /// The empty-state screen (Claude-Code-style): centered headline + two
+    /// suggestion cards. Shown instead of the transcript until the first
+    /// message exists; clicking a card submits its prompt.
+    fn ui_empty_state(&mut self, ui: &mut egui::Ui) {
+        let mut submit: Option<&str> = None;
+        // Push the headline into the upper-middle of the free space.
+        ui.add_space((ui.available_height() * 0.28).max(24.0));
+        ui.vertical_centered(|ui| {
+            ui.label(
+                egui::RichText::new("What should we work on?")
+                    .size(26.0)
+                    .color(egui::Color32::from_rgb(40, 40, 40)),
+            );
+        });
+        ui.add_space(28.0);
+
+        let card = |ui: &mut egui::Ui, title: &str| -> bool {
+            let resp = egui::Frame::none()
+                .fill(egui::Color32::WHITE)
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(225, 225, 225)))
+                .rounding(12.0)
+                .inner_margin(egui::Margin::same(14.0))
+                .show(ui, |ui: &mut egui::Ui| {
+                    ui.set_width(ui.available_width());
+                    ui.set_min_height(64.0);
+                    ui.with_layout(
+                        egui::Layout::bottom_up(egui::Align::LEFT),
+                        |ui| {
+                            ui.label(
+                                egui::RichText::new(title)
+                                    .size(14.5)
+                                    .color(egui::Color32::from_rgb(50, 50, 50)),
+                            );
+                        },
+                    );
+                })
+                .response;
+            let resp = resp.interact(egui::Sense::click());
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            resp.clicked()
+        };
+
+        // Two side-by-side cards with a small gutter, inset from the walls.
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            let gutter = 10.0;
+            let w = ((ui.available_width() - gutter - 8.0) / 2.0).max(120.0);
+            ui.spacing_mut().item_spacing.x = gutter;
+            ui.scope(|ui| {
+                ui.set_width(w);
+                if card(ui, "Explore this profile") {
+                    submit = Some(
+                        "Give me an overview of this profile — what ran, where the time \
+                         went, and anything unusual.",
+                    );
+                }
+            });
+            ui.scope(|ui| {
+                ui.set_width(w);
+                if card(ui, "Find the bottleneck") {
+                    submit = Some(
+                        "Diagnose the main performance bottleneck in this run and \
+                         highlight the evidence on the timeline.",
+                    );
+                }
+            });
+        });
+
+        if let Some(prompt) = submit {
+            self.submit_input(prompt.to_owned());
+        }
+    }
+
     /// Zone 3: Message transcript scroll area.
     fn ui_transcript(&mut self, ui: &mut egui::Ui) {
+        // Empty session -> the welcome screen, not an empty scroll area.
+        if self.messages.is_empty() && !self.pending_request {
+            self.ui_empty_state(ui);
+            return;
+        }
         // Spinner while waiting
         if self.pending_request {
             ui.horizontal(|ui| {
@@ -1689,9 +1765,15 @@ impl ChatPanel {
                             if ui
                                 .add_enabled(
                                     enabled && !self.input_buffer.trim().is_empty(),
-                                    egui::Button::new("⏎")
-                                        .rounding(20.0)
-                                        .min_size(egui::vec2(32.0, 32.0)),
+                                    egui::Button::new(
+                                        egui::RichText::new("↑")
+                                            .size(16.0)
+                                            .strong()
+                                            .color(egui::Color32::WHITE),
+                                    )
+                                    .fill(egui::Color32::from_rgb(120, 120, 120))
+                                    .rounding(16.0)
+                                    .min_size(egui::vec2(32.0, 32.0)),
                                 )
                                 .clicked()
                             {
