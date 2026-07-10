@@ -126,6 +126,15 @@ name = "eval"
 path = "src/bin/eval.rs"
 required-features = ["ai", "duckdb"]
 
+# P0 spike (throwaway gate) for the "Backend B" embedded-chat plan: drives a persistent
+# stream-json `claude` subprocess against the in-viewer HTTP MCP server to prove
+# persistent multi-turn + no-human tool approval + built-in lockdown. required-features
+# = ["viewer-mcp"] so it's skipped for {}, {ai}, {duckdb}, {ai,duckdb} — all nominal combos.
+[[bin]]
+name = "cc_spike"
+path = "src/bin/cc_spike.rs"
+required-features = ["viewer-mcp"]
+
 [profile.release]
 opt-level = 2 # fast and small wasm
 
