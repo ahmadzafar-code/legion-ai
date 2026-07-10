@@ -166,8 +166,8 @@ pub struct ChatPanel {
     /// Task (bar) selection surfaced to the agent as structured context.
     selected_items: Vec<SelectedItem>,
     scroll_to_bottom: bool,
-    /// Whether the settings drawer is expanded.
-    settings_open: bool,
+    /// The API-key entry popup (opened from the backend pill / header warning).
+    api_key_popup_open: bool,
 
     // ── ＋-menu context ────────────────────────────────────────────────────
     /// Plain-file attachments added via the ＋ menu (inline context).
@@ -187,8 +187,6 @@ pub struct ChatPanel {
     api_key_buffer: String,
     /// Model name: "claude-sonnet-4-6" or "claude-opus-4-8".
     model_selection: String,
-    /// Free-text application context (e.g. goals, configuration, number of nodes/GPUs).
-    app_context_buffer: String,
     /// Persistent agent session (holds conversation history for follow-ups).
     agent_session: Arc<Mutex<Option<AgentSession>>>,
     /// Whether an agent request is currently in flight.
@@ -251,9 +249,6 @@ pub struct ChatPanel {
     /// Markdown render cache for analysis messages (egui_commonmark). Arc-shared
     /// across panel clones; `CommonMarkCache` is not `Clone`.
     md_cache: Arc<Mutex<egui_commonmark::CommonMarkCache>>,
-    /// Chat text-size multiplier applied to the transcript (⚙ slider). 1.0 =
-    /// egui default; defaults slightly larger for readability.
-    chat_font_scale: f32,
 }
 
 impl Clone for ChatPanel {
@@ -265,14 +260,13 @@ impl Clone for ChatPanel {
             selection: self.selection.clone(),
             selected_items: self.selected_items.clone(),
             scroll_to_bottom: self.scroll_to_bottom,
-            settings_open: self.settings_open,
+            api_key_popup_open: self.api_key_popup_open,
             attachments: self.attachments.clone(),
             duckdb_path_buffer: self.duckdb_path_buffer.clone(),
             code_path_buffer: self.code_path_buffer.clone(),
             wiki_path_buffer: self.wiki_path_buffer.clone(),
             api_key_buffer: self.api_key_buffer.clone(),
             model_selection: self.model_selection.clone(),
-            app_context_buffer: self.app_context_buffer.clone(),
             agent_session: Arc::clone(&self.agent_session),
             pending_request: self.pending_request,
             event_rx: Arc::clone(&self.event_rx),
@@ -297,7 +291,6 @@ impl Clone for ChatPanel {
             #[cfg(feature = "viewer-mcp")]
             cc_spawn_root: self.cc_spawn_root.clone(),
             md_cache: Arc::clone(&self.md_cache),
-            chat_font_scale: self.chat_font_scale,
         }
     }
 }
@@ -330,14 +323,13 @@ impl ChatPanel {
             selection: None,
             selected_items: Vec::new(),
             scroll_to_bottom: false,
-            settings_open: false,
+            api_key_popup_open: false,
             attachments: Vec::new(),
             duckdb_path_buffer: String::new(),
             code_path_buffer: String::new(),
             wiki_path_buffer: String::new(),
             api_key_buffer: String::new(),
             model_selection: "claude-sonnet-4-6".into(),
-            app_context_buffer: String::new(),
             agent_session: Arc::new(Mutex::new(None)),
             pending_request: false,
             event_rx: Arc::new(Mutex::new(None)),
@@ -362,7 +354,6 @@ impl ChatPanel {
             #[cfg(feature = "viewer-mcp")]
             cc_spawn_root: None,
             md_cache: Arc::new(Mutex::new(egui_commonmark::CommonMarkCache::default())),
-            chat_font_scale: 1.15,
         }
     }
 
@@ -675,8 +666,6 @@ impl ChatPanel {
             project_root: self.code_path_buffer.trim().to_owned(),
             duckdb_path: self.duckdb_path_buffer.trim().to_owned(),
             wiki_path: self.wiki_path_buffer.trim().to_owned(),
-            app_context: self.app_context_buffer.clone(),
-            chat_font_scale: self.chat_font_scale,
             backend_claude_code: {
                 #[cfg(feature = "viewer-mcp")]
                 {
@@ -701,12 +690,6 @@ impl ChatPanel {
         }
         if !saved.wiki_path.is_empty() {
             self.wiki_path_buffer = saved.wiki_path.clone();
-        }
-        if !saved.app_context.is_empty() {
-            self.app_context_buffer = saved.app_context.clone();
-        }
-        if saved.chat_font_scale > 0.0 {
-            self.chat_font_scale = saved.chat_font_scale.clamp(0.8, 1.8);
         }
         #[cfg(feature = "viewer-mcp")]
         if saved.backend_claude_code {
@@ -956,9 +939,9 @@ impl ChatPanel {
         let Some(api_key) = self.get_api_key() else {
             self.add_message(
                 ChatMessageKind::System,
-                "⚠ API key not set. Open ⚙ Settings or set ANTHROPIC_API_KEY.",
+                "⚠ API key not set. Enter one (or set ANTHROPIC_API_KEY).",
             );
-            self.settings_open = true;
+            self.api_key_popup_open = true;
             return;
         };
 
@@ -1018,7 +1001,7 @@ impl ChatPanel {
         );
         self.pending_request = true;
 
-        let app_context = self.app_context_buffer.clone();
+        let app_context = String::new();
         let model = self.model_selection.clone();
         let session_arc = Arc::clone(&self.agent_session);
         let selection_preamble = self.build_selection_preamble();
@@ -1096,11 +1079,6 @@ impl ChatPanel {
         ui.horizontal(|ui| {
             // Right-aligned controls (no title — it's redundant with the toolbar toggle)
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // Settings gear (toggles settings_open)
-                let gear_text = if self.settings_open { "⚙ ▾" } else { "⚙" };
-                if ui.button(gear_text).clicked() {
-                    self.settings_open = !self.settings_open;
-                }
                 // New session button
                 // Best-effort turn interrupt (Backend B only): a stream-json
                 // interrupt control on the child's stdin. If the CLI ignores it
@@ -1253,110 +1231,54 @@ impl ChatPanel {
                         .frame(false),
                     );
                     if key_btn.clicked() {
-                        self.settings_open = true;
+                        self.api_key_popup_open = true;
                     }
                 }
             });
         });
     }
 
-    /// Zone 2: Collapsible settings drawer (backend, API key, app context).
-    fn ui_settings(&mut self, ui: &mut egui::Ui) {
-        egui::Frame::none()
-            .fill(egui::Color32::from_rgb(245, 245, 245))
-            .rounding(4.0)
-            .inner_margin(egui::Margin::same(8.0))
-            .show(ui, |ui: &mut egui::Ui| {
-                // Backend selector (P1). Disabled while a request is in flight OR
-                // while a persistent ClaudeCode child is alive (per-LIVENESS
-                // single-driver guard, P2a): between B's turns `pending_request`
-                // is false, but switching to Native then would let A (id 0) and
-                // B (id 1) both be live. "↺ New session" stops the child and
-                // re-enables the selector. Only shown on viewer-mcp builds.
-                #[cfg(feature = "viewer-mcp")]
-                {
-                    let child_alive = self.cc_agent.lock().unwrap().is_some();
-                    ui.horizontal(|ui| {
-                        ui.label("Backend:");
-                        if child_alive {
-                            ui.label(
-                                egui::RichText::new("(locked while Claude Code runs — ↺ to switch)")
-                                    .small()
-                                    .color(egui::Color32::from_rgb(150, 150, 150)),
-                            );
-                        }
-                    });
-                    ui.add_enabled_ui(!self.pending_request && !child_alive, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.radio_value(
-                                &mut self.backend,
-                                ChatBackendKind::Native,
-                                "Native agent (API key)",
-                            )
-                            .on_hover_text(
-                                "In-process agent over the Anthropic API. Needs an API key.",
-                            );
-                            ui.radio_value(
-                                &mut self.backend,
-                                ChatBackendKind::ClaudeCode,
-                                "Your Claude Code (MCP)",
-                            )
-                            .on_hover_text(
-                                "Drives your own `claude` as a subprocess over the \
-                                 in-viewer MCP server. No API key — requires Claude \
-                                 Code installed AND logged in (one-time `claude login` \
-                                 in a terminal).",
-                            );
-                        });
-                    });
-                    ui.add_space(4.0);
-                }
-
-                let key_relevant = self.backend == ChatBackendKind::Native;
-                if key_relevant {
-                    ui.label("API Key:");
-                } else {
-                    ui.label(
-                        egui::RichText::new("API Key (not used by the Claude Code backend):")
-                            .color(egui::Color32::from_rgb(150, 150, 150)),
-                    );
-                }
-                ui.add_enabled(
-                    key_relevant,
+    /// The API-key entry popup (opened from the backend pill or the header's
+    /// ⚠ API key warning). Used by the API backend only; ANTHROPIC_API_KEY in
+    /// the environment works without it. Never persisted to disk.
+    fn ui_api_key_popup(&mut self, ctx: &egui::Context) {
+        if !self.api_key_popup_open {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("API key")
+            .id(egui::Id::new("api_key_popup"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.visuals_mut().override_text_color =
+                    Some(egui::Color32::from_rgb(30, 30, 30));
+                ui.set_min_width(320.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Used by the API backend. Alternatively set ANTHROPIC_API_KEY \
+                         in the environment. Kept in memory only — never written to disk.",
+                    )
+                    .size(12.0)
+                    .color(egui::Color32::from_rgb(110, 110, 110)),
+                );
+                ui.add_space(6.0);
+                ui.add(
                     egui::TextEdit::singleline(&mut self.api_key_buffer)
                         .password(true)
-                        .hint_text("sk-ant-… (or set ANTHROPIC_API_KEY)")
-                        .desired_width(ui.available_width()),
+                        .hint_text("sk-ant-…")
+                        .desired_width(f32::INFINITY),
                 );
-
-                ui.add_space(4.0);
-                ui.label("App context:");
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.app_context_buffer)
-                        .hint_text("e.g. goals, configuration, number of nodes/GPUs")
-                        .desired_width(ui.available_width())
-                        .desired_rows(2),
-                );
-                ui.label(
-                    egui::RichText::new("Helps the AI tailor analysis to your goals")
-                        .small()
-                        .italics()
-                        .color(egui::Color32::from_rgb(120, 120, 120)),
-                );
-
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.label("Chat text size:");
-                    ui.add(
-                        egui::Slider::new(&mut self.chat_font_scale, 0.8..=1.6)
-                            .step_by(0.05)
-                            .fixed_decimals(2),
-                    );
-                    if ui.small_button("reset").clicked() {
-                        self.chat_font_scale = 1.15;
-                    }
-                });
+                ui.add_space(8.0);
+                if ui.button("Done").clicked() {
+                    self.api_key_popup_open = false;
+                }
             });
+        if !open {
+            self.api_key_popup_open = false;
+        }
     }
 
     /// The empty-state screen (Claude-Code-style): centered headline + two
@@ -1493,14 +1415,10 @@ impl ChatPanel {
             .stick_to_bottom(true)
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                // Chat text-size setting: scale every text style within this
-                // scope (body, headings, monospace — the markdown renderer
-                // derives its sizes from these).
-                let scale = self.chat_font_scale.clamp(0.8, 1.8);
-                if (scale - 1.0).abs() > f32::EPSILON {
-                    for font_id in ui.style_mut().text_styles.values_mut() {
-                        font_id.size *= scale;
-                    }
+                // Fixed chat text size (~16.5px body on the panel's 1.2 base) —
+                // the Claude-app-standard reading size; no user slider.
+                for font_id in ui.style_mut().text_styles.values_mut() {
+                    font_id.size *= 1.1;
                 }
                 // Swap messages out to avoid borrowing self.messages
                 // immutably while self.pending_highlight_actions is
@@ -1785,6 +1703,81 @@ impl ChatPanel {
                                     self.submit_input(text);
                                 }
                             }
+
+                            // Backend pill (Claude-UI model-picker style): shows
+                            // the active config; the popup opens UPWARD. Picking
+                            // "API" also opens the key-entry popup.
+                            #[cfg(feature = "viewer-mcp")]
+                            let child_alive = self.cc_agent.lock().unwrap().is_some();
+                            #[cfg(not(feature = "viewer-mcp"))]
+                            let child_alive = false;
+                            let pill_label = match self.backend {
+                                ChatBackendKind::Native => "API",
+                                ChatBackendKind::ClaudeCode => "Claude Code",
+                            };
+                            let pill = ui
+                                .button(
+                                    egui::RichText::new(pill_label)
+                                        .size(12.5)
+                                        .color(egui::Color32::from_rgb(90, 90, 90)),
+                                )
+                                .on_hover_text("Choose what powers the chat");
+                            let backend_menu_id =
+                                ui.make_persistent_id("backend_config_menu");
+                            if pill.clicked() {
+                                ui.memory_mut(|m| m.toggle_popup(backend_menu_id));
+                            }
+                            egui::popup::popup_above_or_below_widget(
+                                ui,
+                                backend_menu_id,
+                                &pill,
+                                egui::AboveOrBelow::Above,
+                                egui::PopupCloseBehavior::CloseOnClick,
+                                |ui| {
+                                    ui.set_min_width(190.0);
+                                    ui.label(
+                                        egui::RichText::new("Backend")
+                                            .size(11.5)
+                                            .color(egui::Color32::from_rgb(150, 150, 150)),
+                                    );
+                                    ui.add_space(2.0);
+                                    let locked = self.pending_request || child_alive;
+                                    let row = |ui: &mut egui::Ui,
+                                               label: &str,
+                                               selected: bool,
+                                               locked: bool|
+                                     -> bool {
+                                        let text = egui::RichText::new(label).size(13.5);
+                                        let text = if selected { text.strong() } else { text };
+                                        ui.add_enabled(
+                                            !locked,
+                                            egui::Button::new(text).frame(false).min_size(
+                                                egui::vec2(ui.available_width(), 24.0),
+                                            ),
+                                        )
+                                        .clicked()
+                                    };
+                                    let is_native = self.backend == ChatBackendKind::Native;
+                                    if row(ui, "API", is_native, locked) {
+                                        self.backend = ChatBackendKind::Native;
+                                        self.api_key_popup_open = true;
+                                    }
+                                    #[cfg(feature = "viewer-mcp")]
+                                    if row(ui, "Claude Code", !is_native, locked)
+                                    {
+                                        self.backend = ChatBackendKind::ClaudeCode;
+                                    }
+                                    if locked {
+                                        ui.label(
+                                            egui::RichText::new(
+                                                "locked while a turn runs — ↺ to switch",
+                                            )
+                                            .size(11.0)
+                                            .color(egui::Color32::from_rgb(150, 150, 150)),
+                                        );
+                                    }
+                                },
+                            );
                         },
                     );
                 });
@@ -1804,6 +1797,7 @@ impl ChatPanel {
         // independently of panels) and events must keep draining.
         #[cfg(feature = "viewer-mcp")]
         self.ui_approval_dialog(ctx);
+        self.ui_api_key_popup(ctx);
         if self.pending_request {
             ctx.request_repaint();
         }
@@ -1834,12 +1828,6 @@ impl ChatPanel {
                 // Zone 1: Header bar
                 self.ui_header(ui);
                 ui.separator();
-
-                // Zone 2: Settings (collapsible, only visible when settings_open)
-                if self.settings_open {
-                    self.ui_settings(ui);
-                    ui.separator();
-                }
 
                 // Zone 4: Composer pinned to the bottom. A bottom panel auto-sizes
                 // to the composer's real height (input + buttons + selection pill +
@@ -2348,14 +2336,10 @@ mod p3v2_tests {
         let mut a = ChatPanel::new();
         a.code_path_buffer = "/proj".into();
         a.duckdb_path_buffer = "/db.duckdb".into();
-        a.app_context_buffer = "2 nodes, 8 GPUs".into();
-        a.chat_font_scale = 1.3;
         a.api_key_buffer = "sk-ant-secret".into();
         let saved = a.export_persisted();
         assert_eq!(saved.project_root, "/proj");
         assert_eq!(saved.duckdb_path, "/db.duckdb");
-        assert_eq!(saved.app_context, "2 nodes, 8 GPUs");
-        assert!((saved.chat_font_scale - 1.3).abs() < 1e-6);
         // The API key must not appear anywhere in the persisted form.
         let json = serde_json::to_string(&saved).unwrap();
         assert!(!json.contains("sk-ant-secret"), "API key must never persist");
@@ -2364,8 +2348,6 @@ mod p3v2_tests {
         b.apply_persisted(&saved);
         assert_eq!(b.code_path_buffer, "/proj");
         assert_eq!(b.duckdb_path_buffer, "/db.duckdb");
-        assert_eq!(b.app_context_buffer, "2 nodes, 8 GPUs");
-        assert!((b.chat_font_scale - 1.3).abs() < 1e-6);
         assert!(b.api_key_buffer.is_empty());
 
         // Empty saved values never clobber existing (CLI-set) ones.
@@ -2373,8 +2355,6 @@ mod p3v2_tests {
         c.code_path_buffer = "/from-cli".into();
         c.apply_persisted(&crate::app::PersistedAiSettings::default());
         assert_eq!(c.code_path_buffer, "/from-cli");
-        // Default font scale of 0.0 (missing field) must not zero the size.
-        assert!(c.chat_font_scale > 0.5);
     }
 
     /// P3v2: the shared handle follows buffer edits (and normalizes) — this is

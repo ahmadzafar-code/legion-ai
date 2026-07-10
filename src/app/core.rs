@@ -296,10 +296,6 @@ pub struct PersistedAiSettings {
     #[serde(default)]
     pub wiki_path: String,
     #[serde(default)]
-    pub app_context: String,
-    #[serde(default)]
-    pub chat_font_scale: f32,
-    #[serde(default)]
     pub backend_claude_code: bool,
 }
 
