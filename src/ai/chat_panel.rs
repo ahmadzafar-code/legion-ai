@@ -489,6 +489,12 @@ pub struct ChatPanel {
     /// panel clone can never kill the shared child.
     #[cfg(feature = "viewer-mcp")]
     cc_agent: Arc<Mutex<Option<Arc<crate::ai::claude_code::SubprocessAgent>>>>,
+    /// Markdown render cache for analysis messages (egui_commonmark). Arc-shared
+    /// across panel clones; `CommonMarkCache` is not `Clone`.
+    md_cache: Arc<Mutex<egui_commonmark::CommonMarkCache>>,
+    /// Chat text-size multiplier applied to the transcript (⚙ slider). 1.0 =
+    /// egui default; defaults slightly larger for readability.
+    chat_font_scale: f32,
 }
 
 impl Clone for ChatPanel {
@@ -530,6 +536,8 @@ impl Clone for ChatPanel {
             mcp_endpoint: self.mcp_endpoint.clone(),
             #[cfg(feature = "viewer-mcp")]
             cc_agent: Arc::clone(&self.cc_agent),
+            md_cache: Arc::clone(&self.md_cache),
+            chat_font_scale: self.chat_font_scale,
         }
     }
 }
@@ -597,6 +605,8 @@ impl ChatPanel {
             mcp_endpoint: None,
             #[cfg(feature = "viewer-mcp")]
             cc_agent: Arc::new(Mutex::new(None)),
+            md_cache: Arc::new(Mutex::new(egui_commonmark::CommonMarkCache::default())),
+            chat_font_scale: 1.15,
         }
     }
 
@@ -1770,6 +1780,19 @@ impl ChatPanel {
                         .italics()
                         .color(egui::Color32::from_rgb(120, 120, 120)),
                 );
+
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label("Chat text size:");
+                    ui.add(
+                        egui::Slider::new(&mut self.chat_font_scale, 0.8..=1.6)
+                            .step_by(0.05)
+                            .fixed_decimals(2),
+                    );
+                    if ui.small_button("reset").clicked() {
+                        self.chat_font_scale = 1.15;
+                    }
+                });
             });
     }
 
@@ -1827,14 +1850,25 @@ impl ChatPanel {
             .stick_to_bottom(true)
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
+                // Chat text-size setting: scale every text style within this
+                // scope (body, headings, monospace — the markdown renderer
+                // derives its sizes from these).
+                let scale = self.chat_font_scale.clamp(0.8, 1.8);
+                if (scale - 1.0).abs() > f32::EPSILON {
+                    for font_id in ui.style_mut().text_styles.values_mut() {
+                        font_id.size *= scale;
+                    }
+                }
                 // Swap messages out to avoid borrowing self.messages
                 // immutably while self.pending_highlight_actions is
                 // borrowed mutably by render_message().
                 let messages = std::mem::take(&mut self.messages);
+                let mut md_cache = self.md_cache.lock().unwrap();
                 for msg in &messages {
-                    render_message(ui, msg, &mut self.pending_highlight_actions);
+                    render_message(ui, msg, &mut self.pending_highlight_actions, &mut md_cache);
                     ui.add_space(4.0);
                 }
+                drop(md_cache);
                 self.messages = messages;
             });
     }
@@ -2377,7 +2411,12 @@ impl ChatPanel {
 
 // ── Message rendering ────────────────────────────────────────────────────────
 
-fn render_message(ui: &mut egui::Ui, msg: &ChatMessage, actions: &mut Vec<HighlightAction>) {
+fn render_message(
+    ui: &mut egui::Ui,
+    msg: &ChatMessage,
+    actions: &mut Vec<HighlightAction>,
+    md_cache: &mut egui_commonmark::CommonMarkCache,
+) {
     match &msg.kind {
         ChatMessageKind::System => {
             if let Some(ref content) = msg.expandable_content {
@@ -2437,7 +2476,9 @@ fn render_message(ui: &mut egui::Ui, msg: &ChatMessage, actions: &mut Vec<Highli
                     }
                 });
             });
-            render_analysis_markdown(ui, &msg.text);
+            // Proper markdown (headings, lists, fenced code blocks, tables,
+            // inline bold/italic/code) — Claude-Desktop-like rendering.
+            egui_commonmark::CommonMarkViewer::new().show(ui, md_cache, &msg.text);
 
             // Highlight chips (user-controlled)
             if !msg.highlights.is_empty() {
@@ -2497,125 +2538,6 @@ fn render_message(ui: &mut egui::Ui, msg: &ChatMessage, actions: &mut Vec<Highli
 ///
 /// Supports: `## headings`, `**bold**`, `- bullets`, `| tables` (monospace),
 /// blank-line paragraph breaks, and numbered lists.
-fn render_analysis_markdown(ui: &mut egui::Ui, text: &str) {
-    let dark = egui::Color32::from_rgb(30, 30, 30);
-    let heading_color = egui::Color32::from_rgb(10, 10, 10);
-    let muted = egui::Color32::from_rgb(80, 80, 80);
-
-    for line in text.lines() {
-        let trimmed = line.trim();
-
-        if trimmed.is_empty() {
-            ui.add_space(4.0);
-            continue;
-        }
-
-        // # Heading levels
-        if let Some(h) = trimmed.strip_prefix("### ") {
-            ui.add_space(4.0);
-            ui.label(
-                egui::RichText::new(h)
-                    .strong()
-                    .size(16.0)
-                    .color(heading_color),
-            );
-            ui.add_space(1.0);
-            continue;
-        }
-        if let Some(h) = trimmed.strip_prefix("## ") {
-            ui.add_space(6.0);
-            ui.label(
-                egui::RichText::new(h)
-                    .strong()
-                    .size(17.0)
-                    .color(heading_color),
-            );
-            ui.add_space(2.0);
-            continue;
-        }
-        if let Some(h) = trimmed.strip_prefix("# ") {
-            ui.add_space(8.0);
-            ui.label(
-                egui::RichText::new(h)
-                    .strong()
-                    .size(18.0)
-                    .color(heading_color),
-            );
-            ui.add_space(3.0);
-            continue;
-        }
-
-        // | table row — monospace, skip separators
-        if trimmed.starts_with('|') {
-            if trimmed.contains("---") {
-                continue;
-            }
-            ui.label(
-                egui::RichText::new(trimmed)
-                    .monospace()
-                    .size(12.0)
-                    .color(dark),
-            );
-            continue;
-        }
-
-        // - / * bullet
-        if let Some(rest) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* ")) {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(egui::RichText::new("  •").color(muted));
-                render_inline_markdown(ui, rest, dark);
-            });
-            continue;
-        }
-
-        // Numbered list: "1. item"
-        if trimmed.len() > 2
-            && trimmed.as_bytes()[0].is_ascii_digit()
-            && trimmed.contains(". ")
-        {
-            if let Some(pos) = trimmed.find(". ") {
-                let number = &trimmed[..pos + 1];
-                let rest = &trimmed[pos + 2..];
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(egui::RichText::new(format!("  {number}")).color(muted));
-                    render_inline_markdown(ui, rest, dark);
-                });
-                continue;
-            }
-        }
-
-        // Regular paragraph
-        ui.horizontal_wrapped(|ui| {
-            render_inline_markdown(ui, trimmed, dark);
-        });
-    }
-}
-
-/// Render a single text line with inline `**bold**` spans.
-fn render_inline_markdown(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
-    let mut remaining = text;
-    while let Some(start) = remaining.find("**") {
-        let before = &remaining[..start];
-        if !before.is_empty() {
-            ui.label(egui::RichText::new(before).color(color));
-        }
-        remaining = &remaining[start + 2..];
-        if let Some(end) = remaining.find("**") {
-            let bold_text = &remaining[..end];
-            ui.label(egui::RichText::new(bold_text).strong().color(color));
-            remaining = &remaining[end + 2..];
-        } else {
-            ui.label(egui::RichText::new(format!("**{remaining}")).color(color));
-            return;
-        }
-    }
-    if !remaining.is_empty() {
-        ui.label(egui::RichText::new(remaining).color(color));
-    }
-}
-
-// ── Path field with picker ──────────────────────────────────────────────────
-
 /// Render a path text field with an associated filesystem picker.
 ///
 /// Handles Tab-completion, keyboard navigation (↑/↓/Enter/Escape), and

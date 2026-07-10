@@ -24,7 +24,7 @@ duckdb = ["dep:duckdb", "dep:sha2"]  # sha2 rides on duckdb so {} and {ai} never
 client = ["dep:reqwest", "dep:url"]
 server = ["dep:actix-cors", "dep:actix-web"]
 nvtxw = ["dep:nvtxw"]
-ai = ["dep:ureq", "dep:serde_json", "dep:image", "dep:base64", "dep:tracing", "dep:tracing-subscriber"]  # AI analysis + screenshot encoding + agent tracing
+ai = ["dep:ureq", "dep:serde_json", "dep:image", "dep:base64", "dep:tracing", "dep:tracing-subscriber", "dep:egui_commonmark"]  # AI analysis + screenshot encoding + agent tracing + chat markdown
 # In-viewer HTTP MCP server (V1.1). OFF by default — the 4 standard combos skip it.
 # Verified surface (empirical, claude-code 2.1.150): plain POST /mcp, Content-Length
 # JSON, single application/json response, Connection: close, no SSE/keep-alive/
@@ -61,6 +61,10 @@ serde_json = { version = "1", optional = true }
 # ai screenshot encoding:
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
 base64 = { version = "0.22", optional = true }
+
+# ai chat panel: proper markdown rendering of analysis messages (headings,
+# lists, fenced code blocks, tables — Claude-Desktop-like). 0.18 = egui 0.29.
+egui_commonmark = { version = "0.18", optional = true }
 
 # ai agent tracing (Task 12):
 tracing = { version = "0.1", optional = true }
