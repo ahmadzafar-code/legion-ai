@@ -360,6 +360,47 @@ GROUP BY item_uid"
 /// WITHOUT a trailing `;` so it composes as a subquery and passes the
 /// `SELECT/WITH` prefix guard in [`execute_run_query_raw`].
 ///
+/// Data-Size Evidence (MiniAero guardrail): distinct channel-copy sizes with
+/// UNIT-AWARE parsing of the suffixed `size` strings ("96 B", "76.000 KiB",
+/// "175.781 MiB", "1.2 GiB" — the column is TEXT, not numeric). Dedup by
+/// `item_uid` (the 523× trap); `TRY_CAST` so a malformed size becomes NULL, not
+/// an error. All numerics pre-computed in MiB/GiB (never raw bytes). Consts so
+/// the regression tests run the EXACT SQL the overview runs.
+#[cfg(feature = "duckdb")]
+pub const DATA_SIZE_EVIDENCE_SQL: &str = "WITH sized AS ( \
+  SELECT DISTINCT item_uid, size, \
+    CASE \
+      WHEN size LIKE '% GiB' THEN TRY_CAST(REPLACE(size, ' GiB', '') AS DOUBLE) * 1024.0 \
+      WHEN size LIKE '% MiB' THEN TRY_CAST(REPLACE(size, ' MiB', '') AS DOUBLE) \
+      WHEN size LIKE '% KiB' THEN TRY_CAST(REPLACE(size, ' KiB', '') AS DOUBLE) / 1024.0 \
+      WHEN size LIKE '% B'   THEN TRY_CAST(REPLACE(size, ' B',   '') AS DOUBLE) / 1048576.0 \
+    END AS mib \
+  FROM items WHERE size IS NOT NULL AND entry_slug LIKE '%chan%' ) \
+SELECT COUNT(*) AS sized_copies, \
+  ROUND(MAX(mib), 1) AS max_mib, \
+  ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY mib), 3) AS p50_mib, \
+  ROUND(SUM(mib) / 1024.0, 2) AS total_gib \
+FROM sized WHERE mib IS NOT NULL";
+
+/// Companion to [`DATA_SIZE_EVIDENCE_SQL`]: the 3 largest DISTINCT copy sizes
+/// with counts — the per-copy figures a sizing verdict must reconcile against
+/// (e.g. MiniAero's 175.8 MiB ×56 ghost exchanges refute "under-sized mesh").
+#[cfg(feature = "duckdb")]
+pub const DATA_SIZE_TOP_SQL: &str = "WITH sized AS ( \
+  SELECT DISTINCT item_uid, size, \
+    CASE \
+      WHEN size LIKE '% GiB' THEN TRY_CAST(REPLACE(size, ' GiB', '') AS DOUBLE) * 1024.0 \
+      WHEN size LIKE '% MiB' THEN TRY_CAST(REPLACE(size, ' MiB', '') AS DOUBLE) \
+      WHEN size LIKE '% KiB' THEN TRY_CAST(REPLACE(size, ' KiB', '') AS DOUBLE) / 1024.0 \
+      WHEN size LIKE '% B'   THEN TRY_CAST(REPLACE(size, ' B',   '') AS DOUBLE) / 1048576.0 \
+    END AS mib \
+  FROM items WHERE size IS NOT NULL AND entry_slug LIKE '%chan%' ) \
+SELECT ROUND(mib, 1) AS mib, COUNT(*) AS copies \
+FROM sized WHERE mib IS NOT NULL \
+GROUP BY ROUND(mib, 1) ORDER BY mib DESC";
+// NOTE: no trailing LIMIT — execute_run_query_raw STRIPS trailing LIMITs (its
+// 50-row probe owns the cap), so the top-3 cut happens at render time in Rust.
+
 /// Note: routed through `execute_run_query_raw`, results inherit its 50-row cap.
 /// Real chains are ≤7 rows (uid 48 → 7; uid 2220 → 2), so this is acceptable; a
 /// pathological 51–64-row chain would silently drop its DEEPEST rows.
@@ -1247,10 +1288,8 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
                         "- {} copies | total comm time (lifetime): {:.1}ms\n",
                         count, ms
                     ));
-                    // TODO(volume): total bytes copied needs unit-aware parsing of
-                    // `size` (a unit-suffixed string: "76.000 KiB", "96 B", ...);
-                    // units vary (B/KiB on bg4N2) so a naive CAST is wrong. Deferred
-                    // rather than report an incorrect MB figure.
+                    // Volume now lives in "Data-Size Evidence" below (unit-aware
+                    // parsing of the suffixed `size` strings — B/KiB/MiB/GiB).
                     if count == 0 {
                         out.push_str("- No channel copies (CPU-only or no data movement)\n");
                     }
@@ -1263,6 +1302,69 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
         }
         Err(e) => out.push_str(&format!("(error: {})\n", e)),
     }
+    out.push('\n');
+
+    // ── Data-Size Evidence (MiniAero guardrail: verify sizing verdicts vs DATA) ──
+    // Root cause of the one recorded WRONG live verdict ("under-sized mesh, grow
+    // it" on MiniAero 160³): the agent had 167–176 MiB ghost-exchange copies in
+    // front of it — evidence that the mesh was already large — and never
+    // reconciled. This section makes that evidence one glance away and carries
+    // the reconcile instruction AT the evidence (result-level reminder, the
+    // proven redundancy lever). `size` is a unit-suffixed STRING ("76.000 KiB",
+    // "175.781 MiB"), so parsing is unit-aware; dedup by item_uid as always.
+    let evidence = execute_run_query_raw(duckdb_path, DATA_SIZE_EVIDENCE_SQL);
+    let top_sizes = execute_run_query_raw(duckdb_path, DATA_SIZE_TOP_SQL);
+    out.push_str("## Data-Size Evidence (sizing verdicts)\n");
+    match &evidence {
+        Ok(json_str) => {
+            if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
+                if let Some(row) = parsed.first() {
+                    let n = row.get("sized_copies").and_then(|v| v.as_u64()).unwrap_or(0);
+                    if n == 0 {
+                        out.push_str("- no sized channel copies in this profile\n");
+                    } else {
+                        let max = row.get("max_mib").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let p50 = row.get("p50_mib").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let gib = row.get("total_gib").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        out.push_str(&format!(
+                            "- {n} sized copies | max: {max:.1} MiB | p50: {p50:.3} MiB | total moved: {gib:.2} GiB\n"
+                        ));
+                        if let Ok(Ok(tops)) = top_sizes
+                            .as_ref()
+                            .map(|s| serde_json::from_str::<Vec<serde_json::Value>>(s))
+                        {
+                            // Top-3 cap lives HERE: execute_run_query_raw strips
+                            // trailing LIMITs, so the SQL can't carry it.
+                            let line = tops
+                                .iter()
+                                .take(3)
+                                .filter_map(|r| {
+                                    let mib = r.get("mib").and_then(|v| v.as_f64())?;
+                                    let c = r.get("copies").and_then(|v| v.as_u64())?;
+                                    Some(format!("{mib:.1} MiB ×{c}"))
+                                })
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            if !line.is_empty() {
+                                out.push_str(&format!("- largest distinct copy sizes: {line}\n"));
+                            }
+                        }
+                    }
+                } else {
+                    out.push_str("(no data)\n");
+                }
+            } else {
+                out.push_str(&format!("{}\n", json_str));
+            }
+        }
+        Err(e) => out.push_str(&format!("(error: {})\n", e)),
+    }
+    out.push_str(
+        "- GUARDRAIL: before ANY under-/over-sized verdict (mesh, problem size, \
+         instances), derive the observed size from THIS data and reconcile — e.g. \
+         per-copy ghost-exchange size scales with the mesh. If the observed sizes \
+         contradict the hypothesis, say so instead of asserting it.\n",
+    );
     out.push('\n');
 
     // ── Delayed distribution (Realm pickup latency) ────────────────────────
@@ -2491,6 +2593,69 @@ mod tests {
     fn test_db_path() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../multinoderuns/bg4N2/profcbN2g4b.duckdb")
+    }
+
+    /// Path to the MiniAero 160³ fixture — the profile behind the one recorded
+    /// WRONG live verdict ("under-sized mesh"). Large (172MB) and untracked;
+    /// tests gate on its presence.
+    fn miniaero_db_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../multinoderuns/miniaero8_160cubed/prof.duckdb")
+    }
+
+    /// Data-Size Evidence on bg4N2: the unit-aware, item_uid-deduped count must
+    /// equal the documented 207 distinct channel copies (pins BOTH the dedup and
+    /// the unit parsing — a naive un-deduped count would be 235).
+    #[test]
+    fn test_data_size_evidence_bg4n2() {
+        let db = test_db_path();
+        if !db.exists() {
+            eprintln!("bg4N2 fixture missing; skipping");
+            return;
+        }
+        let out = execute_run_query_raw(db.to_str().unwrap(), DATA_SIZE_EVIDENCE_SQL).unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&out).unwrap();
+        let row = rows.first().expect("one aggregate row");
+        assert_eq!(
+            row.get("sized_copies").and_then(|v| v.as_u64()),
+            Some(207),
+            "bg4N2 has exactly 207 distinct sized channel copies"
+        );
+        assert!(row.get("max_mib").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0);
+    }
+
+    /// MiniAero REGRESSION (the guardrail's reason to exist): the evidence that
+    /// refutes "under-sized mesh" MUST surface — per-copy ghost exchanges of
+    /// ~167–176 MiB and tens of GiB moved. If this data stops surfacing, the
+    /// agent is back to guessing about sizes.
+    #[test]
+    fn test_data_size_evidence_miniaero_regression() {
+        let db = miniaero_db_path();
+        if !db.exists() {
+            eprintln!("MiniAero fixture missing; skipping");
+            return;
+        }
+        let db = db.to_str().unwrap().to_owned();
+
+        let out = execute_run_query_raw(&db, DATA_SIZE_EVIDENCE_SQL).unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&out).unwrap();
+        let row = rows.first().expect("one aggregate row");
+        let max_mib = row.get("max_mib").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let total_gib = row.get("total_gib").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        assert!(
+            max_mib > 150.0,
+            "MiniAero's largest ghost-exchange copies (~175.8 MiB) must surface; got {max_mib}"
+        );
+        assert!(
+            total_gib > 30.0,
+            "MiniAero moves ~57 GiB total; got {total_gib}"
+        );
+
+        let tops = execute_run_query_raw(&db, DATA_SIZE_TOP_SQL).unwrap();
+        assert!(
+            tops.contains("175.8") && tops.contains("167.6"),
+            "the two refuting per-copy sizes must appear in the top list: {tops}"
+        );
     }
 
     /// Task 2 unit (no DB): the 50-row cap is marked only when MORE than 50 rows

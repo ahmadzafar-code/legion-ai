@@ -156,7 +156,11 @@ fn server_instructions(ctx: &ServerCtx) -> String {
         "Legion Profiler Co-Pilot — diagnose Legion task-based runtime performance from \
          this profile. Verify every number with run_query before stating it; rank issues \
          by share of total time, not ratios; state root causes as hypotheses, not \
-         certainties; never invent speedups."
+         certainties; never invent speedups. Before ANY sizing/config verdict (e.g. \
+         'the mesh/problem is under-sized'), derive the observed size from the profile \
+         (the overview's Data-Size Evidence: per-copy and total bytes moved) and \
+         reconcile — if the observed sizes contradict the hypothesis, say so instead of \
+         asserting it."
             .to_owned(),
     ];
     if let Some(code_root) = &ctx.code_root {
@@ -758,6 +762,12 @@ mod tests {
         assert!(!instr.contains("Application source root"), "no source clause without code_root");
         assert!(!instr.contains("wiki_index"), "no wiki clause without wiki_root");
         assert!(!instr.contains("curated Legion wiki"), "no wiki clause without wiki_root");
+        // MiniAero guardrail (verify-verdict-vs-data): sizing claims must be
+        // reconciled against the overview's Data-Size Evidence.
+        assert!(
+            instr.contains("Data-Size Evidence") && instr.contains("reconcile"),
+            "sizing-verdict guardrail must brief external agents"
+        );
     }
 
     #[test]

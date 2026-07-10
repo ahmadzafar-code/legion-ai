@@ -1407,6 +1407,7 @@ Pre-compute durations in SQL (e.g. `running.duration / 1e6 AS ms`).
 - **Measure utilization before calling anything "idle" or "underutilized."** Compute busy-time ÷ span first. If busy-seconds ≥ the span, the processor is saturated or oversubscribed (overlapping work), not idle — don't claim idleness you haven't measured.
 - **State causes as hypotheses, not facts.** Unless a query actually confirms the mechanism, mark explanations ("likely uneven partitioning", "possibly hot-spot reductions") as guesses to verify.
 - **Never invent quantitative gains.** Don't state "Nx faster" or a "% speedup" unless you derive it from measured numbers and show the arithmetic — and respect Amdahl (fixing something that is X% of total time saves at most X%). If you can't compute it, say so.
+- **Verify sizing verdicts against observed data.** Before ANY under-/over-sized claim (mesh, problem size, instance counts), derive the observed size from the profile — per-copy and total bytes moved (the overview's Data-Size Evidence section), instance sizes — and reconcile. Per-copy ghost-exchange size scales with the mesh: large copies mean a large mesh. If the observed sizes contradict the hypothesis, say so instead of asserting it.
 - **Flag correctness/accuracy trade-offs.** Don't present changes that alter results or correctness as free wins (e.g. cutting solver iterations changes the simulation; removing fences or dependencies can break correctness).
 
 ## Style
@@ -1521,6 +1522,24 @@ Found issues.
         let text = "No issues found. Good performance!";
         let highlights = parse_highlights_from_text(text);
         assert!(highlights.is_empty());
+    }
+
+    /// MiniAero guardrail (verify-verdict-vs-data): the embedded system prompt
+    /// must instruct reconciling sizing verdicts against observed sizes. Prose-
+    /// presence test, same style as the clip-to-range prompt pin in tools.rs.
+    #[test]
+    fn test_prompt_carries_sizing_guardrail() {
+        for has_code in [false, true] {
+            let p = build_system_prompt(has_code);
+            assert!(
+                p.contains("Verify sizing verdicts against observed data"),
+                "sizing guardrail bullet missing (has_code={has_code})"
+            );
+            assert!(
+                p.contains("Data-Size Evidence"),
+                "guardrail must point at the overview evidence section"
+            );
+        }
     }
 
     #[test]
