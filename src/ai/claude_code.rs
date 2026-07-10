@@ -322,8 +322,12 @@ impl SubprocessAgent {
             .arg("--tools").arg(tools_arg())     // availability filter (replaces denylist)
             .arg("--allowedTools").arg(&allowed)
             .arg("--append-system-prompt").arg(SYSTEM_PROMPT_NUDGE)
-            .arg("--model").arg(model)
             .current_dir(&cwd_dir);
+        // Empty model = inherit the user's own Claude Code default (the panel no
+        // longer picks; their install, their choice). Tests still pin one.
+        if !model.is_empty() {
+            cmd.arg("--model").arg(model);
+        }
         // Grant the harness's file tools access to the user's project source, if set.
         if let Some(root) = code_root.map(str::trim).filter(|r| !r.is_empty()) {
             cmd.arg("--add-dir").arg(root);

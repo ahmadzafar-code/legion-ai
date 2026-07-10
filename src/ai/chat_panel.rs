@@ -889,10 +889,12 @@ impl ChatPanel {
                 // source (via --add-dir), so Backend B can read code with the full
                 // harness rather than only the MCP read_code tool.
                 let code_root = self.code_path();
+                // No --model: the child uses the user's own Claude Code default
+                // (their install, their model choice).
                 match crate::ai::claude_code::SubprocessAgent::spawn(
                     port,
                     &token,
-                    &self.model_selection,
+                    "",
                     code_root.as_deref(),
                     event_tx,
                 ) {
@@ -1679,27 +1681,6 @@ impl ChatPanel {
                             ui.label("File dialogs are unavailable in the browser");
                         },
                     );
-
-                    // Model selector as a compact ComboBox
-                    egui::ComboBox::from_id_salt("model_pill")
-                        .selected_text(if self.model_selection.contains("opus") {
-                            "Opus"
-                        } else {
-                            "Sonnet"
-                        })
-                        .width(72.0)
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut self.model_selection,
-                                "claude-sonnet-4-6".into(),
-                                "Sonnet — fast",
-                            );
-                            ui.selectable_value(
-                                &mut self.model_selection,
-                                "claude-opus-4-8".into(),
-                                "Opus — deep",
-                            );
-                        });
 
                     // Right-aligned: Send
                     ui.with_layout(
