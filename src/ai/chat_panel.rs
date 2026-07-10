@@ -470,7 +470,7 @@ impl ChatPanel {
                     .size(11.0),
                 );
             }
-            if ui.small_button("✕").on_hover_text("Clear selection").clicked() {
+            if ui.small_button("×").on_hover_text("Clear selection").clicked() {
                 self.selected_items.clear();
                 self.selection = None;
                 self.pending_clear_selection = true;
@@ -1182,12 +1182,12 @@ impl ChatPanel {
             // DB chip
             let (db_label, db_color, db_hover) = match &db_status {
                 ToolStatus::Ready => (
-                    "DB ●",
+                    "DB •",
                     egui::Color32::from_rgb(34, 139, 34),
                     "Database connected".to_string(),
                 ),
                 ToolStatus::Error(msg) => (
-                    "DB ✕",
+                    "DB ×",
                     egui::Color32::from_rgb(220, 60, 60),
                     format!("Error: {msg}"),
                 ),
@@ -1203,12 +1203,12 @@ impl ChatPanel {
             // Code chip
             let (code_label, code_color, code_hover) = match &code_status {
                 ToolStatus::Ready => (
-                    "Code ●",
+                    "Code •",
                     egui::Color32::from_rgb(34, 139, 34),
                     "Code root configured".to_string(),
                 ),
                 ToolStatus::Error(msg) => (
-                    "Code ✕",
+                    "Code ×",
                     egui::Color32::from_rgb(220, 60, 60),
                     format!("Error: {msg}"),
                 ),
@@ -1223,7 +1223,7 @@ impl ChatPanel {
 
             // Visual chip
             let (vis_label, vis_color) = match &visual_status {
-                ToolStatus::Ready => ("Visual ●", egui::Color32::from_rgb(34, 139, 34)),
+                ToolStatus::Ready => ("Visual •", egui::Color32::from_rgb(34, 139, 34)),
                 _ => ("Visual ○", egui::Color32::from_rgb(160, 160, 160)),
             };
             ui.label(egui::RichText::new(vis_label).small().color(vis_color))
@@ -1439,10 +1439,12 @@ impl ChatPanel {
     }
 
     /// Context chips above the composer input (Claude-Desktop style): the
-    /// active DuckDB, the project repo, and any attached files — each with a ✕.
-    /// The DB/repo chips mirror the SETTINGS buffers (however they were set:
-    /// ＋ menu, CLI flag, or persistence), so what the agent can touch is always
-    /// visible right where you type; ✕ genuinely unconfigures the tool.
+    /// active DuckDB, the project repo, and any attached files — each with an ×.
+    /// The DB/repo chips mirror the SETTINGS buffers (however they were set —
+    /// the "+" menu, a CLI flag, or persistence), so what the agent can touch is
+    /// always visible right where you type; × genuinely unconfigures the tool.
+    /// Text-only (no glyph icons — emojis are tofu in egui's default fonts); the
+    /// chip BACKGROUND color carries the kind (blue=DB, green=repo, gray=file).
     fn ui_context_chips(&mut self, ui: &mut egui::Ui) {
         let db_set = !self.duckdb_path_buffer.trim().is_empty();
         let repo = effective_project_root(&self.code_path_buffer);
@@ -1450,28 +1452,26 @@ impl ChatPanel {
             return;
         }
 
-        let chip = |ui: &mut egui::Ui,
-                    icon: &str,
-                    name: &str,
-                    hover: &str,
-                    bg: egui::Color32|
-         -> bool {
+        let chip = |ui: &mut egui::Ui, name: &str, hover: &str, bg: egui::Color32| -> bool {
             let mut remove = false;
             egui::Frame::none()
                 .fill(bg)
                 .rounding(12.0)
-                .inner_margin(egui::Margin::symmetric(8.0, 3.0))
+                .inner_margin(egui::Margin::symmetric(9.0, 4.0))
                 .show(ui, |ui: &mut egui::Ui| {
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        ui.label(egui::RichText::new(icon).size(11.0));
+                        ui.spacing_mut().item_spacing.x = 5.0;
                         ui.label(
                             egui::RichText::new(name)
-                                .size(11.5)
+                                .size(13.0)
                                 .color(egui::Color32::from_rgb(30, 30, 30)),
                         )
                         .on_hover_text(hover);
-                        if ui.small_button("✕").on_hover_text("Remove").clicked() {
+                        if ui
+                            .small_button(egui::RichText::new("×").size(13.0))
+                            .on_hover_text("Remove")
+                            .clicked()
+                        {
                             remove = true;
                         }
                     });
@@ -1486,7 +1486,7 @@ impl ChatPanel {
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| path.clone());
-                if chip(ui, "🗄", &name, &path, egui::Color32::from_rgb(219, 234, 254)) {
+                if chip(ui, &name, &path, egui::Color32::from_rgb(219, 234, 254)) {
                     self.duckdb_path_buffer.clear();
                 }
             }
@@ -1505,7 +1505,7 @@ impl ChatPanel {
                 };
                 #[cfg(not(feature = "viewer-mcp"))]
                 let hover = root.clone();
-                if chip(ui, "📁", &name, &hover, egui::Color32::from_rgb(220, 252, 231)) {
+                if chip(ui, &name, &hover, egui::Color32::from_rgb(220, 252, 231)) {
                     self.code_path_buffer.clear();
                 }
             }
@@ -1513,7 +1513,6 @@ impl ChatPanel {
             for (i, att) in self.attachments.iter().enumerate() {
                 if chip(
                     ui,
-                    "📄",
                     &att.display_name,
                     &att.path,
                     egui::Color32::from_rgb(243, 244, 246),
@@ -1595,59 +1594,91 @@ impl ChatPanel {
                     }
                 }
 
-                // Bottom row: ＋ add-context | model pill | ⏎ Send
+                // Bottom row: + add-context | model pill | ⏎ Send
                 ui.horizontal(|ui| {
-                    // ＋ menu (Claude-Desktop style): the ONE place to add context.
+                    // + menu (Claude-Desktop style): the ONE place to add context.
                     // Folders/.duckdb configure tools; plain files attach as text.
-                    ui.menu_button(egui::RichText::new("＋").size(15.0), |ui| {
-                        #[cfg(not(target_arch = "wasm32"))]
-                        {
-                            if ui.button("🗄  Add DuckDB…").clicked() {
-                                ui.close_menu();
-                                if let Some(f) = rfd::FileDialog::new()
-                                    .set_title("Choose the profile DuckDB")
-                                    .add_filter("DuckDB", &["duckdb"])
-                                    .pick_file()
-                                {
-                                    self.duckdb_path_buffer = f.to_string_lossy().into_owned();
+                    // Plain ASCII "+" (the fullwidth ＋ and the file-kind emojis are
+                    // not in egui's default fonts — they render as tofu boxes), and
+                    // the popup is forced to open UPWARD like Claude Desktop's
+                    // (menu_button drops down, straight out of a bottom bar).
+                    let plus_resp = ui
+                        .button(egui::RichText::new("+").size(18.0).strong())
+                        .on_hover_text("Add context: DuckDB, code repo, or a file");
+                    let plus_menu_id = ui.make_persistent_id("plus_context_menu");
+                    if plus_resp.clicked() {
+                        ui.memory_mut(|m| m.toggle_popup(plus_menu_id));
+                    }
+                    egui::popup::popup_above_or_below_widget(
+                        ui,
+                        plus_menu_id,
+                        &plus_resp,
+                        egui::AboveOrBelow::Above,
+                        egui::PopupCloseBehavior::CloseOnClick,
+                        |ui| {
+                            ui.set_min_width(170.0);
+                            let item = |ui: &mut egui::Ui, label: &str| {
+                                ui.add(
+                                    egui::Button::new(
+                                        egui::RichText::new(label).size(13.5),
+                                    )
+                                    .frame(false)
+                                    .min_size(egui::vec2(ui.available_width(), 24.0)),
+                                )
+                                .clicked()
+                            };
+                            #[cfg(not(target_arch = "wasm32"))]
+                            {
+                                if item(ui, "Add DuckDB…") {
+                                    if let Some(f) = rfd::FileDialog::new()
+                                        .set_title("Choose the profile DuckDB")
+                                        .add_filter("DuckDB", &["duckdb"])
+                                        .pick_file()
+                                    {
+                                        self.duckdb_path_buffer =
+                                            f.to_string_lossy().into_owned();
+                                    }
                                 }
-                            }
-                            if ui.button("📁  Add code repo…").clicked() {
-                                ui.close_menu();
-                                if let Some(d) = rfd::FileDialog::new()
-                                    .set_title("Choose the profiled application's source folder")
-                                    .pick_folder()
-                                {
-                                    self.code_path_buffer = d.to_string_lossy().into_owned();
+                                if item(ui, "Add code repo…") {
+                                    if let Some(d) = rfd::FileDialog::new()
+                                        .set_title(
+                                            "Choose the profiled application's source folder",
+                                        )
+                                        .pick_folder()
+                                    {
+                                        self.code_path_buffer =
+                                            d.to_string_lossy().into_owned();
+                                    }
                                 }
-                            }
-                            if ui.button("📄  Add file…").clicked() {
-                                ui.close_menu();
-                                if let Some(f) = rfd::FileDialog::new()
-                                    .set_title("Attach a file as context")
-                                    .pick_file()
-                                {
-                                    let path = f.to_string_lossy().into_owned();
-                                    // A .duckdb picked here is a DB, not a text
-                                    // attachment (binary would inject garbage).
-                                    if f.extension().is_some_and(|e| e == "duckdb") {
-                                        self.duckdb_path_buffer = path;
-                                    } else if !self.attachments.iter().any(|a| a.path == path) {
-                                        let display_name = f
-                                            .file_name()
-                                            .map(|n| n.to_string_lossy().into_owned())
-                                            .unwrap_or_else(|| path.clone());
-                                        self.attachments
-                                            .push(ContextAttachment { path, display_name });
+                                if item(ui, "Add file…") {
+                                    if let Some(f) = rfd::FileDialog::new()
+                                        .set_title("Attach a file as context")
+                                        .pick_file()
+                                    {
+                                        let path = f.to_string_lossy().into_owned();
+                                        // A .duckdb picked here is a DB, not a text
+                                        // attachment (binary would inject garbage).
+                                        if f.extension().is_some_and(|e| e == "duckdb") {
+                                            self.duckdb_path_buffer = path;
+                                        } else if !self
+                                            .attachments
+                                            .iter()
+                                            .any(|a| a.path == path)
+                                        {
+                                            let display_name = f
+                                                .file_name()
+                                                .map(|n| n.to_string_lossy().into_owned())
+                                                .unwrap_or_else(|| path.clone());
+                                            self.attachments
+                                                .push(ContextAttachment { path, display_name });
+                                        }
                                     }
                                 }
                             }
-                        }
-                        #[cfg(target_arch = "wasm32")]
-                        ui.label("File dialogs are unavailable in the browser");
-                    })
-                    .response
-                    .on_hover_text("Add context: DuckDB, code repo, or a file");
+                            #[cfg(target_arch = "wasm32")]
+                            ui.label("File dialogs are unavailable in the browser");
+                        },
+                    );
 
                     // Model selector as a compact ComboBox
                     egui::ComboBox::from_id_salt("model_pill")
@@ -1705,6 +1736,21 @@ impl ChatPanel {
         #[cfg(feature = "viewer-mcp")]
         self.sync_project_root();
 
+        // These run even while the panel is hidden — a Backend B turn may be
+        // live: the approval dialog must stay answerable (egui Windows float
+        // independently of panels) and events must keep draining.
+        #[cfg(feature = "viewer-mcp")]
+        self.ui_approval_dialog(ctx);
+        if self.pending_request {
+            ctx.request_repaint();
+        }
+
+        // No open/close animation (`show_animated` slid the panel in from the
+        // right, shoving the timeline leftward over several frames) — appear
+        // instantly instead.
+        if !self.visible {
+            return;
+        }
         egui::SidePanel::right("ai_chat_panel")
             .resizable(true)
             .default_width(420.0)
@@ -1713,13 +1759,13 @@ impl ChatPanel {
                 egui::Frame::side_top_panel(ctx.style().as_ref())
                     .fill(egui::Color32::from_rgb(250, 250, 250)),
             )
-            .show_animated(ctx, self.visible, |ui| {
+            .show(ctx, |ui| {
                 // Force dark text throughout this panel
                 ui.visuals_mut().override_text_color =
                     Some(egui::Color32::from_rgb(30, 30, 30));
-                // Slightly larger, more readable text throughout the chat panel.
+                // Larger, more readable text throughout the chat panel.
                 for font_id in ui.style_mut().text_styles.values_mut() {
-                    font_id.size *= 1.1;
+                    font_id.size *= 1.2;
                 }
 
                 // Zone 1: Header bar
@@ -1755,15 +1801,6 @@ impl ChatPanel {
                         self.ui_transcript(ui);
                     });
             });
-
-        // P2v2: the tool-approval dialog (rendered LAST so it overlays everything).
-        #[cfg(feature = "viewer-mcp")]
-        self.ui_approval_dialog(ctx);
-
-        // Keep repainting while waiting so poll_events() fires promptly
-        if self.pending_request {
-            ctx.request_repaint();
-        }
     }
 
     /// P2v2: the Deny / Allow / Always-allow dialog for the Claude Code child's
