@@ -57,26 +57,42 @@ pub const ALLOWED_TOOLS: &[&str] = &[
     "mcp__legion-viewer__get_selection",
 ];
 
-/// Built-in tools kept AVAILABLE via `--tools` (a KEEP-list — an availability
-/// filter, structurally stronger than the old leaky `--disallowedTools`: anything
-/// not named here is simply not advertised to the model, so permissionless
-/// built-ins like `ToolSearch` cannot slip through the way they did under a
-/// denylist).
-///
-/// P1v2 (full-harness, read tier): the harness reads the user's application source
-/// with its OWN Read/Glob/Grep — frictionless, no approval prompt (proven by
-/// `cc_spike v2` G6). The action/egress tools (Bash/Edit/Write/NotebookEdit/
-/// WebFetch/WebSearch) are deliberately NOT here yet; they join this list in P2v2
-/// once the PreToolUse-hook approval bridge exists to gate each call in the panel.
-/// The structural never-tools (Task/Skill/SlashCommand/KillShell) are excluded
-/// permanently — sub-agents get their own tool config and would launder around the
-/// approval dialog (`cc_spike v2` G5 confirmed they stay out of the inventory).
+/// Read-tier built-ins: available AND auto-approved (they are permissionless in
+/// default mode anyway — `cc_spike v2` G6 — but naming them in `--allowedTools` is
+/// explicit and CLI-version-robust). The harness reads the user's application
+/// source with its OWN Read/Glob/Grep — frictionless, no approval prompt.
+pub const READONLY_BUILTINS: &[&str] = &["Read", "Glob", "Grep", "BashOutput", "TodoWrite"];
+
+/// Action/egress built-ins: available but gated PER CALL by the PreToolUse hook →
+/// `/approve` → the panel's Deny / Allow / Always-allow dialog (P2v2, the exact
+/// posture the owner picked). NOT in `--allowedTools` — approval comes solely from
+/// the hook decision (`cc_spike v2` G1/G2 proved allow runs the tool and deny is
+/// non-fatal). This list must stay in sync with the hook matcher
+/// ([`build_hook_settings`]) — a tool available here but unmatched by the hook
+/// would be denied-with-feedback by default mode (G7): safe, but a confusing UX.
+pub const HOOK_GATED_BUILTINS: &[&str] =
+    &["Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"];
+
+/// The `--tools` availability KEEP-list (structurally stronger than the old leaky
+/// `--disallowedTools`: anything not named is simply not advertised, so
+/// permissionless built-ins like `ToolSearch` cannot slip through the way they did
+/// under a denylist). = read tier + hook-gated tier. The structural never-tools
+/// (Task/Skill/SlashCommand/KillShell) are excluded permanently — sub-agents get
+/// their own tool config and would launder around the approval dialog (`cc_spike
+/// v2` G5 confirmed they stay out of the inventory).
 ///
 /// NOTE (`cc_spike v2` G5): `--tools` init enumeration is not strictly 1:1 with
 /// this flag — `TaskOutput` was observed advertised even when unlisted; it is inert
 /// without `Task` (nothing to read), so it is harmless, but do not treat presence in
 /// this list as the sole availability guarantee.
-pub const AVAILABLE_BUILTINS: &[&str] = &["Read", "Glob", "Grep", "BashOutput", "TodoWrite"];
+fn tools_arg() -> String {
+    READONLY_BUILTINS
+        .iter()
+        .chain(HOOK_GATED_BUILTINS.iter())
+        .copied()
+        .collect::<Vec<_>>()
+        .join(",")
+}
 
 /// `--append-system-prompt` nudge: sets the diagnostic persona a stock Claude Code
 /// lacks (Backend A injects ~2K of framing; the MCP `initialize` instructions brief
@@ -206,6 +222,9 @@ pub struct SubprocessAgent {
     cfg_path: PathBuf,
     /// Viewer-owned neutral scratch cwd (S1b); removed on Drop.
     cwd_dir: Option<PathBuf>,
+    /// Viewer-owned `--settings` file carrying the PreToolUse approval hook
+    /// (0600 — the curl command embeds the bearer token); deleted on Drop.
+    settings_path: Option<PathBuf>,
     /// True from `send_turn` until the turn's `result` line — scopes the
     /// watchdog and the "exited mid-turn" error.
     turn_in_flight: Arc<AtomicBool>,
@@ -261,13 +280,34 @@ impl SubprocessAgent {
 
         // Auto-approve the MCP surface AND the read-only built-ins so neither prompts in
         // headless mode (read-only tools are permissionless anyway — G6 — but naming them
-        // is explicit and CLI-version-robust).
+        // is explicit and CLI-version-robust). The hook-gated tier is deliberately NOT
+        // here: its approval comes per-call from the PreToolUse hook below.
         let allowed = ALLOWED_TOOLS
             .iter()
-            .chain(AVAILABLE_BUILTINS.iter())
+            .chain(READONLY_BUILTINS.iter())
             .copied()
             .collect::<Vec<_>>()
             .join(",");
+
+        // P2v2: viewer-owned --settings carrying the PreToolUse approval hook (a curl
+        // POST to this server's /approve route, same bearer token). 0600 like the
+        // mcp-config — the token is in the command string. Because we also pass
+        // `--setting-sources ""`, this file is the ONLY settings source the child
+        // loads (S1b isolation, `cc_spike v2` G4).
+        let settings_path = std::env::temp_dir().join(format!(
+            "legion_cc_settings_{}_{}.json",
+            std::process::id(),
+            now_secs()
+        ));
+        std::fs::write(&settings_path, build_hook_settings(port, token)).map_err(|e| {
+            let _ = std::fs::remove_file(&cfg_path);
+            format!("write hook settings: {e}")
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&settings_path, std::fs::Permissions::from_mode(0o600));
+        }
 
         let mut cmd = Command::new("claude");
         cmd.arg("-p")
@@ -277,8 +317,9 @@ impl SubprocessAgent {
             .arg("--mcp-config").arg(&cfg_path)
             .arg("--strict-mcp-config")          // ignore the user's other MCP servers
             .arg("--setting-sources").arg("")    // isolate: load NO filesystem settings (S1b)
+            .arg("--settings").arg(&settings_path) // ...except OUR hook settings
             .arg("--permission-mode").arg("default")
-            .arg("--tools").arg(AVAILABLE_BUILTINS.join(",")) // availability filter (replaces denylist)
+            .arg("--tools").arg(tools_arg())     // availability filter (replaces denylist)
             .arg("--allowedTools").arg(&allowed)
             .arg("--append-system-prompt").arg(SYSTEM_PROMPT_NUDGE)
             .arg("--model").arg(model)
@@ -287,15 +328,17 @@ impl SubprocessAgent {
         if let Some(root) = code_root.map(str::trim).filter(|r| !r.is_empty()) {
             cmd.arg("--add-dir").arg(root);
         }
-        Self::spawn_with_command(cmd, cfg_path, Some(cwd_dir), event_tx)
+        Self::spawn_with_command(cmd, cfg_path, Some(cwd_dir), Some(settings_path), event_tx)
     }
 
     /// Lifecycle core, parameterized on the command (tests drive it with `cat`).
-    /// `cwd_dir` (if any) is a viewer-owned scratch dir removed on Drop.
+    /// `cwd_dir` (if any) is a viewer-owned scratch dir, `settings_path` (if any)
+    /// the viewer-owned hook settings file — both removed on Drop.
     fn spawn_with_command(
         mut cmd: Command,
         cfg_path: PathBuf,
         cwd_dir: Option<PathBuf>,
+        settings_path: Option<PathBuf>,
         event_tx: Sender<AgentEvent>,
     ) -> Result<Arc<Self>, String> {
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -309,6 +352,7 @@ impl SubprocessAgent {
         let mut child = cmd.spawn().map_err(|e| {
             let _ = std::fs::remove_file(&cfg_path);
             if let Some(d) = &cwd_dir { let _ = std::fs::remove_dir_all(d); }
+            if let Some(s) = &settings_path { let _ = std::fs::remove_file(s); }
             format!(
                 "could not start `claude` ({e}). Install Claude Code and ensure it is on \
                  PATH, or switch the backend to Native in ⚙ Settings."
@@ -433,6 +477,7 @@ impl SubprocessAgent {
             child: Mutex::new(Some(child)),
             cfg_path,
             cwd_dir,
+            settings_path,
             turn_in_flight,
             last_activity,
             stopping,
@@ -539,7 +584,236 @@ impl Drop for SubprocessAgent {
         if let Some(d) = &self.cwd_dir {
             let _ = std::fs::remove_dir_all(d);
         }
+        if let Some(s) = &self.settings_path {
+            let _ = std::fs::remove_file(s);
+        }
     }
+}
+
+// ── P2v2: the approval bridge (PreToolUse hook → /approve → egui dialog) ────
+
+/// PreToolUse hook timeout (seconds) — the ceiling for a human to answer the
+/// dialog. Fails CLOSED on expiry (`cc_spike v2` G3: timeout behaves as
+/// deny/block, turn continues), but the parent still answers first via
+/// [`APPROVAL_DEADLINE`] so the model gets a real reason instead of a hook error.
+const HOOK_TIMEOUT_SECS: u64 = 300;
+/// Parent-side deadline for a pending approval — answered `deny` when it expires.
+/// Below the hook timeout so OUR deny (with a reason the model can act on) wins
+/// the race against the hook-timeout error path.
+pub const APPROVAL_DEADLINE: Duration = Duration::from_secs(280);
+
+/// Viewer-owned `--settings` JSON: a PreToolUse hook matching exactly the
+/// hook-gated tier, whose command POSTs the hook's stdin (the tool-call JSON) to
+/// this server's `/approve` route and emits the server's decision JSON on stdout.
+/// `curl` ships with macOS, Linux distros, and Windows 10+. `--max-time` bounds
+/// curl below the hook timeout so a dead server can't wedge the hook.
+pub fn build_hook_settings(port: u16, token: &str) -> String {
+    let curl = format!(
+        "curl -sS --max-time {} -X POST -H \"Authorization: Bearer {token}\" \
+         --data-binary @- http://127.0.0.1:{port}/approve",
+        HOOK_TIMEOUT_SECS - 10
+    );
+    json!({
+        "hooks": {
+            "PreToolUse": [{
+                "matcher": HOOK_GATED_BUILTINS.join("|"),
+                "hooks": [{ "type": "command", "command": curl, "timeout": HOOK_TIMEOUT_SECS }]
+            }]
+        }
+    })
+    .to_string()
+}
+
+/// The user's verdict on one gated tool call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalDecision {
+    Allow,
+    Deny,
+}
+
+/// A session-scoped always-allow rule (in-memory ONLY — deliberately not
+/// persisted: the panel's non-persistence means a socially-engineered Allow can
+/// never silently auto-approve in a future session; rules die with ↺/restart).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AllowRule {
+    /// Always allow every call of one non-Bash tool (Edit / Write / WebFetch / …) —
+    /// the per-TOOL keying the owner picked (Claude-Desktop style).
+    Tool(String),
+    /// Always allow Bash commands whose FIRST TOKEN equals this prefix (e.g.
+    /// "cargo") — and only when the command carries no shell metacharacters, so
+    /// `cargo build; curl evil` can never ride an innocent-looking rule.
+    BashPrefix(String),
+}
+
+/// Shell metacharacters that disqualify a Bash command from matching (or
+/// creating) a prefix rule: chaining, substitution, and redirection would let an
+/// injected suffix ride an approved prefix.
+fn has_shell_metachars(cmd: &str) -> bool {
+    cmd.chars().any(|c| matches!(c, ';' | '&' | '|' | '`' | '>' | '<' | '\n')) || cmd.contains("$(")
+}
+
+/// The Bash prefix (first whitespace token) an "Always allow" click would create
+/// for `cmd` — `None` when the command has metacharacters (no rule offered).
+pub fn bash_rule_prefix(cmd: &str) -> Option<String> {
+    if has_shell_metachars(cmd) {
+        return None;
+    }
+    cmd.split_whitespace().next().map(str::to_owned)
+}
+
+/// One gated tool call awaiting the user's verdict.
+pub struct PendingApproval {
+    pub id: u64,
+    pub tool_name: String,
+    pub tool_input: Value,
+    responder: Sender<ApprovalDecision>,
+}
+
+/// The cross-thread seam between the `/approve` HTTP handler (blocks awaiting a
+/// verdict) and the egui panel (renders the dialog, delivers the verdict).
+/// Shared as `Arc`: viewer_mcp's server thread + the ChatPanel hold clones.
+#[derive(Default)]
+pub struct ApprovalBroker {
+    pending: Mutex<Vec<PendingApproval>>,
+    rules: Mutex<Vec<AllowRule>>,
+    next_id: AtomicU64,
+}
+
+impl ApprovalBroker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Does a session rule already cover this call?
+    fn rule_allows(&self, tool_name: &str, tool_input: &Value) -> bool {
+        let rules = self.rules.lock().unwrap();
+        rules.iter().any(|r| match r {
+            AllowRule::Tool(t) => t == tool_name && tool_name != "Bash",
+            AllowRule::BashPrefix(p) => {
+                tool_name == "Bash"
+                    && tool_input
+                        .get("command")
+                        .and_then(Value::as_str)
+                        .and_then(bash_rule_prefix)
+                        .is_some_and(|first| first == *p)
+            }
+        })
+    }
+
+    /// BLOCKING: called from the `/approve` handler thread. Auto-allows on a
+    /// matching session rule; otherwise queues the request for the panel and
+    /// waits for the verdict (deny on `deadline` expiry — fail closed).
+    pub fn decide(&self, tool_name: &str, tool_input: &Value, deadline: Duration) -> ApprovalDecision {
+        if self.rule_allows(tool_name, tool_input) {
+            return ApprovalDecision::Allow;
+        }
+        let (tx, rx) = mpsc::channel();
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.pending.lock().unwrap().push(PendingApproval {
+            id,
+            tool_name: tool_name.to_owned(),
+            tool_input: tool_input.clone(),
+            responder: tx,
+        });
+        match rx.recv_timeout(deadline) {
+            Ok(d) => d,
+            Err(_) => {
+                // Deadline (or a dropped responder): remove the stale entry, deny.
+                self.pending.lock().unwrap().retain(|p| p.id != id);
+                ApprovalDecision::Deny
+            }
+        }
+    }
+
+    /// The panel's per-frame poll: the oldest pending request, if any —
+    /// (id, tool_name, tool_input) for the dialog.
+    pub fn front(&self) -> Option<(u64, String, Value)> {
+        self.pending
+            .lock()
+            .unwrap()
+            .first()
+            .map(|p| (p.id, p.tool_name.clone(), p.tool_input.clone()))
+    }
+
+    pub fn has_pending(&self) -> bool {
+        !self.pending.lock().unwrap().is_empty()
+    }
+
+    /// Deliver the user's verdict for request `id`. `always` additionally records
+    /// the session rule (per-tool, or per-Bash-prefix when derivable) so matching
+    /// future calls auto-allow without a dialog.
+    pub fn resolve(&self, id: u64, decision: ApprovalDecision, always: bool) {
+        let entry = {
+            let mut pending = self.pending.lock().unwrap();
+            pending
+                .iter()
+                .position(|p| p.id == id)
+                .map(|i| pending.remove(i))
+        };
+        let Some(entry) = entry else { return };
+        if always && decision == ApprovalDecision::Allow {
+            let rule = if entry.tool_name == "Bash" {
+                entry
+                    .tool_input
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .and_then(bash_rule_prefix)
+                    .map(AllowRule::BashPrefix)
+            } else {
+                Some(AllowRule::Tool(entry.tool_name.clone()))
+            };
+            if let Some(rule) = rule {
+                let mut rules = self.rules.lock().unwrap();
+                if !rules.contains(&rule) {
+                    rules.push(rule);
+                }
+            }
+        }
+        let _ = entry.responder.send(decision);
+    }
+
+    /// Deny everything in flight and clear the session rules — ↺ New session /
+    /// backend switch (the child is being killed; leave nothing dangling).
+    pub fn reset(&self) {
+        for p in self.pending.lock().unwrap().drain(..) {
+            let _ = p.responder.send(ApprovalDecision::Deny);
+        }
+        self.rules.lock().unwrap().clear();
+    }
+
+    /// Human-readable summaries of the active session rules (⚙/dialog display).
+    pub fn rule_summaries(&self) -> Vec<String> {
+        self.rules
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| match r {
+                AllowRule::Tool(t) => format!("{t} (all calls)"),
+                AllowRule::BashPrefix(p) => format!("Bash: {p} …"),
+            })
+            .collect()
+    }
+}
+
+/// The PreToolUse decision JSON the hook must print on stdout (documented shape;
+/// `cc_spike v2` G1/G2 proved both branches live).
+pub fn hook_decision_json(decision: ApprovalDecision) -> Value {
+    let (verdict, reason) = match decision {
+        ApprovalDecision::Allow => ("allow", "approved by the user in the Legion viewer".to_owned()),
+        ApprovalDecision::Deny => (
+            "deny",
+            "The user denied this tool call in the Legion profiler viewer. Do not retry the \
+             same call; adjust your approach or explain in text what you wanted to do."
+                .to_owned(),
+        ),
+    };
+    json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": verdict,
+            "permissionDecisionReason": reason,
+        }
+    })
 }
 
 // ── P2b: stream-json → AgentEvent mapping ───────────────────────────────────
@@ -693,28 +967,169 @@ mod tests {
         );
     }
 
-    /// The `--tools` availability keep-list must never advertise a structural
-    /// never-tool (Task/Skill/SlashCommand/KillShell — sub-agent / arbitrary-command
-    /// launderers that would route around the approval dialog), and P1v2 must not yet
-    /// expose the action/egress tools (they wait for the P2v2 approval bridge).
+    /// Tool-tier invariants (P2v2): the never-tools are in NEITHER tier (they'd
+    /// launder around the dialog); the tiers are disjoint (a tool can't be both
+    /// auto-approved and hook-gated); and every hook-gated tool is covered by the
+    /// hook matcher — an available-but-unmatched action tool would be silently
+    /// denied by default mode instead of raising the dialog.
     #[test]
-    fn available_builtins_exclude_never_and_ungated_action_tools() {
+    fn tool_tiers_are_disjoint_gated_and_never_tools_stay_out() {
         let never = ["Task", "Skill", "SlashCommand", "KillShell"];
         for n in never {
+            assert!(!READONLY_BUILTINS.contains(&n), "{n} must not be advertised");
+            assert!(!HOOK_GATED_BUILTINS.contains(&n), "{n} must not be advertised");
+        }
+        for t in READONLY_BUILTINS {
             assert!(
-                !AVAILABLE_BUILTINS.contains(&n),
-                "{n} is a structural never-tool and must not be advertised"
+                !HOOK_GATED_BUILTINS.contains(t),
+                "{t} cannot be both auto-approved and hook-gated"
             );
         }
-        // Until the approval bridge (P2v2) exists, no action/egress built-in is
-        // available: enabling one here would let it run unprompted in headless mode.
-        let action = ["Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"];
-        for a in action {
+        let settings = build_hook_settings(8765, "tok");
+        let v: Value = serde_json::from_str(&settings).unwrap();
+        let matcher = v
+            .pointer("/hooks/PreToolUse/0/matcher")
+            .and_then(Value::as_str)
+            .expect("matcher");
+        for t in HOOK_GATED_BUILTINS {
             assert!(
-                !AVAILABLE_BUILTINS.contains(&a),
-                "{a} needs the P2v2 approval bridge before it is advertised"
+                matcher.split('|').any(|m| m == *t),
+                "{t} is available but not covered by the hook matcher"
             );
         }
+        // And the tools_arg advertises exactly the two tiers.
+        let arg = tools_arg();
+        for t in READONLY_BUILTINS.iter().chain(HOOK_GATED_BUILTINS.iter()) {
+            assert!(arg.split(',').any(|m| m == *t), "{t} missing from --tools");
+        }
+    }
+
+    /// The hook settings must carry the curl bridge with the bearer token, the
+    /// /approve URL, and a human-scale timeout.
+    #[test]
+    fn hook_settings_carry_curl_bridge_token_and_timeout() {
+        let s = build_hook_settings(12345, "sekrit-tok");
+        let v: Value = serde_json::from_str(&s).unwrap();
+        let cmd = v
+            .pointer("/hooks/PreToolUse/0/hooks/0/command")
+            .and_then(Value::as_str)
+            .expect("command");
+        assert!(cmd.starts_with("curl "), "hook command must be curl");
+        assert!(cmd.contains("Bearer sekrit-tok"));
+        assert!(cmd.contains("http://127.0.0.1:12345/approve"));
+        let timeout = v
+            .pointer("/hooks/PreToolUse/0/hooks/0/timeout")
+            .and_then(Value::as_u64)
+            .expect("timeout");
+        assert!(timeout >= 120, "humans need minutes, not seconds");
+        assert!(
+            APPROVAL_DEADLINE.as_secs() < timeout,
+            "parent deadline must answer before the hook times out"
+        );
+    }
+
+    // ── P2v2 broker ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn broker_resolves_allow_and_deny_across_threads() {
+        let broker = Arc::new(ApprovalBroker::new());
+        for (verdict, expect) in [
+            (ApprovalDecision::Allow, ApprovalDecision::Allow),
+            (ApprovalDecision::Deny, ApprovalDecision::Deny),
+        ] {
+            let b = Arc::clone(&broker);
+            let resolver = std::thread::spawn(move || {
+                // Wait for the request to appear, then answer it.
+                for _ in 0..100 {
+                    if let Some((id, tool, _)) = b.front() {
+                        assert_eq!(tool, "Bash");
+                        b.resolve(id, verdict, false);
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                panic!("request never appeared");
+            });
+            let got = broker.decide(
+                "Bash",
+                &json!({"command": "cargo build"}),
+                Duration::from_secs(5),
+            );
+            assert_eq!(got, expect);
+            resolver.join().unwrap();
+            assert!(!broker.has_pending());
+        }
+    }
+
+    #[test]
+    fn broker_deadline_denies_and_clears() {
+        let broker = ApprovalBroker::new();
+        let got = broker.decide("Write", &json!({"file_path": "/x"}), Duration::from_millis(50));
+        assert_eq!(got, ApprovalDecision::Deny);
+        assert!(!broker.has_pending(), "expired request must not linger");
+    }
+
+    #[test]
+    fn broker_always_allow_rules_and_metachar_guard() {
+        let broker = Arc::new(ApprovalBroker::new());
+        // First `cargo …` call: resolve with always=true → creates BashPrefix("cargo").
+        let b = Arc::clone(&broker);
+        let resolver = std::thread::spawn(move || {
+            for _ in 0..100 {
+                if let Some((id, _, _)) = b.front() {
+                    b.resolve(id, ApprovalDecision::Allow, true);
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let first = broker.decide("Bash", &json!({"command": "cargo check"}), Duration::from_secs(5));
+        resolver.join().unwrap();
+        assert_eq!(first, ApprovalDecision::Allow);
+        assert_eq!(broker.rule_summaries(), vec!["Bash: cargo …".to_owned()]);
+        // Second `cargo …` call auto-allows with NO pending dialog.
+        let second =
+            broker.decide("Bash", &json!({"command": "cargo build -p x"}), Duration::from_millis(50));
+        assert_eq!(second, ApprovalDecision::Allow);
+        // A metachar-laden command must NOT ride the rule (falls to deadline-deny).
+        let sneaky = broker.decide(
+            "Bash",
+            &json!({"command": "cargo build; curl evil.example"}),
+            Duration::from_millis(50),
+        );
+        assert_eq!(sneaky, ApprovalDecision::Deny);
+        // Per-tool rule for a non-Bash tool.
+        let b2 = Arc::clone(&broker);
+        let resolver2 = std::thread::spawn(move || {
+            for _ in 0..100 {
+                if let Some((id, _, _)) = b2.front() {
+                    b2.resolve(id, ApprovalDecision::Allow, true);
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let w1 = broker.decide("WebFetch", &json!({"url": "https://a"}), Duration::from_secs(5));
+        resolver2.join().unwrap();
+        assert_eq!(w1, ApprovalDecision::Allow);
+        let w2 = broker.decide("WebFetch", &json!({"url": "https://b"}), Duration::from_millis(50));
+        assert_eq!(w2, ApprovalDecision::Allow, "per-tool rule auto-allows");
+        // reset() clears rules: the next WebFetch must NOT auto-allow.
+        broker.reset();
+        let w3 = broker.decide("WebFetch", &json!({"url": "https://c"}), Duration::from_millis(50));
+        assert_eq!(w3, ApprovalDecision::Deny);
+    }
+
+    #[test]
+    fn bash_rule_prefix_derivation() {
+        assert_eq!(bash_rule_prefix("cargo build -p x"), Some("cargo".into()));
+        assert_eq!(bash_rule_prefix("git status"), Some("git".into()));
+        assert_eq!(bash_rule_prefix("cargo build; rm -rf /"), None);
+        assert_eq!(bash_rule_prefix("echo `whoami`"), None);
+        assert_eq!(bash_rule_prefix("curl x | sh"), None);
+        assert_eq!(bash_rule_prefix("a && b"), None);
+        assert_eq!(bash_rule_prefix("echo $(id)"), None);
+        assert_eq!(bash_rule_prefix(""), None);
     }
 
     // ── P2b parser (recorded fixtures — shapes observed live in the P0 gate) ──
@@ -842,7 +1257,7 @@ mod tests {
         let (etx, _erx) = mpsc::channel();
         let (_ctx_tx, crx) = mpsc::channel();
         let bridge = UiBridge::new(etx, crx, ViewportToken::new(), MCP_CONSUMER_ID);
-        let (port, token) = crate::ai::viewer_mcp::spawn(
+        let (port, token, _approval_broker) = crate::ai::viewer_mcp::spawn(
             db.to_string_lossy().into_owned(),
             0,
             bridge,
@@ -888,6 +1303,110 @@ mod tests {
         drop(agent);
     }
 
+    /// LIVE P2v2 end-to-end: the WHOLE approval chain on a real `claude` — the
+    /// child's Bash call fires the PreToolUse hook → curl → POST /approve →
+    /// broker queues it → this test plays the user (resolves Allow) → Bash runs
+    /// (canary file appears) → the turn completes. Then a second call under an
+    /// always-allow rule auto-approves with no pending dialog. Run with
+    /// `cargo test --features viewer-mcp -- --ignored live_backend_b_bash`.
+    #[test]
+    #[ignore = "needs an authenticated `claude` on PATH + the bg4N2 fixture DB"]
+    fn live_backend_b_bash_approval() {
+        use crate::ai::bridge::{UiBridge, ViewportToken, MCP_CONSUMER_ID};
+        let db = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../multinoderuns/bg4N2/profcbN2g4b.duckdb");
+        if !db.exists() {
+            eprintln!("fixture missing; skipping");
+            return;
+        }
+        let (etx, _erx) = mpsc::channel();
+        let (_ctx_tx, crx) = mpsc::channel();
+        let bridge = UiBridge::new(etx, crx, ViewportToken::new(), MCP_CONSUMER_ID);
+        let (port, token, broker) = crate::ai::viewer_mcp::spawn(
+            db.to_string_lossy().into_owned(),
+            0,
+            bridge,
+            None,
+            None,
+        )
+        .expect("server");
+
+        // Play the user: approve the FIRST pending request (whatever tool the model
+        // picked — "touch X" can legitimately arrive as Bash OR Write) with
+        // "Always allow", then deny the rest. Log everything for post-mortem.
+        let user = Arc::clone(&broker);
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen2 = Arc::clone(&seen);
+        let clicker_stop = Arc::new(AtomicBool::new(false));
+        let clicker_stop2 = Arc::clone(&clicker_stop);
+        let clicker = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(170);
+            let mut approved = false;
+            while std::time::Instant::now() < deadline && !clicker_stop2.load(Ordering::Relaxed) {
+                if let Some((id, tool, input)) = user.front() {
+                    eprintln!("[clicker] pending: {tool} {input}");
+                    seen2.lock().unwrap().push(tool.clone());
+                    if !approved {
+                        user.resolve(id, ApprovalDecision::Allow, true);
+                        approved = true;
+                    } else {
+                        user.resolve(id, ApprovalDecision::Deny, false);
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+
+        let canary = std::env::temp_dir().join(format!("cc_live_p2v2_{}", std::process::id()));
+        let _ = std::fs::remove_file(&canary);
+        let (tx, rx) = mpsc::channel::<AgentEvent>();
+        let agent =
+            SubprocessAgent::spawn(port, &token, "claude-sonnet-4-6", None, tx).expect("spawn claude");
+        agent
+            .send_turn(&format!(
+                "Use the Bash tool to run exactly this command: touch {} — then reply with \
+                 exactly: TOUCHED",
+                canary.display()
+            ))
+            .expect("send");
+        let deadline = std::time::Instant::now() + Duration::from_secs(180);
+        let mut saw_complete = false;
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_secs(5)) {
+                Ok(AgentEvent::Complete(_)) => {
+                    saw_complete = true;
+                    break;
+                }
+                Ok(AgentEvent::Error(e)) => panic!("agent error: {e}"),
+                Ok(_) => {}
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => panic!("pump died"),
+            }
+        }
+        let tools_seen = seen.lock().unwrap().clone();
+        assert!(
+            saw_complete,
+            "no Complete within deadline; hook requests seen: {tools_seen:?}"
+        );
+        assert!(
+            canary.exists(),
+            "approved tool never ran — the hook→/approve→resolve chain is broken; seen: {tools_seen:?}"
+        );
+        assert!(
+            !tools_seen.is_empty(),
+            "the canary appeared but NO hook request arrived — the gate is being bypassed"
+        );
+        assert!(
+            !broker.rule_summaries().is_empty(),
+            "Always-allow click must have created a session rule"
+        );
+        let _ = std::fs::remove_file(&canary);
+        drop(agent);
+        broker.reset();
+        clicker_stop.store(true, Ordering::Relaxed);
+        clicker.join().unwrap();
+    }
+
     /// P2a lifecycle on a real child (`cat`): send_turn plumbs through the
     /// writer thread; `cat` echoes the user line (silent in the parser — a
     /// user message with TEXT, not tool_result, maps to nothing); Drop closes
@@ -904,6 +1423,7 @@ mod tests {
             Command::new("cat"),
             cfg.clone(),
             Some(scratch.clone()),
+            None,
             tx,
         )
         .unwrap();

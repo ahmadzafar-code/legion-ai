@@ -207,10 +207,9 @@ fn json_response(code: u16, value: &Value) -> Vec<u8> {
     http_response(code, "application/json", &body)
 }
 
-/// Read one full HTTP request (headers + `Content-Length` body) from `stream`,
-/// dispatch it, and write the response. One request per connection (the client
-/// opens a fresh connection per POST).
-fn serve_one(stream: &mut TcpStream, ctx: &ServerCtx) -> std::io::Result<()> {
+/// Read one full HTTP request (headers + `Content-Length` body) from `stream`.
+/// One request per connection (the client opens a fresh connection per POST).
+fn read_request(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
@@ -236,9 +235,61 @@ fn serve_one(stream: &mut TcpStream, ctx: &ServerCtx) -> std::io::Result<()> {
         }
         buf.extend_from_slice(&tmp[..n]);
     }
-    let resp = handle_http_request(&buf, ctx);
-    stream.write_all(&resp)?;
-    stream.flush()
+    Ok(buf)
+}
+
+/// Is this raw request `POST /approve` (the PreToolUse hook bridge)? Cheap check
+/// on the request line only — full parsing/auth happens in the handler.
+fn is_approve_request(raw: &[u8]) -> bool {
+    let mut headers = [httparse::EMPTY_HEADER; 32];
+    let mut req = httparse::Request::new(&mut headers);
+    req.parse(raw).is_ok() && req.method == Some("POST") && req.path == Some("/approve")
+}
+
+/// P2v2: the PreToolUse approval bridge. The hook's stdin JSON (tool_name +
+/// tool_input + …) arrives as the POST body; the response body is the
+/// `hookSpecificOutput` decision JSON the hook prints on stdout. Same Origin +
+/// bearer checks as /mcp (the curl command in the child's settings file carries
+/// the same session token). BLOCKS (up to [`APPROVAL_DEADLINE`]) while the panel
+/// shows the dialog — callers must run this on a detached thread, never the
+/// serial /mcp loop.
+pub fn handle_approve_request(
+    raw: &[u8],
+    expected_token: &str,
+    broker: &crate::ai::claude_code::ApprovalBroker,
+) -> Vec<u8> {
+    use crate::ai::claude_code::{hook_decision_json, APPROVAL_DEADLINE};
+
+    let mut headers = [httparse::EMPTY_HEADER; 32];
+    let mut req = httparse::Request::new(&mut headers);
+    let header_len = match req.parse(raw) {
+        Ok(httparse::Status::Complete(n)) => n,
+        _ => return http_response(400, "text/plain", b"bad request"),
+    };
+    if let Some(origin) = header_value(&req, "origin") {
+        if !is_localhost_origin(origin) {
+            return http_response(403, "text/plain", b"forbidden: non-local Origin");
+        }
+    }
+    let presented = header_value(&req, "authorization").and_then(|v| strip_bearer(v.trim()));
+    if presented.is_none_or(|t| !token_eq(expected_token, t)) {
+        return http_response(401, "text/plain", b"unauthorized: missing or bad bearer token");
+    }
+
+    let content_length = header_value(&req, "content-length")
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    let body_end = header_len.saturating_add(content_length).min(raw.len());
+    let body = &raw[header_len.min(raw.len())..body_end];
+    let event: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return http_response(400, "text/plain", format!("bad hook JSON: {e}").as_bytes()),
+    };
+    let tool_name = event.get("tool_name").and_then(Value::as_str).unwrap_or("?");
+    let tool_input = event.get("tool_input").cloned().unwrap_or(Value::Null);
+
+    let decision = broker.decide(tool_name, &tool_input, APPROVAL_DEADLINE);
+    json_response(200, &hook_decision_json(decision))
 }
 
 /// Start the in-viewer HTTP MCP server on its OWN thread (never the egui main
@@ -261,12 +312,15 @@ pub fn spawn(
     bridge: crate::ai::bridge::UiBridge,
     wiki_root: Option<String>,
     code_root: Option<String>,
-) -> std::io::Result<(u16, String)> {
+) -> std::io::Result<(u16, String, std::sync::Arc<crate::ai::claude_code::ApprovalBroker>)> {
     let listener = TcpListener::bind(("127.0.0.1", port))?;
     let bound = listener.local_addr()?.port();
     // Server hardening: every POST /mcp must present this bearer token. Random
     // per session; LEGION_VIEWER_MCP_TOKEN overrides for a stable registration.
     let token = session_token();
+    // P2v2: the approval broker behind POST /approve (the PreToolUse hook bridge).
+    // Returned so core.rs can hand it to the chat panel (which renders the dialog).
+    let broker = std::sync::Arc::new(crate::ai::claude_code::ApprovalBroker::new());
     eprintln!("[legion-viewer] in-viewer MCP (data + visual tools) on http://127.0.0.1:{bound}/mcp");
     eprintln!(
         "[legion-viewer] register: claude mcp add --transport http legion-viewer \
@@ -276,6 +330,7 @@ pub fn spawn(
         "[legion-viewer] (token is random per session; set LEGION_VIEWER_MCP_TOKEN for a stable one)"
     );
     let ctx_token = token.clone();
+    let loop_broker = std::sync::Arc::clone(&broker);
     std::thread::Builder::new()
         .name("legion-viewer-mcp".to_owned())
         .spawn(move || {
@@ -283,12 +338,30 @@ pub fn spawn(
                 .with_protocol(HTTP_PROTOCOL_VERSION)
                 .with_wiki_root(wiki_root)
                 .with_ui_bridge(bridge)
-                .with_auth_token(Some(ctx_token));
+                .with_auth_token(Some(ctx_token.clone()));
             for mut stream in listener.incoming().flatten() {
-                let _ = serve_one(&mut stream, &ctx);
+                let Ok(buf) = read_request(&mut stream) else { continue };
+                if is_approve_request(&buf) {
+                    // An approval blocks for MINUTES on a human verdict — hand it to
+                    // a detached thread so the serial /mcp loop (the viewport-
+                    // serialization contract above) never stalls behind a dialog.
+                    let tok = ctx_token.clone();
+                    let brk = std::sync::Arc::clone(&loop_broker);
+                    let _ = std::thread::Builder::new()
+                        .name("legion-viewer-approve".to_owned())
+                        .spawn(move || {
+                            let resp = handle_approve_request(&buf, &tok, &brk);
+                            let _ = stream.write_all(&resp);
+                            let _ = stream.flush();
+                        });
+                } else {
+                    let resp = handle_http_request(&buf, &ctx);
+                    let _ = stream.write_all(&resp);
+                    let _ = stream.flush();
+                }
             }
         })?;
-    Ok((bound, token))
+    Ok((bound, token, broker))
 }
 
 #[cfg(test)]
@@ -601,5 +674,105 @@ mod tests {
         assert_eq!(v["result"]["isError"], true, "exfil must be a tool error");
         let text = v["result"]["content"][0]["text"].as_str().unwrap();
         assert!(!text.contains("localhost"), "must not leak /etc/hosts: {text}");
+    }
+
+    // ── P2v2: /approve (PreToolUse hook bridge) ─────────────────────────────
+
+    /// Build a raw `POST /approve` request carrying a hook event body.
+    fn post_approve(body: &str, auth: Option<&str>) -> Vec<u8> {
+        let auth_line = auth.map(|a| format!("Authorization: {a}\r\n")).unwrap_or_default();
+        format!(
+            "POST /approve HTTP/1.1\r\nHost: 127.0.0.1:9\r\nContent-Type: application/json\r\n{auth_line}Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
+    const HOOK_EVENT: &str = r#"{"session_id":"s","cwd":"/tmp","tool_name":"Bash","tool_input":{"command":"cargo check"}}"#;
+
+    #[test]
+    fn approve_requires_bearer_token() {
+        let broker = crate::ai::claude_code::ApprovalBroker::new();
+        let raw = post_approve(HOOK_EVENT, None);
+        let (status, _) = split_response(&handle_approve_request(&raw, "tok-1", &broker));
+        assert_eq!(status, 401);
+        let raw2 = post_approve(HOOK_EVENT, Some("Bearer wrong"));
+        let (status2, _) = split_response(&handle_approve_request(&raw2, "tok-1", &broker));
+        assert_eq!(status2, 401);
+        assert!(!broker.has_pending(), "unauthorized requests must never queue");
+    }
+
+    /// A pre-seeded session rule auto-allows without any pending dialog, and the
+    /// response body is the documented hookSpecificOutput allow JSON.
+    #[test]
+    fn approve_auto_allows_on_session_rule() {
+        use crate::ai::claude_code::{ApprovalBroker, ApprovalDecision};
+        let broker = std::sync::Arc::new(ApprovalBroker::new());
+        // Seed the BashPrefix("cargo") rule through the public path: resolve the
+        // first request with always=true from a resolver thread.
+        let b = std::sync::Arc::clone(&broker);
+        let resolver = std::thread::spawn(move || {
+            for _ in 0..200 {
+                if let Some((id, _, _)) = b.front() {
+                    b.resolve(id, ApprovalDecision::Allow, true);
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        });
+        let raw = post_approve(HOOK_EVENT, Some("Bearer tok-1"));
+        let (status, body) = split_response(&handle_approve_request(&raw, "tok-1", &broker));
+        resolver.join().unwrap();
+        assert_eq!(status, 200);
+        let v: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "allow");
+        // Second matching call: no dialog needed — the rule answers instantly.
+        let raw2 = post_approve(
+            r#"{"tool_name":"Bash","tool_input":{"command":"cargo build -p x"}}"#,
+            Some("Bearer tok-1"),
+        );
+        let (status2, body2) = split_response(&handle_approve_request(&raw2, "tok-1", &broker));
+        assert_eq!(status2, 200);
+        let v2: Value = serde_json::from_str(&body2).unwrap();
+        assert_eq!(v2["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert!(!broker.has_pending());
+    }
+
+    /// A user Deny resolves the blocked handler with the documented deny JSON
+    /// (reason included — the model continues its turn on it).
+    #[test]
+    fn approve_deny_resolves_with_reason() {
+        use crate::ai::claude_code::{ApprovalBroker, ApprovalDecision};
+        let broker = std::sync::Arc::new(ApprovalBroker::new());
+        let b = std::sync::Arc::clone(&broker);
+        let resolver = std::thread::spawn(move || {
+            for _ in 0..200 {
+                if let Some((id, tool, input)) = b.front() {
+                    assert_eq!(tool, "Bash");
+                    assert_eq!(input["command"], "rm -rf /");
+                    b.resolve(id, ApprovalDecision::Deny, false);
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            panic!("approval never queued");
+        });
+        let raw = post_approve(
+            r#"{"tool_name":"Bash","tool_input":{"command":"rm -rf /"}}"#,
+            Some("Bearer tok-1"),
+        );
+        let (status, body) = split_response(&handle_approve_request(&raw, "tok-1", &broker));
+        resolver.join().unwrap();
+        assert_eq!(status, 200);
+        let v: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
+        let reason = v["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap();
+        assert!(reason.contains("denied"), "deny must carry an actionable reason");
+    }
+
+    #[test]
+    fn approve_request_line_detection() {
+        assert!(is_approve_request(&post_approve(HOOK_EVENT, None)));
+        assert!(!is_approve_request(&post(INIT, None)));
     }
 }

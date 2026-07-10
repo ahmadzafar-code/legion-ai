@@ -3459,6 +3459,10 @@ impl eframe::App for ProfApp {
                 // must present (server hardening); the (port, token) pair flows to
                 // the chat panel so Backend B can build its --mcp-config.
                 let mut endpoint: Option<(u16, String)> = None;
+                // P2v2: the spawn also returns the ApprovalBroker behind POST
+                // /approve — handed to the chat panel, which renders the
+                // Deny/Allow/Always-allow dialog for hook-gated tool calls.
+                let mut approval_broker = None;
                 match crate::ai::viewer_mcp::spawn(
                     duckdb_path.clone(),
                     8765,
@@ -3466,7 +3470,10 @@ impl eframe::App for ProfApp {
                     wiki_root.clone(),
                     code_root.clone(),
                 ) {
-                    Ok((port, token)) => endpoint = Some((port, token)),
+                    Ok((port, token, broker)) => {
+                        endpoint = Some((port, token));
+                        approval_broker = Some(broker);
+                    }
                     Err(first_err) => {
                         let egui_ctx2 = ctx.clone();
                         let bridge2 = cx
@@ -3475,11 +3482,12 @@ impl eframe::App for ProfApp {
                         match crate::ai::viewer_mcp::spawn(
                             duckdb_path, 0, bridge2, wiki_root, code_root,
                         ) {
-                            Ok((port, token)) => {
+                            Ok((port, token, broker)) => {
                                 eprintln!(
                                     "[legion-viewer] port 8765 unavailable ({first_err}); using ephemeral port {port}"
                                 );
                                 endpoint = Some((port, token));
+                                approval_broker = Some(broker);
                             }
                             Err(e) => eprintln!(
                                 "[legion-viewer] in-viewer MCP server failed to start: \
@@ -3490,6 +3498,7 @@ impl eframe::App for ProfApp {
                 }
                 cx.viewer_mcp_port = endpoint.as_ref().map(|(p, _)| *p);
                 cx.chat_panel.set_mcp_endpoint(endpoint);
+                cx.chat_panel.set_approval_broker(approval_broker);
                 cx.viewer_mcp_started = true;
             }
         }

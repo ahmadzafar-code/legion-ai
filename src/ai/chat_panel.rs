@@ -489,6 +489,12 @@ pub struct ChatPanel {
     /// panel clone can never kill the shared child.
     #[cfg(feature = "viewer-mcp")]
     cc_agent: Arc<Mutex<Option<Arc<crate::ai::claude_code::SubprocessAgent>>>>,
+    /// P2v2: the approval broker behind the MCP server's /approve route — the
+    /// panel polls it each frame and renders the Deny/Allow/Always-allow dialog
+    /// for hook-gated tool calls (Bash/Edit/Write/WebFetch/…). Wired by core.rs
+    /// alongside `mcp_endpoint`; Arc-shared with the server thread.
+    #[cfg(feature = "viewer-mcp")]
+    approval_broker: Option<Arc<crate::ai::claude_code::ApprovalBroker>>,
     /// Markdown render cache for analysis messages (egui_commonmark). Arc-shared
     /// across panel clones; `CommonMarkCache` is not `Clone`.
     md_cache: Arc<Mutex<egui_commonmark::CommonMarkCache>>,
@@ -536,6 +542,8 @@ impl Clone for ChatPanel {
             mcp_endpoint: self.mcp_endpoint.clone(),
             #[cfg(feature = "viewer-mcp")]
             cc_agent: Arc::clone(&self.cc_agent),
+            #[cfg(feature = "viewer-mcp")]
+            approval_broker: self.approval_broker.clone(),
             md_cache: Arc::clone(&self.md_cache),
             chat_font_scale: self.chat_font_scale,
         }
@@ -605,6 +613,8 @@ impl ChatPanel {
             mcp_endpoint: None,
             #[cfg(feature = "viewer-mcp")]
             cc_agent: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "viewer-mcp")]
+            approval_broker: None,
             md_cache: Arc::new(Mutex::new(egui_commonmark::CommonMarkCache::default())),
             chat_font_scale: 1.15,
         }
@@ -878,6 +888,17 @@ impl ChatPanel {
     #[cfg(feature = "viewer-mcp")]
     pub fn set_mcp_endpoint(&mut self, endpoint: Option<(u16, String)>) {
         self.mcp_endpoint = endpoint;
+    }
+
+    /// Wire the approval broker (P2v2) — called by `core.rs` alongside
+    /// [`Self::set_mcp_endpoint`]. The panel polls it each frame and renders the
+    /// Deny/Allow/Always-allow dialog for the child's hook-gated tool calls.
+    #[cfg(feature = "viewer-mcp")]
+    pub fn set_approval_broker(
+        &mut self,
+        broker: Option<Arc<crate::ai::claude_code::ApprovalBroker>>,
+    ) {
+        self.approval_broker = broker;
     }
 
     /// End-of-turn receiver cleanup — CHANNEL-LIFETIME critical (see
@@ -1584,6 +1605,12 @@ impl ChatPanel {
                         agent.hard_stop();
                         *self.event_rx.lock().unwrap() = None;
                         self.pending_request = false;
+                    }
+                    // P2v2: deny any in-flight approval and clear the session's
+                    // always-allow rules — they must not outlive the child.
+                    #[cfg(feature = "viewer-mcp")]
+                    if let Some(broker) = &self.approval_broker {
+                        broker.reset();
                     }
                     self.add_message(ChatMessageKind::System, "Session cleared.");
                 }
@@ -2412,9 +2439,142 @@ impl ChatPanel {
             );
         }
 
+        // P2v2: the tool-approval dialog (rendered LAST so it overlays everything).
+        #[cfg(feature = "viewer-mcp")]
+        self.ui_approval_dialog(ctx);
+
         // Keep repainting while waiting so poll_events() fires promptly
         if self.pending_request {
             ctx.request_repaint();
+        }
+    }
+
+    /// P2v2: the Deny / Allow / Always-allow dialog for the Claude Code child's
+    /// hook-gated tool calls (Bash/Edit/Write/NotebookEdit/WebFetch/WebSearch).
+    /// The /approve handler thread is BLOCKED on this verdict; the modal shows the
+    /// FULL command/path/URL (never the 120-char transcript preview — an approval
+    /// must be judgeable) plus a severity badge so a shell prompt can never look
+    /// like a routine one.
+    #[cfg(feature = "viewer-mcp")]
+    fn ui_approval_dialog(&mut self, ctx: &egui::Context) {
+        use crate::ai::claude_code::{bash_rule_prefix, ApprovalDecision};
+
+        let Some(broker) = self.approval_broker.clone() else { return };
+        let Some((id, tool_name, tool_input)) = broker.front() else { return };
+        // A verdict can arrive from a background thread at any time — keep frames
+        // coming while the dialog is up (cheap: only while a request is pending).
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+
+        // Severity tier: the one visual cue that fights rubber-stamp fatigue.
+        let (badge, badge_color) = match tool_name.as_str() {
+            "Bash" => ("SHELL", egui::Color32::from_rgb(220, 20, 20)),
+            "Edit" | "Write" | "NotebookEdit" => ("WRITE", egui::Color32::from_rgb(220, 100, 20)),
+            "WebFetch" | "WebSearch" => ("NETWORK", egui::Color32::from_rgb(30, 100, 220)),
+            _ => ("TOOL", egui::Color32::from_rgb(120, 120, 120)),
+        };
+        // What an informed verdict needs to see, per tool.
+        let detail: String = match tool_name.as_str() {
+            "Bash" => tool_input
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<no command>")
+                .to_owned(),
+            "Edit" | "Write" | "NotebookEdit" => {
+                let path = tool_input
+                    .get("file_path")
+                    .or_else(|| tool_input.get("notebook_path"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("<no path>");
+                let body = tool_input
+                    .get("content")
+                    .or_else(|| tool_input.get("new_string"))
+                    .or_else(|| tool_input.get("new_source"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if body.is_empty() { path.to_owned() } else { format!("{path}\n\n{body}") }
+            }
+            "WebFetch" => tool_input
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<no url>")
+                .to_owned(),
+            "WebSearch" => tool_input
+                .get("query")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<no query>")
+                .to_owned(),
+            _ => tool_input.to_string(),
+        };
+        // "Always allow" scope: per-tool for non-Bash; per-command-prefix for Bash
+        // (and not offered at all for metachar-laden commands).
+        let always_label: Option<String> = if tool_name == "Bash" {
+            tool_input
+                .get("command")
+                .and_then(|v| v.as_str())
+                .and_then(bash_rule_prefix)
+                .map(|p| format!("Always allow `{p} …`"))
+        } else {
+            Some(format!("Always allow {tool_name}"))
+        };
+
+        let mut verdict: Option<(ApprovalDecision, bool)> = None;
+        egui::Window::new("Claude Code asks permission")
+            .id(egui::Id::new("cc_approval_dialog"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(30, 30, 30));
+                ui.set_max_width(520.0);
+                ui.horizontal(|ui| {
+                    egui::Frame::none()
+                        .fill(badge_color)
+                        .rounding(4.0)
+                        .inner_margin(egui::Margin::symmetric(6.0, 2.0))
+                        .show(ui, |ui: &mut egui::Ui| {
+                            ui.label(
+                                egui::RichText::new(badge)
+                                    .strong()
+                                    .size(11.0)
+                                    .color(egui::Color32::WHITE),
+                            );
+                        });
+                    ui.label(egui::RichText::new(&tool_name).strong().size(15.0));
+                });
+                ui.add_space(6.0);
+                egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(&detail).monospace().size(12.5))
+                            .wrap(),
+                    );
+                });
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(egui::RichText::new("Deny").color(egui::Color32::from_rgb(180, 30, 30)))
+                        .clicked()
+                    {
+                        verdict = Some((ApprovalDecision::Deny, false));
+                    }
+                    if ui.button("Allow").clicked() {
+                        verdict = Some((ApprovalDecision::Allow, false));
+                    }
+                    if let Some(label) = &always_label {
+                        if ui
+                            .button(label)
+                            .on_hover_text(
+                                "Auto-approve matching calls for THIS session only \
+                                 (cleared by ↺ New session / app restart)",
+                            )
+                            .clicked()
+                        {
+                            verdict = Some((ApprovalDecision::Allow, true));
+                        }
+                    }
+                });
+            });
+        if let Some((decision, always)) = verdict {
+            broker.resolve(id, decision, always);
         }
     }
 }
