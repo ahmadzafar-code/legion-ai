@@ -3648,17 +3648,32 @@ impl eframe::App for ProfApp {
                 // Right-aligned Legion AI Co-Pilot toggle button
                 #[cfg(feature = "ai")]
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let color = if cx.chat_panel.visible {
-                        egui::Color32::from_rgb(59, 130, 246) // blue accent when open
+                    // A real button: filled blue while the panel is open, grey
+                    // otherwise. (No emoji — 🤖 was a tofu box in egui's fonts.)
+                    let (fill, text_color) = if cx.chat_panel.visible {
+                        (egui::Color32::from_rgb(59, 130, 246), egui::Color32::WHITE)
                     } else {
-                        egui::Color32::from_rgb(60, 60, 60)
+                        (
+                            egui::Color32::from_rgb(232, 234, 238),
+                            egui::Color32::from_rgb(30, 30, 30),
+                        )
                     };
-                    let label = egui::RichText::new("🤖 Legion AI Co-Pilot")
+                    let label = egui::RichText::new("Legion AI Co-Pilot")
                         .strong()
-                        .size(14.0)
-                        .color(color);
+                        .size(15.5)
+                        .color(text_color);
                     if ui
-                        .add(egui::Button::new(label).frame(true))
+                        .add(
+                            egui::Button::new(label)
+                                .fill(fill)
+                                .stroke(egui::Stroke::new(
+                                    1.0,
+                                    egui::Color32::from_rgb(190, 195, 205),
+                                ))
+                                .rounding(6.0)
+                                .min_size(egui::vec2(0.0, 28.0)),
+                        )
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
                         .on_hover_text("Toggle the Legion AI Co-Pilot")
                         .clicked()
                     {

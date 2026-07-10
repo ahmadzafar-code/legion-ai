@@ -1072,38 +1072,9 @@ impl ChatPanel {
         ui.horizontal(|ui| {
             // Right-aligned controls (no title — it's redundant with the toolbar toggle)
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // New session button
-                // Best-effort turn interrupt (Backend B only): a stream-json
-                // interrupt control on the child's stdin. If the CLI ignores it
-                // the turn just continues — ↺ remains the guaranteed cancel.
-                #[cfg(feature = "viewer-mcp")]
-                {
-                    let cc_busy =
-                        self.pending_request && self.cc_agent.lock().unwrap().is_some();
-                    if ui
-                        .add_enabled(cc_busy, egui::Button::new("⏹"))
-                        .on_hover_text("Interrupt the current turn (best-effort)")
-                        .clicked()
-                    {
-                        let sent = self
-                            .cc_agent
-                            .lock()
-                            .unwrap()
-                            .as_ref()
-                            .map(|a| a.interrupt_turn());
-                        self.add_message(
-                            ChatMessageKind::System,
-                            match sent {
-                                Some(Ok(())) => {
-                                    "Interrupt sent (best-effort — ↺ force-stops if ignored)."
-                                        .to_owned()
-                                }
-                                Some(Err(e)) => format!("⚠ interrupt failed: {e}"),
-                                None => "⚠ no Claude Code session to interrupt".to_owned(),
-                            },
-                        );
-                    }
-                }
+                // New session button (the guaranteed cancel — the old separate
+                // ⏹ best-effort interrupt button was unrecognizable and removed;
+                // interrupt_turn() remains available in code).
                 // ↺ is the guaranteed cancel for Backend B, so it stays clickable
                 // MID-turn while a Claude Code child exists (hard_stop kills the
                 // child; the reader sees EOF). Native keeps the original
@@ -1166,7 +1137,7 @@ impl ChatPanel {
                     "Add a DuckDB via the ＋ menu".to_string(),
                 ),
             };
-            ui.label(egui::RichText::new(db_label).small().color(db_color))
+            ui.label(egui::RichText::new(db_label).size(13.5).color(db_color))
                 .on_hover_text(&db_hover);
 
             // Code chip
@@ -1187,7 +1158,7 @@ impl ChatPanel {
                     "Optional — add a code repo via the ＋ menu".to_string(),
                 ),
             };
-            ui.label(egui::RichText::new(code_label).small().color(code_color))
+            ui.label(egui::RichText::new(code_label).size(13.5).color(code_color))
                 .on_hover_text(&code_hover);
 
             // Visual chip
@@ -1195,7 +1166,7 @@ impl ChatPanel {
                 ToolStatus::Ready => ("Visual •", egui::Color32::from_rgb(34, 139, 34)),
                 _ => ("Visual ○", egui::Color32::from_rgb(160, 160, 160)),
             };
-            ui.label(egui::RichText::new(vis_label).small().color(vis_color))
+            ui.label(egui::RichText::new(vis_label).size(13.5).color(vis_color))
                 .on_hover_text("Screenshot + zoom always available");
 
             // Model + API key status. The ClaudeCode backend needs no key, so the
@@ -1314,35 +1285,31 @@ impl ChatPanel {
             resp.clicked()
         };
 
-        // Two side-by-side cards with a small gutter, inset from the walls.
-        ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            let gutter = 10.0;
-            let w = ((ui.available_width() - gutter - 8.0) / 2.0).max(120.0);
-            ui.spacing_mut().item_spacing.x = gutter;
-            ui.scope(|ui| {
-                ui.set_width(w);
-                if card(ui, "Give me an overview of this profile") {
-                    submit = Some(
-                        "Give me an overview of this profile — what ran, where the time \
-                         went, and anything unusual.",
-                    );
-                }
+        // Two side-by-side cards. `ui.columns` does the equal-width split and
+        // spacing math itself — the previous manual width math overflowed the
+        // panel edge and cut card 2 off.
+        egui::Frame::none()
+            .inner_margin(egui::Margin::symmetric(8.0, 0.0))
+            .show(ui, |ui: &mut egui::Ui| {
+                ui.columns(2, |cols| {
+                    if card(&mut cols[0], "Give me an overview of this profile") {
+                        submit = Some(
+                            "Give me an overview of this profile — what ran, where the \
+                             time went, and anything unusual.",
+                        );
+                    }
+                    if card(
+                        &mut cols[1],
+                        "Highlight idle gaps and find what's preventing them from \
+                         starting earlier",
+                    ) {
+                        submit = Some(
+                            "Highlight the largest idle gaps on the timeline and find \
+                             what's preventing that work from starting earlier.",
+                        );
+                    }
+                });
             });
-            ui.scope(|ui| {
-                ui.set_width(w);
-                if card(
-                    ui,
-                    "Highlight idle gaps and find what's preventing them from starting \
-                     earlier",
-                ) {
-                    submit = Some(
-                        "Highlight the largest idle gaps on the timeline and find what's \
-                         preventing that work from starting earlier.",
-                    );
-                }
-            });
-        });
 
         if let Some(prompt) = submit {
             self.submit_input(prompt.to_owned());
@@ -1452,12 +1419,12 @@ impl ChatPanel {
                         ui.spacing_mut().item_spacing.x = 5.0;
                         ui.label(
                             egui::RichText::new(name)
-                                .size(13.0)
+                                .size(14.5)
                                 .color(egui::Color32::from_rgb(30, 30, 30)),
                         )
                         .on_hover_text(hover);
                         if ui
-                            .small_button(egui::RichText::new("×").size(13.0))
+                            .small_button(egui::RichText::new("×").size(14.5))
                             .on_hover_text("Remove")
                             .clicked()
                         {
