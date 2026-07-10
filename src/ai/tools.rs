@@ -287,11 +287,16 @@ pub fn execute_run_query_raw(duckdb_path: &str, sql: &str) -> Result<String, Str
             } else if err_str.contains("Binder Error") || err_str.contains("No function matches") {
                 msg.push_str(
                     "\nHINT: Type mismatch. Column types: entry_slug is TEXT, \
-                     item_uid is UBIGINT, title is TEXT, size is UBIGINT (may be NULL). \
+                     item_uid is UBIGINT, title is TEXT. \
+                     size is TEXT — a unit-suffixed string like '76.000 KiB' or '96 B' \
+                     (may be NULL); NEVER SUM/CAST it directly. Parse unit-aware: \
+                     CASE WHEN size LIKE '% KiB' THEN TRY_CAST(REPLACE(size,' KiB','') AS DOUBLE)*1024 \
+                     WHEN size LIKE '% MiB' THEN TRY_CAST(REPLACE(size,' MiB','') AS DOUBLE)*1048576 \
+                     WHEN size LIKE '% GiB' THEN TRY_CAST(REPLACE(size,' GiB','') AS DOUBLE)*1073741824 \
+                     WHEN size LIKE '% B' THEN TRY_CAST(REPLACE(size,' B','') AS DOUBLE) END. \
                      STRUCT fields (running.duration, etc.) are BIGINT. \
                      You cannot SUM/AVG text columns. Use COUNT(*) for text, \
-                     SUM()/AVG() only on numeric columns. \
-                     For size: use COALESCE(size, 0) since it may be NULL for non-copy items."
+                     SUM()/AVG() only on numeric columns."
                 );
             }
 
@@ -887,7 +892,8 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
          STRUCT(start BIGINT, stop BIGINT, duration BIGINT),\n\
          operation/creator/critical_path/previous_executing/mapper: \
          STRUCT(item_uid UBIGINT, title TEXT, interval STRUCT(start,stop,duration), entry_slug TEXT),\n\
-         size: UBIGINT.\n\
+         size: TEXT — unit-suffixed string ('76.000 KiB', '96 B'); parse units before math \
+         (see run_query example #7), never CAST directly.\n\
          All timestamps are NANOSECONDS. Access STRUCTs with dot notation: \
          running.start, critical_path.item_uid.\n\n",
     );
