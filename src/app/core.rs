@@ -295,8 +295,10 @@ pub struct PersistedAiSettings {
     pub duckdb_path: String,
     #[serde(default)]
     pub wiki_path: String,
+    /// True only when the user explicitly chose the API backend (the default
+    /// is the Claude Code backend on viewer-mcp builds).
     #[serde(default)]
-    pub backend_claude_code: bool,
+    pub backend_native: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]

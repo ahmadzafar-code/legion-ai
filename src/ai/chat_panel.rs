@@ -340,6 +340,9 @@ impl ChatPanel {
             pending_clear_selection: false,
             pending_highlight_actions: Vec::new(),
             viewport_token: None,
+            #[cfg(feature = "viewer-mcp")]
+            backend: ChatBackendKind::ClaudeCode,
+            #[cfg(not(feature = "viewer-mcp"))]
             backend: ChatBackendKind::Native,
             #[cfg(feature = "viewer-mcp")]
             mcp_endpoint: None,
@@ -666,16 +669,7 @@ impl ChatPanel {
             project_root: self.code_path_buffer.trim().to_owned(),
             duckdb_path: self.duckdb_path_buffer.trim().to_owned(),
             wiki_path: self.wiki_path_buffer.trim().to_owned(),
-            backend_claude_code: {
-                #[cfg(feature = "viewer-mcp")]
-                {
-                    self.backend == ChatBackendKind::ClaudeCode
-                }
-                #[cfg(not(feature = "viewer-mcp"))]
-                {
-                    false
-                }
-            },
+            backend_native: self.backend == ChatBackendKind::Native,
         }
     }
 
@@ -691,9 +685,8 @@ impl ChatPanel {
         if !saved.wiki_path.is_empty() {
             self.wiki_path_buffer = saved.wiki_path.clone();
         }
-        #[cfg(feature = "viewer-mcp")]
-        if saved.backend_claude_code {
-            self.backend = ChatBackendKind::ClaudeCode;
+        if saved.backend_native {
+            self.backend = ChatBackendKind::Native;
         }
     }
 
@@ -1684,15 +1677,19 @@ impl ChatPanel {
                                 .add_enabled(
                                     enabled && !self.input_buffer.trim().is_empty(),
                                     egui::Button::new(
-                                        egui::RichText::new("↑")
-                                            .size(16.0)
-                                            .strong()
+                                        // ↵ lives in Hack (the monospace font) —
+                                        // the proportional font lacks all the
+                                        // arrow glyphs (they render as boxes).
+                                        egui::RichText::new("↵")
+                                            .monospace()
+                                            .size(19.0)
                                             .color(egui::Color32::WHITE),
                                     )
-                                    .fill(egui::Color32::from_rgb(120, 120, 120))
-                                    .rounding(16.0)
-                                    .min_size(egui::vec2(32.0, 32.0)),
+                                    .fill(egui::Color32::from_rgb(50, 50, 50))
+                                    .rounding(18.0)
+                                    .min_size(egui::vec2(36.0, 36.0)),
                                 )
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
                                 .clicked()
                             {
                                 let can_submit =
@@ -1716,11 +1713,21 @@ impl ChatPanel {
                                 ChatBackendKind::ClaudeCode => "Claude Code",
                             };
                             let pill = ui
-                                .button(
-                                    egui::RichText::new(pill_label)
-                                        .size(12.5)
-                                        .color(egui::Color32::from_rgb(90, 90, 90)),
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new(pill_label)
+                                            .size(14.0)
+                                            .color(egui::Color32::from_rgb(60, 60, 60)),
+                                    )
+                                    .fill(egui::Color32::WHITE)
+                                    .stroke(egui::Stroke::new(
+                                        1.0,
+                                        egui::Color32::from_rgb(190, 190, 190),
+                                    ))
+                                    .rounding(8.0)
+                                    .min_size(egui::vec2(0.0, 30.0)),
                                 )
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
                                 .on_hover_text("Choose what powers the chat");
                             let backend_menu_id =
                                 ui.make_persistent_id("backend_config_menu");
@@ -1835,7 +1842,12 @@ impl ChatPanel {
                 // transcript grows.
                 egui::TopBottomPanel::bottom("ai_chat_composer")
                     .resizable(false)
-                    .frame(egui::Frame::none())
+                    .frame(egui::Frame::none().inner_margin(egui::Margin {
+                        left: 8.0,
+                        right: 8.0,
+                        top: 0.0,
+                        bottom: 12.0, // float off the panel's bottom edge
+                    }))
                     .show_inside(ui, |ui| {
                         self.ui_composer(ui);
                     });
