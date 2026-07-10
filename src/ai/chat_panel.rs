@@ -1604,7 +1604,7 @@ impl ChatPanel {
                     // (menu_button drops down, straight out of a bottom bar).
                     let plus_resp = ui
                         .button(egui::RichText::new("+").size(18.0).strong())
-                        .on_hover_text("Add context: DuckDB, code repo, or a file");
+                        .on_hover_text("Connect the profile DB or code repo, or attach a file");
                     let plus_menu_id = ui.make_persistent_id("plus_context_menu");
                     if plus_resp.clicked() {
                         ui.memory_mut(|m| m.toggle_popup(plus_menu_id));
@@ -1629,7 +1629,7 @@ impl ChatPanel {
                             };
                             #[cfg(not(target_arch = "wasm32"))]
                             {
-                                if item(ui, "Add DuckDB…") {
+                                if item(ui, "Connect DuckDB…") {
                                     if let Some(f) = rfd::FileDialog::new()
                                         .set_title("Choose the profile DuckDB")
                                         .add_filter("DuckDB", &["duckdb"])
@@ -1639,7 +1639,7 @@ impl ChatPanel {
                                             f.to_string_lossy().into_owned();
                                     }
                                 }
-                                if item(ui, "Add code repo…") {
+                                if item(ui, "Connect code repo…") {
                                     if let Some(d) = rfd::FileDialog::new()
                                         .set_title(
                                             "Choose the profiled application's source folder",
