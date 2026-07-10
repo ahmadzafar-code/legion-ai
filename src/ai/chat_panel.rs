@@ -166,8 +166,14 @@ pub struct ChatPanel {
     /// Task (bar) selection surfaced to the agent as structured context.
     selected_items: Vec<SelectedItem>,
     scroll_to_bottom: bool,
-    /// The API-key entry popup (opened from the backend pill / header warning).
+    /// The API-key entry popup (opened from the header warning or automatically
+    /// when the API engine is selected without a key).
     api_key_popup_open: bool,
+    /// Auto-resolved engine (cached): Claude Code when `claude` is installed,
+    /// else the native API loop. There is NO user-facing backend choice — the
+    /// user's outside setup (claude login / API key) IS the choice. Re-resolved
+    /// on ↺ New session.
+    resolved_backend: Option<ChatBackendKind>,
 
     // ── ＋-menu context ────────────────────────────────────────────────────
     /// Plain-file attachments added via the ＋ menu (inline context).
@@ -261,6 +267,7 @@ impl Clone for ChatPanel {
             selected_items: self.selected_items.clone(),
             scroll_to_bottom: self.scroll_to_bottom,
             api_key_popup_open: self.api_key_popup_open,
+            resolved_backend: self.resolved_backend,
             attachments: self.attachments.clone(),
             duckdb_path_buffer: self.duckdb_path_buffer.clone(),
             code_path_buffer: self.code_path_buffer.clone(),
@@ -324,6 +331,7 @@ impl ChatPanel {
             selected_items: Vec::new(),
             scroll_to_bottom: false,
             api_key_popup_open: false,
+            resolved_backend: None,
             attachments: Vec::new(),
             duckdb_path_buffer: String::new(),
             code_path_buffer: String::new(),
@@ -669,7 +677,6 @@ impl ChatPanel {
             project_root: self.code_path_buffer.trim().to_owned(),
             duckdb_path: self.duckdb_path_buffer.trim().to_owned(),
             wiki_path: self.wiki_path_buffer.trim().to_owned(),
-            backend_native: self.backend == ChatBackendKind::Native,
         }
     }
 
@@ -684,9 +691,6 @@ impl ChatPanel {
         }
         if !saved.wiki_path.is_empty() {
             self.wiki_path_buffer = saved.wiki_path.clone();
-        }
-        if saved.backend_native {
-            self.backend = ChatBackendKind::Native;
         }
     }
 
@@ -803,6 +807,26 @@ impl ChatPanel {
     /// server (no key). Exactly one backend runs a request at a time —
     /// `pending_request` is the shared guard, and the settings toggle is
     /// disabled while a request is in flight.
+    /// Resolve which engine serves this session (cached until ↺): the user's
+    /// own Claude Code when installed — their login/API key/model choices all
+    /// live there — else the built-in API loop (key from popup or env).
+    fn resolve_backend(&mut self) -> ChatBackendKind {
+        if let Some(b) = self.resolved_backend {
+            return b;
+        }
+        #[cfg(feature = "viewer-mcp")]
+        let b = if crate::ai::claude_code::preflight_claude().is_ok() {
+            ChatBackendKind::ClaudeCode
+        } else {
+            ChatBackendKind::Native
+        };
+        #[cfg(not(feature = "viewer-mcp"))]
+        let b = ChatBackendKind::Native;
+        self.resolved_backend = Some(b);
+        self.backend = b;
+        b
+    }
+
     fn trigger_diagnosis(&mut self, user_query: String) {
         if self.pending_request {
             self.add_message(
@@ -811,7 +835,7 @@ impl ChatPanel {
             );
             return;
         }
-        match self.backend {
+        match self.resolve_backend() {
             ChatBackendKind::Native => self.trigger_native(user_query),
             ChatBackendKind::ClaudeCode => self.trigger_claude_code(user_query),
         }
@@ -1069,6 +1093,7 @@ impl ChatPanel {
 
     /// Zone 1: Header bar with title, tool status chips, and action buttons.
     fn ui_header(&mut self, ui: &mut egui::Ui) {
+        self.resolve_backend();
         ui.horizontal(|ui| {
             // Right-aligned controls (no title — it's redundant with the toolbar toggle)
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1104,8 +1129,10 @@ impl ChatPanel {
                     if let Some(broker) = &self.approval_broker {
                         broker.reset();
                     }
-                    // Back to the welcome screen (empty transcript = empty state).
+                    // Back to the welcome screen (empty transcript = empty state)
+                    // and re-detect the engine (claude may have been (un)installed).
                     self.messages.clear();
+                    self.resolved_backend = None;
                 }
             });
         });
@@ -1678,90 +1705,6 @@ impl ChatPanel {
                                 }
                             }
 
-                            // Backend pill (Claude-UI model-picker style): shows
-                            // the active config; the popup opens UPWARD. Picking
-                            // "API" also opens the key-entry popup.
-                            #[cfg(feature = "viewer-mcp")]
-                            let child_alive = self.cc_agent.lock().unwrap().is_some();
-                            #[cfg(not(feature = "viewer-mcp"))]
-                            let child_alive = false;
-                            let pill_label = match self.backend {
-                                ChatBackendKind::Native => "API",
-                                ChatBackendKind::ClaudeCode => "Claude Code",
-                            };
-                            let pill = ui
-                                .add(
-                                    egui::Button::new(
-                                        egui::RichText::new(pill_label)
-                                            .size(15.0)
-                                            .strong()
-                                            .color(egui::Color32::from_rgb(30, 30, 30)),
-                                    )
-                                    .rounding(4.0)
-                                    .min_size(egui::vec2(0.0, 30.0)),
-                                )
-                                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                                .on_hover_text("Choose what powers the chat");
-                            let backend_menu_id =
-                                ui.make_persistent_id("backend_config_menu");
-                            if pill.clicked() {
-                                ui.memory_mut(|m| m.toggle_popup(backend_menu_id));
-                            }
-                            egui::popup::popup_above_or_below_widget(
-                                ui,
-                                backend_menu_id,
-                                &pill,
-                                egui::AboveOrBelow::Above,
-                                egui::PopupCloseBehavior::CloseOnClick,
-                                |ui| {
-                                    ui.set_min_width(190.0);
-                                    menu_row_visuals(ui);
-                                    ui.label(
-                                        egui::RichText::new("Backend")
-                                            .size(11.5)
-                                            .color(egui::Color32::from_rgb(150, 150, 150)),
-                                    );
-                                    ui.add_space(2.0);
-                                    let locked = self.pending_request || child_alive;
-                                    let row = |ui: &mut egui::Ui,
-                                               label: &str,
-                                               selected: bool,
-                                               locked: bool|
-                                     -> bool {
-                                        let text = egui::RichText::new(label)
-                                            .size(14.5)
-                                            .color(egui::Color32::from_rgb(30, 30, 30));
-                                        let text = if selected { text.strong() } else { text };
-                                        ui.add_enabled(
-                                            !locked,
-                                            egui::Button::new(text).rounding(6.0).min_size(
-                                                egui::vec2(ui.available_width(), 28.0),
-                                            ),
-                                        )
-                                        .on_hover_cursor(egui::CursorIcon::PointingHand)
-                                        .clicked()
-                                    };
-                                    let is_native = self.backend == ChatBackendKind::Native;
-                                    if row(ui, "API", is_native, locked) {
-                                        self.backend = ChatBackendKind::Native;
-                                        self.api_key_popup_open = true;
-                                    }
-                                    #[cfg(feature = "viewer-mcp")]
-                                    if row(ui, "Claude Code", !is_native, locked)
-                                    {
-                                        self.backend = ChatBackendKind::ClaudeCode;
-                                    }
-                                    if locked {
-                                        ui.label(
-                                            egui::RichText::new(
-                                                "locked while a turn runs — ↺ to switch",
-                                            )
-                                            .size(11.0)
-                                            .color(egui::Color32::from_rgb(150, 150, 150)),
-                                        );
-                                    }
-                                },
-                            );
                         },
                     );
                 });
