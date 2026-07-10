@@ -139,6 +139,15 @@ name = "cc_spike"
 path = "src/bin/cc_spike.rs"
 required-features = ["viewer-mcp"]
 
+# Headless embedded-agent runner — the GRADEE side of the eval's `embedded` harness
+# (eval.rs SPAWNS it, mirroring how the mcp harness spawns `claude`; eval.rs itself
+# never imports the crate, preserving oracle independence). Prompt on stdin, one
+# JSON envelope on stdout.
+[[bin]]
+name = "embedded_runner"
+path = "src/bin/embedded_runner.rs"
+required-features = ["ai", "duckdb"]
+
 [profile.release]
 opt-level = 2 # fast and small wasm
 

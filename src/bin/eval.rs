@@ -417,6 +417,157 @@ impl Harness for McpHarness {
     }
 }
 
+/// Map claude-CLI model aliases to raw-API model ids. The mcp harness hands the
+/// alias to `claude` (which resolves it); the EMBEDDED agent sends the string
+/// VERBATIM to `/v1/messages`, where "sonnet"/"opus" would 400. The full ids
+/// mirror the viewer's own defaults.
+fn map_model_alias(m: &str) -> String {
+    match m {
+        "sonnet" => "claude-sonnet-4-6".to_owned(),
+        "opus" => "claude-opus-4-8".to_owned(),
+        other => other.to_owned(),
+    }
+}
+
+/// Real harness #2 (un-stubs "embedded"): spawns the sibling `embedded_runner`
+/// binary — the headless embedded agent — EXACTLY the way the mcp harness
+/// spawns `claude`. This file still imports nothing from the crate, so the
+/// oracle-independence invariant is preserved: grader and gradee are separate
+/// processes sharing no code (only the read-only .duckdb file, which both open
+/// AccessMode::ReadOnly — DuckDB supports concurrent multi-process read-only,
+/// and the oracle connection is dropped before the harness runs anyway).
+struct EmbeddedHarness {
+    model: String,
+    /// Known at construction (run_eval has it) — the Harness trait signature
+    /// stays unchanged; this impl ignores the mcp_config/allowed params, same
+    /// precedent as StubHarness.
+    db: PathBuf,
+}
+
+impl Harness for EmbeddedHarness {
+    fn run(&self, prompt: &str, _mcp_config: &Path, _allowed: &[&str]) -> Result<AgentRun, String> {
+        let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+        let runner = exe.parent().ok_or("no exe parent")?.join("embedded_runner");
+        let mut child = std::process::Command::new(&runner)
+            .arg("--duckdb")
+            .arg(&self.db)
+            .arg("--model")
+            .arg(map_model_alias(&self.model))
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| {
+                format!(
+                    "spawn {}: {e} (build it: cargo build --features ai,duckdb --bin embedded_runner)",
+                    runner.display()
+                )
+            })?;
+        // Write the prompt, TOLERATING a write error: a runner that exits
+        // immediately (e.g. exit(2) on missing ANTHROPIC_API_KEY) closes the
+        // pipe before we write, and that EPIPE must not mask the real story —
+        // the exit code + stderr below carry it. Dropping stdin sends EOF
+        // (the runner reads the prompt to EOF; without the drop, mutual hang).
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write;
+            let _ = stdin.write_all(prompt.as_bytes());
+            // stdin drops here => EOF
+        }
+        let out = child
+            .wait_with_output()
+            .map_err(|e| format!("wait embedded_runner: {e}"))?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Ok(AgentRun {
+                final_answer: None,
+                tools_called: Vec::new(),
+                turns_used: 0,
+                raw_transcript: String::new(),
+                error: Some(format!(
+                    "embedded_runner exited {}: {}",
+                    out.status,
+                    stderr.trim()
+                )),
+            });
+        }
+        runner_envelope_to_agent_run(&String::from_utf8_lossy(&out.stdout))
+    }
+}
+
+/// Parse the runner's stdout envelope into an [`AgentRun`]. Pure — unit-tested
+/// without spawning anything. Defensive: the envelope is the LAST non-empty
+/// stdout line (nothing else should print, but a stray line must not break
+/// grading).
+fn runner_envelope_to_agent_run(stdout: &str) -> Result<AgentRun, String> {
+    let line = stdout
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .ok_or("embedded_runner produced no output")?;
+    let v: Value = serde_json::from_str(line.trim())
+        .map_err(|e| format!("bad runner envelope: {e}; line: {}", &line[..line.len().min(200)]))?;
+    let text = v.get("text").and_then(Value::as_str).unwrap_or("").to_owned();
+    let error = v.get("error").and_then(Value::as_str).map(|s| s.to_owned());
+    Ok(AgentRun {
+        final_answer: extract_final_answer(&text),
+        tools_called: v
+            .get("tools_called")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(|t| t.as_str().map(str::to_owned)).collect())
+            .unwrap_or_default(),
+        turns_used: v.get("turns_used").and_then(Value::as_u64).unwrap_or(0) as u32,
+        raw_transcript: text,
+        error,
+    })
+}
+
+/// Extract the typed answer from the agent's FINAL TEXT. The embedded agent has
+/// no `final_answer` tool (that is MCP-only), so `build_prompt_embedded`
+/// instructs it to end with a ```json block {"answer_type": ..., "value": ...}.
+/// The `answer_type` filter is LOAD-BEARING: the agent may also emit its usual
+/// {"highlights": [...]} json block, and a naive "last json block" would grab
+/// that instead. Mirrors the crate's highlight-parser technique, but duplicated
+/// BY DESIGN — importing it would break oracle independence.
+fn extract_final_answer(text: &str) -> Option<FinalAnswer> {
+    let mut last: Option<&str> = None;
+    // Pass 1: fenced ```json blocks containing "answer_type".
+    let mut search = text;
+    while let Some(start) = search.find("```json") {
+        let rest = &search[start + 7..];
+        let Some(end) = rest.find("```") else { break };
+        let block = rest[..end].trim();
+        if block.contains("\"answer_type\"") {
+            last = Some(block);
+        }
+        search = &rest[end + 3..];
+    }
+    // Pass 2 (fallback): a bare {"answer_type"... object, brace-matched.
+    if last.is_none() {
+        if let Some(pos) = text.rfind("{\"answer_type\"") {
+            let candidate = &text[pos..];
+            let mut depth = 0i32;
+            for (i, ch) in candidate.char_indices() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            last = Some(&candidate[..=i]);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    let v: Value = serde_json::from_str(last?).ok()?;
+    Some(FinalAnswer {
+        answer_type: v.get("answer_type")?.as_str()?.to_owned(),
+        value: v.get("value")?.clone(),
+    })
+}
+
 /// Parse `stream-json --verbose` output: each line is a message. Collect tool_use
 /// block names + count, and the LAST `final_answer` input.
 fn parse_stream_json(transcript: &str) -> AgentRun {
@@ -610,14 +761,26 @@ fn rfc3339_utc(unix_secs: u64) -> String {
     format!("{year:04}-{month:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
 }
 
-fn stub_embedded_run() -> AgentRun {
-    AgentRun {
-        final_answer: None,
-        tools_called: Vec::new(),
-        turns_used: 0,
-        raw_transcript: String::new(),
-        error: Some("embedded harness not implemented (P2)".to_string()),
+/// Prompt for the EMBEDDED harness. Differs from [`build_prompt`] in two
+/// load-bearing ways: the embedded agent has no `final_answer` tool (MCP-only),
+/// so the typed answer is requested as a terminal ```json block; and the
+/// always-advertised visual/interactive tools are explicitly forbidden (the
+/// runner is headless — they'd only produce instant tool errors).
+fn build_prompt_embedded(case: &Case) -> String {
+    let mut p = case.question.clone();
+    if let Some((s, e)) = case.range_ns {
+        p.push_str(&format!("\n\nHighlighted range: {s} ns to {e} ns."));
     }
+    p.push_str(&format!(
+        "\n\nUse the run_query and overview tools to investigate the profiling \
+         database. Do NOT use screenshot, zoom_to, pan, scroll_to, set_view, search, \
+         reset_view, highlight, or ask_user — this session is non-interactive and \
+         headless. Finish your reply with ONLY a fenced ```json code block of the \
+         form {{\"answer_type\": \"{}\", \"value\": <your answer>}} — no prose after \
+         the block.",
+        case.answer_type
+    ));
+    p
 }
 
 fn emit_row(row: &ResultRow, out: Option<&str>) -> Result<(), String> {
@@ -662,7 +825,19 @@ fn run_eval(
     let start = std::time::Instant::now();
 
     let run = match harness_name {
-        "embedded" => stub_embedded_run(),
+        "embedded" => {
+            let harness = EmbeddedHarness { model: model.clone(), db: db.clone() };
+            match harness.run(&build_prompt_embedded(&case), Path::new(""), &[]) {
+                Ok(run) => run,
+                Err(e) => AgentRun {
+                    final_answer: None,
+                    tools_called: Vec::new(),
+                    turns_used: 0,
+                    raw_transcript: String::new(),
+                    error: Some(e),
+                },
+            }
+        }
         "mcp" => {
             let mcp_cfg = write_mcp_config(&db)?;
             let harness = McpHarness { model: Some(model.clone()) };
@@ -744,6 +919,97 @@ fn main() {
 #[cfg(all(test, feature = "duckdb"))]
 mod tests {
     use super::*;
+
+    // ── oracle independence (the crown jewel) ───────────────────────────────
+    /// This file must NEVER import the crate whose agent it grades — the whole
+    /// point of the eval is that grader and gradee share no code. Needles are
+    /// constructed non-literally so this test does not trip on itself, and only
+    /// the `use X` / `X::` forms are matched (the doc comment mentions the
+    /// crate name in prose, which is fine).
+    #[test]
+    fn test_oracle_independence_no_crate_import() {
+        let src = include_str!("eval.rs");
+        let krate = ["legion_prof", "_viewer"].concat();
+        assert!(
+            !src.contains(&format!("use {krate}")),
+            "eval.rs must not `use` the graded crate"
+        );
+        assert!(
+            !src.contains(&format!("{krate}::")),
+            "eval.rs must not path-reference the graded crate"
+        );
+    }
+
+    // ── embedded harness: model alias mapping ───────────────────────────────
+    #[test]
+    fn test_map_model_alias() {
+        assert_eq!(map_model_alias("sonnet"), "claude-sonnet-4-6");
+        assert_eq!(map_model_alias("opus"), "claude-opus-4-8");
+        assert_eq!(map_model_alias("claude-opus-4-8"), "claude-opus-4-8");
+    }
+
+    // ── embedded harness: final-answer extraction from text ─────────────────
+    #[test]
+    fn test_extract_final_answer_fenced() {
+        let text = "Investigated.\n```json\n{\"answer_type\": \"uid\", \"value\": 48}\n```";
+        let fa = extract_final_answer(text).expect("answer");
+        assert_eq!(fa.answer_type, "uid");
+        assert_eq!(fa.value, serde_json::json!(48));
+    }
+
+    /// The answer_type filter is LOAD-BEARING: a trailing highlights block (the
+    /// agent's ingrained habit) must not shadow the answer block — in either order.
+    #[test]
+    fn test_extract_final_answer_ignores_highlights_block() {
+        let text = "Done.\n```json\n{\"answer_type\": \"label\", \"value\": \"n0_chan_x\"}\n```\n\
+                    ```json\n{\"highlights\": [{\"entry_slug\": \"a\"}]}\n```";
+        let fa = extract_final_answer(text).expect("answer despite trailing highlights");
+        assert_eq!(fa.answer_type, "label");
+        let text2 = "```json\n{\"highlights\": []}\n```\n```json\n{\"answer_type\": \"number\", \"value\": 3.5}\n```";
+        assert_eq!(extract_final_answer(text2).unwrap().answer_type, "number");
+    }
+
+    #[test]
+    fn test_extract_final_answer_bare_and_absent() {
+        let bare = "The answer is below. {\"answer_type\": \"number\", \"value\": 42}";
+        assert_eq!(extract_final_answer(bare).unwrap().value, serde_json::json!(42));
+        assert!(extract_final_answer("no answer here").is_none());
+        assert!(extract_final_answer("```json\n{\"highlights\": []}\n```").is_none());
+    }
+
+    // ── embedded harness: envelope parsing ──────────────────────────────────
+    #[test]
+    fn test_runner_envelope_ok() {
+        let stdout = "{\"text\": \"found it\\n```json\\n{\\\"answer_type\\\": \\\"uid\\\", \\\"value\\\": 7}\\n```\", \
+                      \"turns_used\": 4, \"queries_executed\": 3, \
+                      \"tools_called\": [\"run_query\", \"overview\"], \"error\": null}";
+        let run = runner_envelope_to_agent_run(stdout).expect("envelope parses");
+        assert_eq!(run.turns_used, 4);
+        assert_eq!(run.tools_called, vec!["run_query", "overview"]);
+        assert!(run.error.is_none());
+        assert_eq!(run.final_answer.expect("answer").value, serde_json::json!(7));
+    }
+
+    #[test]
+    fn test_runner_envelope_error_and_junk() {
+        let err = "{\"text\": \"\", \"turns_used\": 0, \"queries_executed\": 0, \
+                   \"tools_called\": [], \"error\": \"rate limited\"}";
+        let run = runner_envelope_to_agent_run(err).unwrap();
+        assert_eq!(run.error.as_deref(), Some("rate limited"));
+        assert!(run.final_answer.is_none());
+
+        assert!(runner_envelope_to_agent_run("").is_err());
+        assert!(runner_envelope_to_agent_run("not json at all").is_err());
+    }
+
+    // ── embedded prompt prose ────────────────────────────────────────────────
+    #[test]
+    fn test_build_prompt_embedded_prose() {
+        let p = build_prompt_embedded(&fake_case("number"));
+        assert!(p.contains("\"answer_type\": \"number\""), "typed-answer instruction");
+        assert!(p.contains("Do NOT use screenshot"), "headless tool ban");
+        assert!(!p.contains("final_answer"), "must not reference the MCP-only tool");
+    }
 
     // ── grader ──────────────────────────────────────────────────────────────
     #[test]
