@@ -33,6 +33,30 @@ pub enum ChatMessageKind {
     Context,
 }
 
+/// Which backend serves the embedded chat (P1, Backend B plan —
+/// `IMPLEMENTATION-PLAN-cc-backend.md`).
+///
+/// - `Native`: the hand-rolled in-process agent (`AgentSession` over raw HTTP).
+///   Needs an API key. Drives the viewport in-process as `EMBEDDED_CONSUMER_ID`.
+/// - `ClaudeCode`: the user's own Claude Code, spawned as a persistent
+///   stream-json subprocess connected to the in-viewer MCP server (needs the
+///   `viewer-mcp` feature + a running server). No API key — rides on the user's
+///   `claude` login. Drives the viewport over the MCP bridge (`MCP_CONSUMER_ID`).
+///
+/// CHANNEL-LIFETIME CONTRACT (load-bearing, from the plan's P1): the Native arm
+/// keeps the existing PER-TURN `(event_tx, event_rx)` swap in
+/// `trigger_diagnosis`. The ClaudeCode arm must create its channels ONCE at
+/// child spawn and keep them for the child's lifetime — follow-up turns only
+/// write to the existing stdin. Sharing the per-turn swap would disconnect the
+/// subprocess reader on turn 2 (`poll_events` would see `Disconnected`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatBackendKind {
+    /// Hand-rolled in-process agent (API key).
+    Native,
+    /// Spawned Claude Code subprocess over the in-viewer MCP server.
+    ClaudeCode,
+}
+
 /// A single message in the chat panel.
 #[derive(Clone, Debug)]
 pub struct ChatMessage {
@@ -421,7 +445,7 @@ pub struct ChatPanel {
     // ── Agent state ────────────────────────────────────────────────────────
     /// API key (from UI field; falls back to ANTHROPIC_API_KEY env var).
     api_key_buffer: String,
-    /// Model name: "claude-sonnet-4-20250514" or "claude-opus-4-20250514".
+    /// Model name: "claude-sonnet-4-6" or "claude-opus-4-8".
     model_selection: String,
     /// Free-text application context (e.g. goals, configuration, number of nodes/GPUs).
     app_context_buffer: String,
@@ -450,6 +474,21 @@ pub struct ChatPanel {
     /// `AgentSession` so the embedded agent and the in-viewer MCP driver are
     /// mutually exclusive. `None` until `core.rs` wires it from the `Context`.
     viewport_token: Option<crate::ai::bridge::ViewportToken>,
+    /// Which backend serves the chat (P1, Backend B). In-memory per session,
+    /// like `model_selection`.
+    backend: ChatBackendKind,
+    /// The in-viewer MCP server endpoint — (ACTUAL bound port, per-session bearer
+    /// token) — wired by `core.rs` after spawn. `None` = server not running yet
+    /// (Backend B unavailable). Backend B's `--mcp-config` needs BOTH: the real
+    /// port and an `Authorization: Bearer <token>` header (server hardening).
+    #[cfg(feature = "viewer-mcp")]
+    mcp_endpoint: Option<(u16, String)>,
+    /// Backend B (P2a): the persistent Claude Code subprocess. Arc-shared across
+    /// panel clones (like `agent_session`); the kill/reap lives in
+    /// `SubprocessAgent::Drop`, which runs when the LAST Arc drops — a throwaway
+    /// panel clone can never kill the shared child.
+    #[cfg(feature = "viewer-mcp")]
+    cc_agent: Arc<Mutex<Option<Arc<crate::ai::claude_code::SubprocessAgent>>>>,
 }
 
 impl Clone for ChatPanel {
@@ -486,6 +525,11 @@ impl Clone for ChatPanel {
             pending_clear_selection: self.pending_clear_selection,
             pending_highlight_actions: self.pending_highlight_actions.clone(),
             viewport_token: self.viewport_token.clone(),
+            backend: self.backend,
+            #[cfg(feature = "viewer-mcp")]
+            mcp_endpoint: self.mcp_endpoint.clone(),
+            #[cfg(feature = "viewer-mcp")]
+            cc_agent: Arc::clone(&self.cc_agent),
         }
     }
 }
@@ -536,7 +580,7 @@ impl ChatPanel {
             db_picker: PathPicker::default(),
             code_picker: PathPicker::default(),
             api_key_buffer: String::new(),
-            model_selection: "claude-sonnet-4-20250514".into(),
+            model_selection: "claude-sonnet-4-6".into(),
             app_context_buffer: String::new(),
             agent_session: Arc::new(Mutex::new(None)),
             pending_request: false,
@@ -548,6 +592,11 @@ impl ChatPanel {
             pending_clear_selection: false,
             pending_highlight_actions: Vec::new(),
             viewport_token: None,
+            backend: ChatBackendKind::Native,
+            #[cfg(feature = "viewer-mcp")]
+            mcp_endpoint: None,
+            #[cfg(feature = "viewer-mcp")]
+            cc_agent: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -811,6 +860,16 @@ impl ChatPanel {
         (!trimmed.is_empty()).then(|| trimmed.to_owned())
     }
 
+    /// Wire the in-viewer MCP server endpoint — (ACTUAL bound port, per-session
+    /// bearer token) — called by `core.rs` right after the server spawns; `None`
+    /// = bind failed. The ClaudeCode backend refuses to start until this is
+    /// `Some`, and P2a builds its `--mcp-config` (URL + `Authorization: Bearer`
+    /// header) from exactly this pair.
+    #[cfg(feature = "viewer-mcp")]
+    pub fn set_mcp_endpoint(&mut self, endpoint: Option<(u16, String)>) {
+        self.mcp_endpoint = endpoint;
+    }
+
     /// Derive the DB tool status from `duckdb_path_buffer`.
     ///
     /// Accepts any existing non-directory file. DuckDB files may have various
@@ -906,11 +965,116 @@ impl ChatPanel {
         }
     }
 
-    /// Trigger an agent request in a background thread.
+    /// Trigger an agent request on the SELECTED backend (P1 dispatch seam).
     ///
-    /// `user_query = None` → initial "Find Performance Issues" scan.
-    /// `user_query = Some(q)` → follow-up question (session persists).
+    /// `Native` runs the in-process `AgentSession` (needs an API key);
+    /// `ClaudeCode` drives the user's own Claude Code over the in-viewer MCP
+    /// server (no key). Exactly one backend runs a request at a time —
+    /// `pending_request` is the shared guard, and the settings toggle is
+    /// disabled while a request is in flight.
     fn trigger_diagnosis(&mut self, user_query: String) {
+        if self.pending_request {
+            self.add_message(
+                ChatMessageKind::System,
+                "A request is already in progress. Please wait.",
+            );
+            return;
+        }
+        match self.backend {
+            ChatBackendKind::Native => self.trigger_native(user_query),
+            ChatBackendKind::ClaudeCode => self.trigger_claude_code(user_query),
+        }
+    }
+
+    /// Backend B (P2a): the user's own Claude Code as a persistent stream-json
+    /// subprocess over the in-viewer MCP server. Spawned lazily on the first
+    /// turn; follow-up turns write to the SAME live stdin (P0-proven).
+    ///
+    /// CHANNEL-LIFETIME CONTRACT (vs. Native's per-turn swap): the
+    /// `(event_tx, event_rx)` pair is created ONCE at spawn, `event_rx` stays
+    /// installed for the child's lifetime, and the parser events flow through
+    /// the same `poll_events`/`apply_agent_event` path Native uses.
+    fn trigger_claude_code(&mut self, user_query: String) {
+        // Echo the user's turn — the composer clears the buffer before submit, so
+        // without this the typed question would silently vanish from the transcript.
+        self.add_message(ChatMessageKind::User, &user_query);
+        #[cfg(feature = "viewer-mcp")]
+        {
+            let Some((port, token)) = self.mcp_endpoint.clone() else {
+                self.add_message(
+                    ChatMessageKind::System,
+                    "⚠ Claude Code backend needs the in-viewer MCP server. Load a \
+                     profile (set the DB path in the tools popover) so the server \
+                     starts, then try again. (If the server failed to bind, the \
+                     terminal log has the reason — a restart is needed in that case.)",
+                );
+                return;
+            };
+
+            // Lazy once-per-session spawn (once-at-spawn channels).
+            if self.cc_agent.lock().unwrap().is_none() {
+                let (event_tx, event_rx) = mpsc::channel::<AgentEvent>();
+                match crate::ai::claude_code::SubprocessAgent::spawn(
+                    port,
+                    &token,
+                    &self.model_selection,
+                    event_tx,
+                ) {
+                    Ok(agent) => {
+                        *self.event_rx.lock().unwrap() = Some(event_rx);
+                        *self.cc_agent.lock().unwrap() = Some(agent);
+                        self.add_message(
+                            ChatMessageKind::System,
+                            format!(
+                                "Started your Claude Code against the profiler's MCP \
+                                 server (port {port}, bearer-token protected)."
+                            ),
+                        );
+                    }
+                    Err(e) => {
+                        self.add_message(ChatMessageKind::System, format!("⚠ {e}"));
+                        return;
+                    }
+                }
+            }
+
+            let send_result = self
+                .cc_agent
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|agent| agent.send_turn(&user_query));
+            match send_result {
+                Some(Ok(())) => {
+                    self.add_message(
+                        ChatMessageKind::System,
+                        "Working… (your Claude Code is driving the profiler over MCP)",
+                    );
+                    self.pending_request = true;
+                }
+                Some(Err(e)) => {
+                    self.add_message(ChatMessageKind::System, format!("⚠ {e}"));
+                    // The child is unusable (dead stdin) — drop it so the next
+                    // turn re-spawns fresh.
+                    *self.cc_agent.lock().unwrap() = None;
+                }
+                None => {}
+            }
+        }
+        #[cfg(not(feature = "viewer-mcp"))]
+        self.add_message(
+            ChatMessageKind::System,
+            "⚠ The Claude Code backend requires a build with the `viewer-mcp` \
+             feature (it drives the in-viewer MCP server). Rebuild with \
+             `--features viewer-mcp`, or switch back to the Native backend.",
+        );
+    }
+
+    /// Backend A: the native in-process agent (`AgentSession` over raw HTTP).
+    /// Runs in a background thread; the session persists across follow-ups.
+    /// NOTE: the per-turn `(event_tx, event_rx)` swap below is Native-ONLY —
+    /// see [`ChatBackendKind`] for the channel-lifetime contract.
+    fn trigger_native(&mut self, user_query: String) {
         let Some(api_key) = self.get_api_key() else {
             self.add_message(
                 ChatMessageKind::System,
@@ -919,14 +1083,6 @@ impl ChatPanel {
             self.settings_open = true;
             return;
         };
-
-        if self.pending_request {
-            self.add_message(
-                ChatMessageKind::System,
-                "A request is already in progress. Please wait.",
-            );
-            return;
-        }
 
         // Tool paths from dedicated fields
         let duckdb_path = self.duckdb_path_buffer.trim().to_owned();
@@ -1339,6 +1495,13 @@ impl ChatPanel {
                     .clicked()
                 {
                     *self.agent_session.lock().unwrap() = None;
+                    // Backend B: hard-stop + drop the persistent Claude Code child
+                    // (Drop reaps + joins). Its once-at-spawn receiver dies with it.
+                    #[cfg(feature = "viewer-mcp")]
+                    if let Some(agent) = self.cc_agent.lock().unwrap().take() {
+                        agent.hard_stop();
+                        *self.event_rx.lock().unwrap() = None;
+                    }
                     self.add_message(ChatMessageKind::System, "Session cleared.");
                 }
             });
@@ -1423,14 +1586,17 @@ impl ChatPanel {
             ui.label(egui::RichText::new(vis_label).small().color(vis_color))
                 .on_hover_text("Screenshot + zoom always available");
 
-            // Model + API key status
+            // Model + API key status. The ClaudeCode backend needs no key, so the
+            // key warning only nags on Native.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let model_short = if self.model_selection.contains("opus") {
+                let model_short = if self.backend == ChatBackendKind::ClaudeCode {
+                    "Claude Code"
+                } else if self.model_selection.contains("opus") {
                     "Opus"
                 } else {
                     "Sonnet"
                 };
-                if has_key {
+                if has_key || self.backend == ChatBackendKind::ClaudeCode {
                     ui.label(
                         egui::RichText::new(model_short)
                             .small()
@@ -1453,15 +1619,68 @@ impl ChatPanel {
         });
     }
 
-    /// Zone 2: Collapsible settings drawer (API key, app context).
+    /// Zone 2: Collapsible settings drawer (backend, API key, app context).
     fn ui_settings(&mut self, ui: &mut egui::Ui) {
         egui::Frame::none()
             .fill(egui::Color32::from_rgb(245, 245, 245))
             .rounding(4.0)
             .inner_margin(egui::Margin::same(8.0))
             .show(ui, |ui: &mut egui::Ui| {
-                ui.label("API Key:");
-                ui.add(
+                // Backend selector (P1). Disabled while a request is in flight OR
+                // while a persistent ClaudeCode child is alive (per-LIVENESS
+                // single-driver guard, P2a): between B's turns `pending_request`
+                // is false, but switching to Native then would let A (id 0) and
+                // B (id 1) both be live. "↺ New session" stops the child and
+                // re-enables the selector. Only shown on viewer-mcp builds.
+                #[cfg(feature = "viewer-mcp")]
+                {
+                    let child_alive = self.cc_agent.lock().unwrap().is_some();
+                    ui.horizontal(|ui| {
+                        ui.label("Backend:");
+                        if child_alive {
+                            ui.label(
+                                egui::RichText::new("(locked while Claude Code runs — ↺ to switch)")
+                                    .small()
+                                    .color(egui::Color32::from_rgb(150, 150, 150)),
+                            );
+                        }
+                    });
+                    ui.add_enabled_ui(!self.pending_request && !child_alive, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.radio_value(
+                                &mut self.backend,
+                                ChatBackendKind::Native,
+                                "Native agent (API key)",
+                            )
+                            .on_hover_text(
+                                "In-process agent over the Anthropic API. Needs an API key.",
+                            );
+                            ui.radio_value(
+                                &mut self.backend,
+                                ChatBackendKind::ClaudeCode,
+                                "Your Claude Code (MCP)",
+                            )
+                            .on_hover_text(
+                                "Drives your own `claude` as a subprocess over the \
+                                 in-viewer MCP server. No API key — uses your Claude \
+                                 Code login. (Subprocess driver lands in P2.)",
+                            );
+                        });
+                    });
+                    ui.add_space(4.0);
+                }
+
+                let key_relevant = self.backend == ChatBackendKind::Native;
+                if key_relevant {
+                    ui.label("API Key:");
+                } else {
+                    ui.label(
+                        egui::RichText::new("API Key (not used by the Claude Code backend):")
+                            .color(egui::Color32::from_rgb(150, 150, 150)),
+                    );
+                }
+                ui.add_enabled(
+                    key_relevant,
                     egui::TextEdit::singleline(&mut self.api_key_buffer)
                         .password(true)
                         .hint_text("sk-ant-… (or set ANTHROPIC_API_KEY)")
@@ -1725,12 +1944,12 @@ impl ChatPanel {
                         .show_ui(ui, |ui| {
                             ui.selectable_value(
                                 &mut self.model_selection,
-                                "claude-sonnet-4-20250514".into(),
+                                "claude-sonnet-4-6".into(),
                                 "Sonnet — fast",
                             );
                             ui.selectable_value(
                                 &mut self.model_selection,
-                                "claude-opus-4-20250514".into(),
+                                "claude-opus-4-8".into(),
                                 "Opus — deep",
                             );
                         });

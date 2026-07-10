@@ -391,6 +391,16 @@ struct Context {
     #[cfg(feature = "viewer-mcp")]
     #[serde(skip)]
     viewer_mcp_started: bool,
+
+    /// P1 (Backend B): the ACTUAL bound port of the in-viewer MCP server, stored
+    /// instead of discarded so the embedded Claude Code backend can build its
+    /// `--mcp-config` against the real port. `None` until the server starts (or if
+    /// the bind failed). The spawn site prefers the stable well-known port 8765
+    /// (external `claude mcp add` registrations keep working) and falls back to an
+    /// ephemeral port only if 8765 is taken.
+    #[cfg(feature = "viewer-mcp")]
+    #[serde(skip)]
+    viewer_mcp_port: Option<u16>,
 }
 
 #[cfg(feature = "ai")]
@@ -3439,11 +3449,47 @@ impl eframe::App for ProfApp {
                 // advertises wiki_* / read_code / list_files.
                 let wiki_root = cx.chat_panel.wiki_path();
                 let code_root = cx.chat_panel.code_path();
-                if let Err(e) =
-                    crate::ai::viewer_mcp::spawn(duckdb_path, 8765, bridge, wiki_root, code_root)
-                {
-                    eprintln!("[legion-viewer] in-viewer MCP server failed to start: {e}");
+                // P1 (Backend B): STORE the bound port instead of discarding it.
+                // Prefer the stable well-known port 8765 so existing external
+                // `claude mcp add …:8765/mcp` registrations keep working; fall back
+                // to an ephemeral port (0) only if 8765 is already taken. Either
+                // way, the REAL bound port lands in `cx.viewer_mcp_port` and the
+                // chat panel, so Backend B never assumes a port.
+                // The spawn also mints the per-session bearer token every POST /mcp
+                // must present (server hardening); the (port, token) pair flows to
+                // the chat panel so Backend B can build its --mcp-config.
+                let mut endpoint: Option<(u16, String)> = None;
+                match crate::ai::viewer_mcp::spawn(
+                    duckdb_path.clone(),
+                    8765,
+                    bridge,
+                    wiki_root.clone(),
+                    code_root.clone(),
+                ) {
+                    Ok((port, token)) => endpoint = Some((port, token)),
+                    Err(first_err) => {
+                        let egui_ctx2 = ctx.clone();
+                        let bridge2 = cx
+                            .ui_bridge(crate::ai::bridge::MCP_CONSUMER_ID)
+                            .with_wake(move || egui_ctx2.request_repaint());
+                        match crate::ai::viewer_mcp::spawn(
+                            duckdb_path, 0, bridge2, wiki_root, code_root,
+                        ) {
+                            Ok((port, token)) => {
+                                eprintln!(
+                                    "[legion-viewer] port 8765 unavailable ({first_err}); using ephemeral port {port}"
+                                );
+                                endpoint = Some((port, token));
+                            }
+                            Err(e) => eprintln!(
+                                "[legion-viewer] in-viewer MCP server failed to start: \
+                                 port 8765: {first_err}; ephemeral: {e}"
+                            ),
+                        }
+                    }
                 }
+                cx.viewer_mcp_port = endpoint.as_ref().map(|(p, _)| *p);
+                cx.chat_panel.set_mcp_endpoint(endpoint);
                 cx.viewer_mcp_started = true;
             }
         }

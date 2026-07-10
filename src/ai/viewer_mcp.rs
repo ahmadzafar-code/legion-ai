@@ -15,9 +15,15 @@
 //! NO screenshots (that is V1.2). Every query still routes through the hardened
 //! `execute_run_query_raw` (no new DuckDB connection).
 //!
-//! SECURITY: binds 127.0.0.1 ONLY (never 0.0.0.0), and rejects any request whose
+//! SECURITY: binds 127.0.0.1 ONLY (never 0.0.0.0), rejects any request whose
 //! `Origin` header is present and not a loopback origin (DNS-rebinding / CSRF
-//! defense — a real rmcp CVE class, not theoretical).
+//! defense — a real rmcp CVE class, not theoretical), and — server hardening,
+//! Backend-B plan — requires `Authorization: Bearer <token>` on every `POST
+//! /mcp` when the [`ServerCtx`] carries a token ([`spawn`] always sets one).
+//! Without the token requirement, ANY local process could drive the tools: the
+//! Origin check passes when no Origin header is present. The token is random
+//! per session (override with `LEGION_VIEWER_MCP_TOKEN` for a stable external
+//! registration) and is printed in the `claude mcp add` line at startup.
 
 use crate::ai::mcp_core::{handle_request, ServerCtx};
 use serde_json::{json, Value};
@@ -51,9 +57,22 @@ pub fn handle_http_request(raw: &[u8], ctx: &ServerCtx) -> Vec<u8> {
     }
 
     // Only POST /mcp serves JSON-RPC. GET /mcp (the client's SSE-stream probe) and
-    // everything else get 405 — we have no streaming endpoint.
+    // everything else get 405 — we have no streaming endpoint. Checked BEFORE auth
+    // so the GET probe keeps the exact 405 behavior verified against claude-code.
     if req.method != Some("POST") || req.path != Some("/mcp") {
         return http_response(405, "text/plain", b"method not allowed");
+    }
+
+    // Server hardening: when the ctx carries a token, POST /mcp requires
+    // `Authorization: Bearer <token>`. This closes the no-Origin hole (the Origin
+    // check above only rejects PRESENT non-loopback origins; plain local processes
+    // send no Origin at all).
+    if let Some(expected) = ctx.auth_token.as_deref() {
+        let presented = header_value(&req, "authorization")
+            .and_then(|v| strip_bearer(v.trim()));
+        if presented.is_none_or(|t| !token_eq(expected, t)) {
+            return http_response(401, "text/plain", b"unauthorized: missing or bad bearer token");
+        }
     }
 
     let content_length = header_value(&req, "content-length")
@@ -85,6 +104,51 @@ fn header_value<'a>(req: &httparse::Request<'a, '_>, name: &str) -> Option<&'a s
         .iter()
         .find(|h| h.name.eq_ignore_ascii_case(name))
         .and_then(|h| std::str::from_utf8(h.value).ok())
+}
+
+/// Strip a case-insensitive `Bearer ` auth-scheme prefix (RFC 7235: schemes are
+/// case-insensitive), returning the trimmed credential.
+fn strip_bearer(value: &str) -> Option<&str> {
+    let (scheme, rest) = value.split_once(' ')?;
+    scheme.eq_ignore_ascii_case("bearer").then(|| rest.trim())
+}
+
+/// Constant-time token comparison (length leak is fine — the token length is
+/// public; the VALUE must not be timing-recoverable byte by byte).
+fn token_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// Generate an unpredictable per-session token with NO extra dependency:
+/// `RandomState` hash keys are seeded from OS entropy per process; mixing in
+/// time + pid and chaining two hashers yields 128 bits, hex-encoded. NOT a
+/// general-purpose CSPRNG — sufficient for a loopback-only bearer token whose
+/// threat model is browsers (can't read it) and other-user local processes
+/// (can't read this process's memory or environment). Same-user processes are
+/// out of scope: they could read process memory regardless.
+///
+/// `LEGION_VIEWER_MCP_TOKEN` (non-empty) overrides — lets external users keep a
+/// STABLE `claude mcp add … --header` registration across viewer restarts.
+fn session_token() -> String {
+    if let Ok(t) = std::env::var("LEGION_VIEWER_MCP_TOKEN") {
+        let t = t.trim().to_owned();
+        if !t.is_empty() {
+            return t;
+        }
+    }
+    use std::hash::{BuildHasher, Hasher};
+    let mut h1 = std::collections::hash_map::RandomState::new().build_hasher();
+    let mut h2 = std::collections::hash_map::RandomState::new().build_hasher();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    h1.write_u128(now);
+    h1.write_u32(std::process::id());
+    h2.write_u64(h1.finish());
+    h2.write_u128(now.rotate_left(64));
+    format!("{:016x}{:016x}", h1.finish(), h2.finish())
 }
 
 /// True iff `origin` (e.g. `http://localhost:8743`, `http://[::1]:8743`) is a
@@ -124,6 +188,7 @@ fn http_response(code: u16, content_type: &str, body: &[u8]) -> Vec<u8> {
         200 => "OK",
         202 => "Accepted",
         400 => "Bad Request",
+        401 => "Unauthorized",
         403 => "Forbidden",
         405 => "Method Not Allowed",
         _ => "OK",
@@ -196,25 +261,34 @@ pub fn spawn(
     bridge: crate::ai::bridge::UiBridge,
     wiki_root: Option<String>,
     code_root: Option<String>,
-) -> std::io::Result<u16> {
+) -> std::io::Result<(u16, String)> {
     let listener = TcpListener::bind(("127.0.0.1", port))?;
     let bound = listener.local_addr()?.port();
+    // Server hardening: every POST /mcp must present this bearer token. Random
+    // per session; LEGION_VIEWER_MCP_TOKEN overrides for a stable registration.
+    let token = session_token();
     eprintln!("[legion-viewer] in-viewer MCP (data + visual tools) on http://127.0.0.1:{bound}/mcp");
     eprintln!(
-        "[legion-viewer] register: claude mcp add --transport http legion-viewer http://127.0.0.1:{bound}/mcp"
+        "[legion-viewer] register: claude mcp add --transport http legion-viewer \
+         http://127.0.0.1:{bound}/mcp --header \"Authorization: Bearer {token}\""
     );
+    eprintln!(
+        "[legion-viewer] (token is random per session; set LEGION_VIEWER_MCP_TOKEN for a stable one)"
+    );
+    let ctx_token = token.clone();
     std::thread::Builder::new()
         .name("legion-viewer-mcp".to_owned())
         .spawn(move || {
             let ctx = ServerCtx::new(duckdb_path, code_root)
                 .with_protocol(HTTP_PROTOCOL_VERSION)
                 .with_wiki_root(wiki_root)
-                .with_ui_bridge(bridge);
+                .with_ui_bridge(bridge)
+                .with_auth_token(Some(ctx_token));
             for mut stream in listener.incoming().flatten() {
                 let _ = serve_one(&mut stream, &ctx);
             }
         })?;
-    Ok(bound)
+    Ok((bound, token))
 }
 
 #[cfg(test)]
@@ -262,6 +336,94 @@ mod tests {
         let (_ctx_tx, cmd_rx) = std::sync::mpsc::channel();
         let bridge = UiBridge::new(event_tx, cmd_rx, ViewportToken::new(), MCP_CONSUMER_ID);
         ctx().with_ui_bridge(bridge)
+    }
+
+    /// Build a raw `POST /mcp` with an `Authorization` header (bearer-token tests).
+    fn post_auth(body: &str, auth: &str) -> Vec<u8> {
+        format!(
+            "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:9\r\nContent-Type: application/json\r\nAuthorization: {auth}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
+    const INIT: &str = r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#;
+
+    /// Server hardening: with a token on the ctx, POST /mcp without the header is
+    /// rejected — the exact no-Origin-local-process hole this closes.
+    #[test]
+    fn test_auth_missing_token_is_401() {
+        let ctx = ctx().with_auth_token(Some("sekrit-123".into()));
+        let (status, _) = split_response(&handle_http_request(&post(INIT, None), &ctx));
+        assert_eq!(status, 401);
+    }
+
+    #[test]
+    fn test_auth_wrong_token_is_401() {
+        let ctx = ctx().with_auth_token(Some("sekrit-123".into()));
+        let req = post_auth(INIT, "Bearer wrong-token");
+        let (status, _) = split_response(&handle_http_request(&req, &ctx));
+        assert_eq!(status, 401);
+        // Same length as the real token — still rejected (value, not length, matters).
+        let req2 = post_auth(INIT, "Bearer sekrit-124");
+        let (status2, _) = split_response(&handle_http_request(&req2, &ctx));
+        assert_eq!(status2, 401);
+    }
+
+    #[test]
+    fn test_auth_correct_token_is_200_and_scheme_case_insensitive() {
+        let ctx = ctx().with_auth_token(Some("sekrit-123".into()));
+        let (status, body) =
+            split_response(&handle_http_request(&post_auth(INIT, "Bearer sekrit-123"), &ctx));
+        assert_eq!(status, 200);
+        let v: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["result"]["protocolVersion"], "2025-03-26");
+        // RFC 7235: the auth scheme is case-insensitive.
+        let (status2, _) =
+            split_response(&handle_http_request(&post_auth(INIT, "bearer sekrit-123"), &ctx));
+        assert_eq!(status2, 200);
+    }
+
+    /// Origin rejection must precede auth: a rebinding attacker who somehow learned
+    /// the token still gets 403 on a non-loopback Origin.
+    #[test]
+    fn test_auth_origin_check_precedes_token() {
+        let ctx = ctx().with_auth_token(Some("sekrit-123".into()));
+        let body = INIT;
+        let req = format!(
+            "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:9\r\nContent-Type: application/json\r\nOrigin: http://evil.com\r\nAuthorization: Bearer sekrit-123\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let (status, _) = split_response(&handle_http_request(req.as_bytes(), &ctx));
+        assert_eq!(status, 403);
+    }
+
+    /// The GET /mcp SSE probe keeps its verified 405 (method check precedes auth),
+    /// so claude-code's connection handshake is unchanged by the token.
+    #[test]
+    fn test_auth_get_probe_still_405() {
+        let ctx = ctx().with_auth_token(Some("sekrit-123".into()));
+        let req = b"GET /mcp HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\r\n";
+        let (status, _) = split_response(&handle_http_request(req, &ctx));
+        assert_eq!(status, 405);
+    }
+
+    /// Token generator sanity: 32 hex chars, unique across calls, env override wins.
+    #[test]
+    fn test_session_token_shape_and_override() {
+        let a = session_token();
+        let b = session_token();
+        // Env override may be set in the environment running the tests; only assert
+        // shape when it is not.
+        if std::env::var("LEGION_VIEWER_MCP_TOKEN").is_err() {
+            assert_eq!(a.len(), 32, "128-bit hex token");
+            assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+            assert_ne!(a, b, "fresh entropy per call");
+        }
+        assert!(token_eq("abc", "abc") && !token_eq("abc", "abd") && !token_eq("abc", "ab"));
+        assert_eq!(strip_bearer("Bearer  x  "), Some("x"));
+        assert_eq!(strip_bearer("Basic x"), None);
+        assert_eq!(strip_bearer("Bearerx"), None);
     }
 
     #[test]

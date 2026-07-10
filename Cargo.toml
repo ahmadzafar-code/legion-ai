@@ -13,6 +13,10 @@ license = "Apache-2.0"
 
 edition = "2024"
 rust-version = "1.85"
+# `cargo run` stays the viewer app even when feature flags make the helper bins
+# (mcp / eval / cc_spike) buildable — without this, `cargo run --features
+# viewer-mcp` errors with "could not determine which binary to run".
+default-run = "legion_prof_viewer"
 
 [features]
 default = ["client"]

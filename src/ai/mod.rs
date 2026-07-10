@@ -7,6 +7,11 @@
 pub mod agent;
 pub mod bridge;
 mod chat_panel;
+/// Backend B ("your Claude Code" embedded chat, P1) — allow/deny tool lists +
+/// P0-gate findings. The subprocess driver lands in P2
+/// (`IMPLEMENTATION-PLAN-cc-backend.md`).
+#[cfg(feature = "viewer-mcp")]
+pub mod claude_code;
 /// Transport-agnostic MCP dispatch core (needs duckdb for the query tools); wrapped
 /// by the stdio bin and the in-viewer HTTP server.
 #[cfg(feature = "duckdb")]

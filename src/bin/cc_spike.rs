@@ -270,18 +270,21 @@ impl Spike {
         let (event_tx, _event_rx) = mpsc::channel::<AgentEvent>();
         let (_cmd_tx, cmd_rx) = mpsc::channel::<UiCommand>();
         let bridge = UiBridge::new(event_tx, cmd_rx, ViewportToken::new(), MCP_CONSUMER_ID);
-        let port = match legion_prof_viewer::ai::viewer_mcp::spawn(
+        let (port, token) = match legion_prof_viewer::ai::viewer_mcp::spawn(
             self.db.to_string_lossy().into_owned(), 0, bridge, None, None,
         ) {
-            Ok(p) => p,
+            Ok(pt) => pt,
             Err(e) => { eprintln!("[--] FAIL: could not start in-viewer MCP server: {e}"); return false; }
         };
-        println!("[--] in-viewer MCP (data tools) on http://127.0.0.1:{port}/mcp");
+        println!("[--] in-viewer MCP (data tools) on http://127.0.0.1:{port}/mcp (bearer-token protected)");
 
-        // --- write a private, 0600 mcp-config (http transport, server "legion-viewer") ---
+        // --- write a private, 0600 mcp-config (http transport, server "legion-viewer").
+        // Includes the Authorization header the hardened server now REQUIRES — so a
+        // green spike run also proves claude forwards mcp-config headers end-to-end.
         let cfg_path = std::env::temp_dir().join(format!("cc_spike_mcp_{}.json", unix_now()));
         let cfg = json!({ "mcpServers": { "legion-viewer": {
-            "type": "http", "url": format!("http://127.0.0.1:{port}/mcp")
+            "type": "http", "url": format!("http://127.0.0.1:{port}/mcp"),
+            "headers": { "Authorization": format!("Bearer {token}") }
         }}});
         if let Err(e) = std::fs::write(&cfg_path, cfg.to_string()) {
             eprintln!("[--] FAIL: write mcp-config: {e}"); return false;

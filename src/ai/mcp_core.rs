@@ -64,6 +64,12 @@ pub struct ServerCtx {
     /// drive the live timeline over this handle. Absent (stdio bin / eval) =>
     /// data tools only, unchanged.
     pub ui_bridge: Option<super::bridge::UiBridge>,
+    /// Bearer token the HTTP transport requires on every `POST /mcp` (server
+    /// hardening — closes the "any local process can drive the tools" hole).
+    /// `None` (stdio bin / direct dispatch in tests) => no HTTP-layer auth; the
+    /// stdio transport has no network exposure so it never sets one. Enforced
+    /// ONLY in `viewer_mcp::handle_http_request`, never in this dispatch core.
+    pub auth_token: Option<String>,
 }
 
 impl ServerCtx {
@@ -78,7 +84,15 @@ impl ServerCtx {
             wiki_root: None,
             protocol_version: DEFAULT_PROTOCOL_VERSION,
             ui_bridge: None,
+            auth_token: None,
         }
+    }
+
+    /// Require `Authorization: Bearer <token>` at the HTTP transport layer
+    /// (server hardening). No effect on stdio / direct dispatch.
+    pub fn with_auth_token(mut self, token: Option<String>) -> Self {
+        self.auth_token = token.filter(|t| !t.is_empty());
+        self
     }
 
     /// Override the advertised protocol version (the HTTP transport uses this).

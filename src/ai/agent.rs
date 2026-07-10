@@ -1030,10 +1030,11 @@ impl AgentSession {
 
     /// POST the current messages to the Claude API with exponential backoff on 429/529.
     ///
-    /// When using an Opus model, extended thinking (`"type": "adaptive"`) is
-    /// enabled and max_tokens is doubled to 16 000. Thinking is NOT supported
-    /// on Sonnet — the guard is `model.contains("opus")` exactly as documented
-    /// in the project's MEMORY.md.
+    /// When using an Opus model, adaptive thinking (`"type": "adaptive"`) is
+    /// enabled with `output_config.effort = "high"` and max_tokens is doubled to
+    /// 16 000. `claude-opus-4-8` rejects a fixed thinking budget, so we must use
+    /// adaptive thinking here. Thinking is NOT added on Sonnet (the fast path) —
+    /// the guard is `model.contains("opus")` exactly as documented in MEMORY.md.
     fn call_claude(&self) -> Result<ApiResponse, String> {
         let use_opus = self.model.contains("opus");
 
@@ -1088,14 +1089,14 @@ impl AgentSession {
             "tools": tools_with_cache,
         });
 
-        // Extended thinking — Opus only. "enabled" forces thinking on every turn
-        // with an explicit token budget. ("adaptive" would let the model decide
-        // whether to think, but doesn't accept budget_tokens.)
+        // Extended thinking — Opus only. `claude-opus-4-8` does not accept a fixed
+        // thinking budget (`{"type":"enabled","budget_tokens":N}` returns a 400),
+        // so we use adaptive thinking and steer depth via `output_config.effort`.
+        // The model-id bump and this thinking-block change must ship together —
+        // bumping the model alone returns a 400. Sonnet keeps no thinking block.
         if use_opus {
-            req_body["thinking"] = serde_json::json!({
-                "type": "enabled",
-                "budget_tokens": 10_000
-            });
+            req_body["thinking"] = serde_json::json!({ "type": "adaptive" });
+            req_body["output_config"] = serde_json::json!({ "effort": "high" });
         }
 
         let body_str = serde_json::to_string(&req_body)
