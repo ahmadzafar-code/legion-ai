@@ -49,13 +49,22 @@ const WIKI_TOOLS: &[&str] = &["wiki_index", "wiki_read", "wiki_search"];
 /// this enum).
 const ANSWER_TYPES: &[&str] = &["uid", "number", "set", "label", "tuple", "diagnosis"];
 
+/// The LIVE project-root handle (P3v2): shared between the UI (which the user
+/// edits at any time) and every reader — MCP tool gating, the instructions
+/// briefing, and the `read_code`/`list_files` sandbox root. Replaces the old
+/// snapshot-at-spawn `Option<String>`, whose frame-1 capture meant a root typed
+/// into the panel AFTER startup never reached the server for the whole app run.
+pub type SharedCodeRoot = std::sync::Arc<std::sync::RwLock<Option<String>>>;
+
 /// Server context: which case DB to query, an optional source root for the code
 /// tools, the protocol version this transport advertises, and an optional
 /// [`UiBridge`](super::bridge::UiBridge) to drive the live viewer. Held immutably
 /// across requests (the bridge's `request` takes `&self`).
 pub struct ServerCtx {
     pub duckdb_path: String,
-    pub code_root: Option<String>,
+    /// Live project root (see [`SharedCodeRoot`]). Read per-request via
+    /// [`Self::code_root`] — never cache the inner value across requests.
+    pub code_root: SharedCodeRoot,
     /// Legion wiki root. When set, the `wiki_*` tools are advertised + routed
     /// (mirrors `code_root` gating `read_code`). (wiki-tool)
     pub wiki_root: Option<String>,
@@ -80,12 +89,35 @@ impl ServerCtx {
             duckdb_path,
             // Normalize an empty code root to None (consistent with `with_wiki_root`)
             // so the source clause / source-line / code tools are never gated on "".
-            code_root: code_root.filter(|r| !r.is_empty()),
+            // Wrapped in a fresh handle — fixed-root callers (stdio bin, eval,
+            // tests) keep this signature; the viewer swaps in its live handle via
+            // `with_code_root_handle`.
+            code_root: std::sync::Arc::new(std::sync::RwLock::new(
+                code_root.filter(|r| !r.is_empty()),
+            )),
             wiki_root: None,
             protocol_version: DEFAULT_PROTOCOL_VERSION,
             ui_bridge: None,
             auth_token: None,
         }
+    }
+
+    /// The CURRENT project root (P3v2: read per request — the user can change it
+    /// in the panel at any time). Empty strings normalize to `None`.
+    pub fn code_root(&self) -> Option<String> {
+        self.code_root
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Share the UI's live project-root handle (the in-viewer server path) —
+    /// replaces whatever `new` wrapped.
+    pub fn with_code_root_handle(mut self, handle: SharedCodeRoot) -> Self {
+        self.code_root = handle;
+        self
     }
 
     /// Require `Authorization: Bearer <token>` at the HTTP transport layer
@@ -163,7 +195,7 @@ fn server_instructions(ctx: &ServerCtx) -> String {
          asserting it."
             .to_owned(),
     ];
-    if let Some(code_root) = &ctx.code_root {
+    if let Some(code_root) = ctx.code_root() {
         parts.push(format!(
             "Application source root: `{code_root}`. Read the relevant task's source (your \
              own file tools, or read_code/list_files) BEFORE explaining what a kernel \
@@ -204,7 +236,7 @@ fn initialize_result(params: &Value, ctx: &ServerCtx) -> Value {
 /// never in `tools.rs`), plus the inline `find_blockers` and `final_answer`
 /// definitions. Code tools are omitted unless a `code_root` was configured.
 fn tools_list_result(ctx: &ServerCtx) -> Value {
-    let has_code = ctx.code_root.is_some();
+    let has_code = ctx.code_root().is_some();
     let has_wiki = ctx.wiki_root.is_some();
     let has_bridge = ctx.ui_bridge.is_some();
     let mut tools: Vec<Value> = tool_definitions(true, true, true)
@@ -335,7 +367,7 @@ fn tools_call_result(params: &Value, ctx: &ServerCtx) -> Value {
             // section — heeds the gather_overview-overflow lesson). gather_overview's
             // signature is untouched; we only append here, in the MCP handler.
             let mut res = into_tool_result(gather_overview(&ctx.duckdb_path));
-            if let (false, Some(code_root)) = (res.1, &ctx.code_root) {
+            if let (false, Some(code_root)) = (res.1, ctx.code_root()) {
                 res.0.push_str(&format!(
                     "\nSource root: `{code_root}` — read the relevant task's source before \
                      explaining what a kernel does or why it is slow."
@@ -343,23 +375,27 @@ fn tools_call_result(params: &Value, ctx: &ServerCtx) -> Value {
             }
             res
         }
-        "list_files" => match &ctx.code_root {
+        "list_files" => match ctx.code_root() {
             Some(root) => {
                 let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
-                into_tool_result(execute_list_files(root, path))
+                into_tool_result(execute_list_files(&root, path))
             }
             None => (
-                "list_files unavailable: server started without a code root.".to_owned(),
+                "list_files unavailable: no project folder configured (set it in the \
+                 viewer's ⚙ Settings, or start with --code / --code-root)."
+                    .to_owned(),
                 true,
             ),
         },
-        "read_code" => match &ctx.code_root {
+        "read_code" => match ctx.code_root() {
             Some(root) => match args.get("path").and_then(Value::as_str) {
-                Some(path) => into_tool_result(execute_read_code(root, path)),
+                Some(path) => into_tool_result(execute_read_code(&root, path)),
                 None => ("read_code requires path (string).".to_owned(), true),
             },
             None => (
-                "read_code unavailable: server started without a code root.".to_owned(),
+                "read_code unavailable: no project folder configured (set it in the \
+                 viewer's ⚙ Settings, or start with --code / --code-root)."
+                    .to_owned(),
                 true,
             ),
         },
@@ -853,6 +889,52 @@ mod tests {
             assert!(t.get("inputSchema").is_some(), "tool {} missing inputSchema", t["name"]);
             assert!(t.get("input_schema").is_none(), "tool {} leaked input_schema", t["name"]);
         }
+    }
+
+    /// P3v2: the code root is LIVE — a root set (or cleared) through the shared
+    /// handle AFTER the ctx exists changes tool advertising, the instructions
+    /// briefing, and dispatch on the very next request. This is the fix for the
+    /// old snapshot-at-spawn behavior, where a root typed into the panel after
+    /// frame 1 never reached the server.
+    #[test]
+    fn test_code_root_is_live_across_requests() {
+        let ctx = dummy_ctx();
+
+        // Before: no code tools, no source clause, dispatch refuses.
+        let names = |resp: &Value| -> Vec<String> {
+            resp["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let before = handle_request(&req("tools/list", json!({})), &ctx).unwrap();
+        assert!(!names(&before).contains(&"read_code".to_owned()));
+        let init_before = handle_request(&req("initialize", json!({})), &ctx).unwrap();
+        assert!(!init_before["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("Application source root"));
+
+        // The user sets a project folder in the panel (same shared handle).
+        *ctx.code_root.write().unwrap() = Some("/app/src".to_owned());
+
+        let after = handle_request(&req("tools/list", json!({})), &ctx).unwrap();
+        let after_names = names(&after);
+        assert!(after_names.contains(&"read_code".to_owned()), "read_code must appear live");
+        assert!(after_names.contains(&"list_files".to_owned()));
+        let init_after = handle_request(&req("initialize", json!({})), &ctx).unwrap();
+        assert!(init_after["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("Application source root: `/app/src`"));
+
+        // Clearing it retracts the tools again (and empty normalizes to None).
+        *ctx.code_root.write().unwrap() = Some("   ".to_owned());
+        assert_eq!(ctx.code_root(), None, "whitespace-only root must read as None");
+        let cleared = handle_request(&req("tools/list", json!({})), &ctx).unwrap();
+        assert!(!names(&cleared).contains(&"read_code".to_owned()));
     }
 
     #[test]

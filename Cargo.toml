@@ -24,7 +24,7 @@ duckdb = ["dep:duckdb", "dep:sha2"]  # sha2 rides on duckdb so {} and {ai} never
 client = ["dep:reqwest", "dep:url"]
 server = ["dep:actix-cors", "dep:actix-web"]
 nvtxw = ["dep:nvtxw"]
-ai = ["dep:ureq", "dep:serde_json", "dep:image", "dep:base64", "dep:tracing", "dep:tracing-subscriber", "dep:egui_commonmark"]  # AI analysis + screenshot encoding + agent tracing + chat markdown
+ai = ["dep:ureq", "dep:serde_json", "dep:image", "dep:base64", "dep:tracing", "dep:tracing-subscriber", "dep:egui_commonmark", "dep:rfd"]  # AI analysis + screenshot encoding + agent tracing + chat markdown + native file dialogs
 # In-viewer HTTP MCP server (V1.1). OFF by default — the 4 standard combos skip it.
 # Verified surface (empirical, claude-code 2.1.150): plain POST /mcp, Content-Length
 # JSON, single application/json response, Connection: close, no SSE/keep-alive/
@@ -99,6 +99,9 @@ nvtxw = { version = "0.1", optional = true }
 env_logger = "0.11"
 rayon = "1.10"
 reqwest = { version = "0.12", features = ["blocking"], optional = true }
+# ai chat panel (P3v2): native OS folder/file dialogs for the Project-folder and
+# DB "Browse…" buttons. Native-only — the wasm build has no filesystem paths.
+rfd = { version = "0.15", optional = true }
 
 # web:
 [target.'cfg(target_arch = "wasm32")'.dependencies]

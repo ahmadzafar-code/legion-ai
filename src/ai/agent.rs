@@ -345,6 +345,25 @@ impl AgentSession {
         self.command_rx = command_rx;
     }
 
+    /// P3v2: re-read the (user-editable) project folder on a REUSED session.
+    /// Historically `code_path`/`has_code` were frozen at `new()`, so setting the
+    /// path mid-conversation silently did nothing until ↺ New session. When the
+    /// value changed, the tool list and system prompt are rebuilt so `read_code`/
+    /// `list_files` (and the code-pointer bullet) appear/disappear on the next
+    /// request. Rebuilding the system prompt invalidates the prompt cache — fine
+    /// for a rare, user-initiated change.
+    pub fn refresh_code_path(&mut self, code_path: &str) {
+        if self.code_path == code_path {
+            return;
+        }
+        self.code_path = code_path.to_owned();
+        let has_duckdb = cfg!(feature = "duckdb") && !self.duckdb_path.is_empty();
+        let has_code = !self.code_path.is_empty();
+        let has_wiki = !self.wiki_path.is_empty();
+        self.tools = super::tools::tool_definitions(has_duckdb, has_code, has_wiki);
+        self.system_prompt = build_system_prompt(has_code);
+    }
+
     /// Wire the shared viewport token (V1.2). After this, the screenshot/navigation
     /// path claims `token` for each round-trip under `consumer_id`, so the embedded
     /// agent and the in-viewer MCP driver are mutually exclusive (single outstanding

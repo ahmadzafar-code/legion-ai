@@ -292,7 +292,7 @@ impl Spike {
         let (_cmd_tx, cmd_rx) = mpsc::channel::<UiCommand>();
         let bridge = UiBridge::new(event_tx, cmd_rx, ViewportToken::new(), MCP_CONSUMER_ID);
         let (port, token, _approval_broker) = match legion_prof_viewer::ai::viewer_mcp::spawn(
-            self.db.to_string_lossy().into_owned(), 0, bridge, None, None,
+            self.db.to_string_lossy().into_owned(), 0, bridge, None, Default::default(),
         ) {
             Ok(pt) => pt,
             Err(e) => { eprintln!("[--] FAIL: could not start in-viewer MCP server: {e}"); return false; }

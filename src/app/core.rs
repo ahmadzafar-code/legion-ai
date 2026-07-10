@@ -282,6 +282,27 @@ impl ItemLinkNavigationMode {
     }
 }
 
+/// P3v2: AI-panel settings persisted across app restarts via eframe storage.
+/// The `ChatPanel` itself is `serde(skip)` (channels, sessions, caches), so this
+/// small plain-data mirror carries the values worth keeping. The API key is
+/// deliberately absent — eframe storage is plaintext on disk. Empty strings mean
+/// "unset" (`apply_persisted` skips them, so CLI flags / defaults survive).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct PersistedAiSettings {
+    #[serde(default)]
+    pub project_root: String,
+    #[serde(default)]
+    pub duckdb_path: String,
+    #[serde(default)]
+    pub wiki_path: String,
+    #[serde(default)]
+    pub app_context: String,
+    #[serde(default)]
+    pub chat_font_scale: f32,
+    #[serde(default)]
+    pub backend_claude_code: bool,
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 struct Context {
     #[serde(skip)]
@@ -327,6 +348,13 @@ struct Context {
     #[cfg(feature = "ai")]
     #[serde(skip)]
     chat_panel: crate::ai::ChatPanel,
+
+    /// P3v2: the AI settings that DO survive restarts (the panel itself is
+    /// serde-skip). Synced FROM the panel in `save()`, applied TO the panel in
+    /// `ProfApp::new` (before CLI flags, which win). Plain data — never the API
+    /// key (eframe storage is plaintext on disk).
+    #[serde(default)]
+    ai_settings: PersistedAiSettings,
 
     /// Request ID of a pending `ViewportCommand::Screenshot` awaiting
     /// delivery via `Event::Screenshot`. Set when the agent requests a
@@ -2796,6 +2824,11 @@ impl ProfApp {
 
         #[cfg(feature = "ai")]
         {
+            // P3v2: restore last session's AI settings FIRST (project folder, DB
+            // path, app context, font scale, backend choice), then let explicit
+            // CLI flags overwrite — set_tool_paths only writes non-empty values.
+            let saved = result.cx.ai_settings.clone();
+            result.cx.chat_panel.apply_persisted(&saved);
             // Pre-fill the assistant's tool paths from CLI flags / auto-detection.
             result
                 .cx
@@ -3405,6 +3438,12 @@ impl ProfApp {
 impl eframe::App for ProfApp {
     /// Called to save state before shutdown.
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        // P3v2: mirror the (serde-skip) chat panel's persistable settings into
+        // the serialized Context so they survive restarts.
+        #[cfg(feature = "ai")]
+        {
+            self.cx.ai_settings = self.cx.chat_panel.export_persisted();
+        }
         eframe::set_value(storage, eframe::APP_KEY, self);
     }
 
@@ -3444,11 +3483,12 @@ impl eframe::App for ProfApp {
                 let bridge = cx
                     .ui_bridge(crate::ai::bridge::MCP_CONSUMER_ID)
                     .with_wake(move || egui_ctx.request_repaint());
-                // Hand the configured wiki + source roots to the server so it briefs
-                // the external agent (MCP `instructions` + overview source line) and
-                // advertises wiki_* / read_code / list_files.
+                // Hand the configured wiki root + the LIVE project-root handle to
+                // the server (P3v2: the handle is read per request, so a folder set
+                // in the panel at ANY time reaches instructions/read_code — the old
+                // snapshot-at-spawn silently ignored late-set paths forever).
                 let wiki_root = cx.chat_panel.wiki_path();
-                let code_root = cx.chat_panel.code_path();
+                let code_root = cx.chat_panel.project_root_handle();
                 // P1 (Backend B): STORE the bound port instead of discarding it.
                 // Prefer the stable well-known port 8765 so existing external
                 // `claude mcp add …:8765/mcp` registrations keep working; fall back

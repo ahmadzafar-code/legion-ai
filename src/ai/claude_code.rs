@@ -1262,7 +1262,7 @@ mod tests {
             0,
             bridge,
             None,
-            None,
+            Default::default(),
         )
         .expect("server");
         let (tx, rx) = mpsc::channel::<AgentEvent>();
@@ -1327,7 +1327,7 @@ mod tests {
             0,
             bridge,
             None,
-            None,
+            Default::default(),
         )
         .expect("server");
 
@@ -1340,7 +1340,9 @@ mod tests {
         let clicker_stop = Arc::new(AtomicBool::new(false));
         let clicker_stop2 = Arc::clone(&clicker_stop);
         let clicker = std::thread::spawn(move || {
-            let deadline = std::time::Instant::now() + Duration::from_secs(170);
+            // Live-LLM latency is high-variance; ample room (the clicker exits
+            // early via `clicker_stop` on the happy path anyway).
+            let deadline = std::time::Instant::now() + Duration::from_secs(290);
             let mut approved = false;
             while std::time::Instant::now() < deadline && !clicker_stop2.load(Ordering::Relaxed) {
                 if let Some((id, tool, input)) = user.front() {
@@ -1369,7 +1371,9 @@ mod tests {
                 canary.display()
             ))
             .expect("send");
-        let deadline = std::time::Instant::now() + Duration::from_secs(180);
+        // 300s: matches the approval-path ceiling; live model latency flaked a
+        // 180s budget once (turn otherwise healthy).
+        let deadline = std::time::Instant::now() + Duration::from_secs(300);
         let mut saw_complete = false;
         while std::time::Instant::now() < deadline {
             match rx.recv_timeout(Duration::from_secs(5)) {

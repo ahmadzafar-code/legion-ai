@@ -495,6 +495,19 @@ pub struct ChatPanel {
     /// alongside `mcp_endpoint`; Arc-shared with the server thread.
     #[cfg(feature = "viewer-mcp")]
     approval_broker: Option<Arc<crate::ai::claude_code::ApprovalBroker>>,
+    /// P3v2: the LIVE project-root handle shared with the MCP server (created
+    /// here, handed to `viewer_mcp::spawn` by core.rs). Synced each frame from
+    /// the normalized `code_path_buffer`.
+    #[cfg(feature = "viewer-mcp")]
+    project_root: crate::ai::mcp_core::SharedCodeRoot,
+    /// Last value written to `project_root` (change detection for the sync).
+    #[cfg(feature = "viewer-mcp")]
+    last_synced_root: Option<String>,
+    /// The project root the CURRENT Claude Code child was spawned with
+    /// (`--add-dir` is fixed per child) — when it differs from the live value,
+    /// the settings row shows "takes effect on ↺ New session".
+    #[cfg(feature = "viewer-mcp")]
+    cc_spawn_root: Option<String>,
     /// Markdown render cache for analysis messages (egui_commonmark). Arc-shared
     /// across panel clones; `CommonMarkCache` is not `Clone`.
     md_cache: Arc<Mutex<egui_commonmark::CommonMarkCache>>,
@@ -544,6 +557,12 @@ impl Clone for ChatPanel {
             cc_agent: Arc::clone(&self.cc_agent),
             #[cfg(feature = "viewer-mcp")]
             approval_broker: self.approval_broker.clone(),
+            #[cfg(feature = "viewer-mcp")]
+            project_root: Arc::clone(&self.project_root),
+            #[cfg(feature = "viewer-mcp")]
+            last_synced_root: self.last_synced_root.clone(),
+            #[cfg(feature = "viewer-mcp")]
+            cc_spawn_root: self.cc_spawn_root.clone(),
             md_cache: Arc::clone(&self.md_cache),
             chat_font_scale: self.chat_font_scale,
         }
@@ -615,6 +634,12 @@ impl ChatPanel {
             cc_agent: Arc::new(Mutex::new(None)),
             #[cfg(feature = "viewer-mcp")]
             approval_broker: None,
+            #[cfg(feature = "viewer-mcp")]
+            project_root: Default::default(),
+            #[cfg(feature = "viewer-mcp")]
+            last_synced_root: None,
+            #[cfg(feature = "viewer-mcp")]
+            cc_spawn_root: None,
             md_cache: Arc::new(Mutex::new(egui_commonmark::CommonMarkCache::default())),
             chat_font_scale: 1.15,
         }
@@ -871,13 +896,33 @@ impl ChatPanel {
         (!trimmed.is_empty()).then(|| trimmed.to_owned())
     }
 
-    /// The configured source-code root, if any — handed to the in-viewer MCP server
-    /// so it briefs the external agent on the source and advertises read_code /
-    /// list_files (mirrors [`Self::wiki_path`]).
+    /// The EFFECTIVE project root, if any (P3v2: file paths normalize to their
+    /// parent directory) — used for the Backend B child's `--add-dir` and the
+    /// native agent's per-turn refresh.
     #[cfg(feature = "viewer-mcp")]
     pub fn code_path(&self) -> Option<String> {
-        let trimmed = self.code_path_buffer.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+        effective_project_root(&self.code_path_buffer)
+    }
+
+    /// The LIVE project-root handle shared with the in-viewer MCP server (P3v2):
+    /// the server reads it per request, so a folder set in the panel at ANY time
+    /// reaches read_code/list_files/instructions — no more snapshot-at-spawn.
+    /// The panel keeps it in sync with the (normalized) path buffer each frame.
+    #[cfg(feature = "viewer-mcp")]
+    pub fn project_root_handle(&self) -> crate::ai::mcp_core::SharedCodeRoot {
+        Arc::clone(&self.project_root)
+    }
+
+    /// Push the effective project root into the shared handle when it changed
+    /// (called once per frame; one fs stat per frame — same cost class as the
+    /// status chips, which already stat per frame).
+    #[cfg(feature = "viewer-mcp")]
+    fn sync_project_root(&mut self) {
+        let effective = effective_project_root(&self.code_path_buffer);
+        if effective != self.last_synced_root {
+            *self.project_root.write().unwrap() = effective.clone();
+            self.last_synced_root = effective;
+        }
     }
 
     /// Wire the in-viewer MCP server endpoint — (ACTUAL bound port, per-session
@@ -899,6 +944,53 @@ impl ChatPanel {
         broker: Option<Arc<crate::ai::claude_code::ApprovalBroker>>,
     ) {
         self.approval_broker = broker;
+    }
+
+    /// P3v2 persistence: snapshot the user's AI settings for eframe storage
+    /// (called by `ProfApp::save`). The API key is deliberately EXCLUDED —
+    /// eframe storage is plaintext on disk; use ANTHROPIC_API_KEY instead.
+    pub fn export_persisted(&self) -> crate::app::PersistedAiSettings {
+        crate::app::PersistedAiSettings {
+            project_root: self.code_path_buffer.trim().to_owned(),
+            duckdb_path: self.duckdb_path_buffer.trim().to_owned(),
+            wiki_path: self.wiki_path_buffer.trim().to_owned(),
+            app_context: self.app_context_buffer.clone(),
+            chat_font_scale: self.chat_font_scale,
+            backend_claude_code: {
+                #[cfg(feature = "viewer-mcp")]
+                {
+                    self.backend == ChatBackendKind::ClaudeCode
+                }
+                #[cfg(not(feature = "viewer-mcp"))]
+                {
+                    false
+                }
+            },
+        }
+    }
+
+    /// P3v2 persistence: restore a previous session's AI settings (called by
+    /// `ProfApp::new` BEFORE `set_tool_paths`, so explicit CLI flags win).
+    pub fn apply_persisted(&mut self, saved: &crate::app::PersistedAiSettings) {
+        if !saved.project_root.is_empty() {
+            self.code_path_buffer = saved.project_root.clone();
+        }
+        if !saved.duckdb_path.is_empty() {
+            self.duckdb_path_buffer = saved.duckdb_path.clone();
+        }
+        if !saved.wiki_path.is_empty() {
+            self.wiki_path_buffer = saved.wiki_path.clone();
+        }
+        if !saved.app_context.is_empty() {
+            self.app_context_buffer = saved.app_context.clone();
+        }
+        if saved.chat_font_scale > 0.0 {
+            self.chat_font_scale = saved.chat_font_scale.clamp(0.8, 1.8);
+        }
+        #[cfg(feature = "viewer-mcp")]
+        if saved.backend_claude_code {
+            self.backend = ChatBackendKind::ClaudeCode;
+        }
     }
 
     /// End-of-turn receiver cleanup — CHANNEL-LIFETIME critical (see
@@ -935,23 +1027,20 @@ impl ChatPanel {
         ToolStatus::Ready
     }
 
-    /// Derive the Code tool status from `code_path_buffer`.
-    ///
-    /// Accepts a directory or a single source file (e.g. `.rg`).  When a file
-    /// is given, the agent will use its parent directory as the code root.
+    /// Derive the Code tool status from the EFFECTIVE project root (P3v2): green
+    /// only when the effective root is a real directory — the value every
+    /// consumer actually uses, so the chip can no longer show Ready for a
+    /// configuration that would fail (the old false-green: a file path was
+    /// accepted citing a parent-dir fallback that didn't exist; the fallback is
+    /// now real, in [`effective_project_root`]).
     fn tool_status_code(&self) -> ToolStatus {
-        let trimmed = self.code_path_buffer.trim();
-        if trimmed.is_empty() {
+        if self.code_path_buffer.trim().is_empty() {
             return ToolStatus::Off;
         }
-        let path = std::path::Path::new(trimmed);
-        if path.is_dir() {
-            return ToolStatus::Ready;
+        match effective_project_root(&self.code_path_buffer) {
+            Some(root) if std::path::Path::new(&root).is_dir() => ToolStatus::Ready,
+            _ => ToolStatus::Error("Folder not found".into()),
         }
-        if path.is_file() {
-            return ToolStatus::Ready;
-        }
-        ToolStatus::Error("Path not found".into())
     }
 
     /// Visual tool status — always Ready (screenshot/zoom are built-in).
@@ -1025,6 +1114,25 @@ impl ChatPanel {
             );
             return;
         }
+        // P3v2: an @-attached folder used to be a decoy — it injected a file
+        // LISTING the model had no tool to open, while the real code root sat
+        // unset. When no project folder is configured, adopt the first attached
+        // folder as the root (both backends benefit: read_code/list_files and,
+        // for a Claude Code child spawned this turn, --add-dir).
+        if effective_project_root(&self.code_path_buffer).is_none() {
+            if let Some(folder) = self
+                .attachments
+                .iter()
+                .find(|a| matches!(a.kind, AttachmentKind::Folder))
+                .map(|a| a.path.clone())
+            {
+                self.code_path_buffer = folder.clone();
+                self.add_message(
+                    ChatMessageKind::System,
+                    format!("Using attached folder as the project folder: {folder}"),
+                );
+            }
+        }
         match self.backend {
             ChatBackendKind::Native => self.trigger_native(user_query),
             ChatBackendKind::ClaudeCode => self.trigger_claude_code(user_query),
@@ -1084,6 +1192,9 @@ impl ChatPanel {
                     Ok(agent) => {
                         *self.event_rx.lock().unwrap() = Some(event_rx);
                         *self.cc_agent.lock().unwrap() = Some(agent);
+                        // --add-dir is fixed per child: remember what this one got
+                        // so the settings row can flag a later change (P3v2).
+                        self.cc_spawn_root = code_root.clone();
                         self.add_message(
                             ChatMessageKind::System,
                             format!(
@@ -1147,9 +1258,10 @@ impl ChatPanel {
             return;
         };
 
-        // Tool paths from dedicated fields
+        // Tool paths from dedicated fields. The project root is the EFFECTIVE
+        // value (P3v2: a file normalizes to its parent directory).
         let duckdb_path = self.duckdb_path_buffer.trim().to_owned();
-        let code_path = self.code_path_buffer.trim().to_owned();
+        let code_path = effective_project_root(&self.code_path_buffer).unwrap_or_default();
         let wiki_path = self.wiki_path_buffer.trim().to_owned();
 
         // Collect inline context from @ attachments (Part D)
@@ -1274,7 +1386,10 @@ impl ChatPanel {
             let mut session = match existing {
                 Some(mut s) => {
                     // Reused session: update channels (old ones are disconnected)
+                    // and re-read the project root (P3v2: the user can set/change
+                    // it mid-conversation; before, it was frozen at creation).
                     s.update_channels(event_tx.clone(), cmd_rx);
+                    s.refresh_code_path(&code_path);
                     s
                 }
                 None => AgentSession::new(
@@ -1798,6 +1913,56 @@ impl ChatPanel {
                         .desired_width(ui.available_width()),
                 );
 
+                // P3v2: the project folder — ONE selection feeding the harness's
+                // file tools (Backend B --add-dir), the MCP code root (live), and
+                // the native agent's read_code sandbox.
+                ui.add_space(4.0);
+                ui.label("Project folder (the profiled app's source):");
+                ui.horizontal(|ui| {
+                    let browse_w = 70.0;
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.code_path_buffer)
+                            .hint_text("/path/to/app (optional — enables code reading)")
+                            .desired_width((ui.available_width() - browse_w).max(80.0)),
+                    );
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if ui.button("Browse…").clicked() {
+                        if let Some(dir) = rfd::FileDialog::new()
+                            .set_title("Choose the profiled application's source folder")
+                            .pick_folder()
+                        {
+                            self.code_path_buffer = dir.to_string_lossy().into_owned();
+                        }
+                    }
+                });
+                match self.tool_status_code() {
+                    ToolStatus::Ready => {
+                        #[cfg(feature = "viewer-mcp")]
+                        let stale = self.cc_agent.lock().unwrap().is_some()
+                            && self.cc_spawn_root != self.code_path();
+                        #[cfg(not(feature = "viewer-mcp"))]
+                        let stale = false;
+                        if stale {
+                            ui.label(
+                                egui::RichText::new(
+                                    "changed — takes effect on ↺ New session (the running \
+                                     Claude Code keeps its original folder)",
+                                )
+                                .small()
+                                .color(egui::Color32::from_rgb(200, 120, 20)),
+                            );
+                        }
+                    }
+                    ToolStatus::Error(msg) => {
+                        ui.label(
+                            egui::RichText::new(format!("✕ {msg}"))
+                                .small()
+                                .color(egui::Color32::from_rgb(220, 60, 60)),
+                        );
+                    }
+                    ToolStatus::Off => {}
+                }
+
                 ui.add_space(4.0);
                 ui.label("App context:");
                 ui.add(
@@ -2216,13 +2381,25 @@ impl ChatPanel {
 
                         // DB path with picker
                         ui.label("Database path:");
-                        path_field_with_picker(
-                            ui,
-                            egui::Id::new("tools_db_path"),
-                            &mut self.duckdb_path_buffer,
-                            &mut self.db_picker,
-                            "/path/to/legion_prof.duckdb",
-                        );
+                        ui.horizontal(|ui| {
+                            path_field_with_picker(
+                                ui,
+                                egui::Id::new("tools_db_path"),
+                                &mut self.duckdb_path_buffer,
+                                &mut self.db_picker,
+                                "/path/to/legion_prof.duckdb",
+                            );
+                            #[cfg(not(target_arch = "wasm32"))]
+                            if ui.small_button("Browse…").clicked() {
+                                if let Some(f) = rfd::FileDialog::new()
+                                    .set_title("Choose the profile DuckDB")
+                                    .add_filter("DuckDB", &["duckdb"])
+                                    .pick_file()
+                                {
+                                    self.duckdb_path_buffer = f.to_string_lossy().into_owned();
+                                }
+                            }
+                        });
                         let db_status = self.tool_status_db();
                         let (db_icon, db_msg, db_color) = match &db_status {
                             ToolStatus::Ready => (
@@ -2249,15 +2426,26 @@ impl ChatPanel {
 
                         ui.add_space(4.0);
 
-                        // Code path with picker
-                        ui.label("Code path:");
-                        path_field_with_picker(
-                            ui,
-                            egui::Id::new("tools_code_path"),
-                            &mut self.code_path_buffer,
-                            &mut self.code_picker,
-                            "/path/to/app/src (optional)",
-                        );
+                        // Project folder with picker (same buffer as ⚙ Settings)
+                        ui.label("Project folder:");
+                        ui.horizontal(|ui| {
+                            path_field_with_picker(
+                                ui,
+                                egui::Id::new("tools_code_path"),
+                                &mut self.code_path_buffer,
+                                &mut self.code_picker,
+                                "/path/to/app (optional)",
+                            );
+                            #[cfg(not(target_arch = "wasm32"))]
+                            if ui.small_button("Browse…").clicked() {
+                                if let Some(dir) = rfd::FileDialog::new()
+                                    .set_title("Choose the profiled application's source folder")
+                                    .pick_folder()
+                                {
+                                    self.code_path_buffer = dir.to_string_lossy().into_owned();
+                                }
+                            }
+                        });
                         let code_status = self.tool_status_code();
                         let (code_icon, code_msg, code_color) = match &code_status {
                             ToolStatus::Ready => (
@@ -2355,6 +2543,10 @@ impl ChatPanel {
     /// Render the chat panel. Must be called BEFORE CentralPanel in the layout.
     pub fn show(&mut self, ctx: &egui::Context) {
         self.poll_events();
+        // P3v2: keep the MCP server's live project-root handle in sync with the
+        // (normalized) path buffer — the server reads it per request.
+        #[cfg(feature = "viewer-mcp")]
+        self.sync_project_root();
 
         egui::SidePanel::right("ai_chat_panel")
             .resizable(true)
@@ -2930,6 +3122,27 @@ fn show_path_picker_popup(
 
 // ── Filesystem helpers ──────────────────────────────────────────────────────
 
+/// The EFFECTIVE project root for a raw path-field value (P3v2): trims, treats
+/// empty as unset, and normalizes a FILE path to its parent directory — the
+/// fallback the old Code chip claimed but never implemented. Every consumer
+/// (chip, native agent, MCP handle, Backend B --add-dir) reads through this, so
+/// they can never disagree; the buffer itself stays exactly as the user typed it
+/// (no cursor-fighting rewrites).
+fn effective_project_root(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path = std::path::Path::new(trimmed);
+    if path.is_file() {
+        return path
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .filter(|s| !s.is_empty());
+    }
+    Some(trimmed.to_owned())
+}
+
 /// Classify a filesystem path into an attachment kind.
 fn classify_path(path: &std::path::Path) -> AttachmentKind {
     if path.is_dir() {
@@ -3236,5 +3449,90 @@ mod selection_tests {
         let (label, start, stop) = range.expect("dragged region present");
         assert_eq!(label, "CPU 1");
         assert_eq!((start, stop), (50, 300));
+    }
+}
+
+#[cfg(test)]
+mod p3v2_tests {
+    use super::*;
+
+    /// P3v2: the read-boundary normalization every consumer shares — trims,
+    /// empty→None, FILE→parent directory (the fallback the old chip claimed).
+    #[test]
+    fn effective_project_root_normalizes() {
+        assert_eq!(effective_project_root(""), None);
+        assert_eq!(effective_project_root("   "), None);
+        // A directory passes through (trimmed).
+        let dir = std::env::temp_dir().join(format!("p3v2_dir_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir_s = dir.to_string_lossy().into_owned();
+        assert_eq!(effective_project_root(&format!("  {dir_s}  ")), Some(dir_s.clone()));
+        // A FILE normalizes to its parent.
+        let file = dir.join("kernel.cu");
+        std::fs::write(&file, "x").unwrap();
+        assert_eq!(
+            effective_project_root(&file.to_string_lossy()),
+            Some(dir_s.clone()),
+            "file path must normalize to its parent directory"
+        );
+        // A nonexistent path passes through as typed (status turns red; consumers
+        // fail with a clear error rather than silently dropping the value).
+        assert_eq!(
+            effective_project_root("/no/such/dir"),
+            Some("/no/such/dir".to_owned())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P3v2 persistence: export → apply round-trips the persistable settings,
+    /// empty saved values never clobber, and the API key is never exported.
+    #[test]
+    fn persisted_settings_round_trip_and_precedence() {
+        let mut a = ChatPanel::new();
+        a.code_path_buffer = "/proj".into();
+        a.duckdb_path_buffer = "/db.duckdb".into();
+        a.app_context_buffer = "2 nodes, 8 GPUs".into();
+        a.chat_font_scale = 1.3;
+        a.api_key_buffer = "sk-ant-secret".into();
+        let saved = a.export_persisted();
+        assert_eq!(saved.project_root, "/proj");
+        assert_eq!(saved.duckdb_path, "/db.duckdb");
+        assert_eq!(saved.app_context, "2 nodes, 8 GPUs");
+        assert!((saved.chat_font_scale - 1.3).abs() < 1e-6);
+        // The API key must not appear anywhere in the persisted form.
+        let json = serde_json::to_string(&saved).unwrap();
+        assert!(!json.contains("sk-ant-secret"), "API key must never persist");
+
+        let mut b = ChatPanel::new();
+        b.apply_persisted(&saved);
+        assert_eq!(b.code_path_buffer, "/proj");
+        assert_eq!(b.duckdb_path_buffer, "/db.duckdb");
+        assert_eq!(b.app_context_buffer, "2 nodes, 8 GPUs");
+        assert!((b.chat_font_scale - 1.3).abs() < 1e-6);
+        assert!(b.api_key_buffer.is_empty());
+
+        // Empty saved values never clobber existing (CLI-set) ones.
+        let mut c = ChatPanel::new();
+        c.code_path_buffer = "/from-cli".into();
+        c.apply_persisted(&crate::app::PersistedAiSettings::default());
+        assert_eq!(c.code_path_buffer, "/from-cli");
+        // Default font scale of 0.0 (missing field) must not zero the size.
+        assert!(c.chat_font_scale > 0.5);
+    }
+
+    /// P3v2: the shared handle follows buffer edits (and normalizes) — this is
+    /// what the MCP server reads per request.
+    #[cfg(feature = "viewer-mcp")]
+    #[test]
+    fn project_root_handle_syncs_live() {
+        let mut p = ChatPanel::new();
+        let handle = p.project_root_handle();
+        assert_eq!(*handle.read().unwrap(), None);
+        p.code_path_buffer = "/app/src".into();
+        p.sync_project_root();
+        assert_eq!(*handle.read().unwrap(), Some("/app/src".to_owned()));
+        p.code_path_buffer.clear();
+        p.sync_project_root();
+        assert_eq!(*handle.read().unwrap(), None, "clearing the field must clear the handle");
     }
 }

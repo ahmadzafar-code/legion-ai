@@ -311,7 +311,7 @@ pub fn spawn(
     port: u16,
     bridge: crate::ai::bridge::UiBridge,
     wiki_root: Option<String>,
-    code_root: Option<String>,
+    code_root: crate::ai::mcp_core::SharedCodeRoot,
 ) -> std::io::Result<(u16, String, std::sync::Arc<crate::ai::claude_code::ApprovalBroker>)> {
     let listener = TcpListener::bind(("127.0.0.1", port))?;
     let bound = listener.local_addr()?.port();
@@ -334,7 +334,8 @@ pub fn spawn(
     std::thread::Builder::new()
         .name("legion-viewer-mcp".to_owned())
         .spawn(move || {
-            let ctx = ServerCtx::new(duckdb_path, code_root)
+            let ctx = ServerCtx::new(duckdb_path, None)
+                .with_code_root_handle(code_root) // LIVE: the panel edits it any time
                 .with_protocol(HTTP_PROTOCOL_VERSION)
                 .with_wiki_root(wiki_root)
                 .with_ui_bridge(bridge)
