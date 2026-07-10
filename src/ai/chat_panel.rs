@@ -1283,7 +1283,7 @@ impl ChatPanel {
         ui.add_space((ui.available_height() * 0.28).max(24.0));
         ui.vertical_centered(|ui| {
             ui.label(
-                egui::RichText::new("What should we work on?")
+                egui::RichText::new("How can I help?")
                     .size(26.0)
                     .color(egui::Color32::from_rgb(40, 40, 40)),
             );
@@ -1299,15 +1299,11 @@ impl ChatPanel {
                 .show(ui, |ui: &mut egui::Ui| {
                     ui.set_width(ui.available_width());
                     ui.set_min_height(64.0);
-                    ui.with_layout(
-                        egui::Layout::bottom_up(egui::Align::LEFT),
-                        |ui| {
-                            ui.label(
-                                egui::RichText::new(title)
-                                    .size(14.5)
-                                    .color(egui::Color32::from_rgb(50, 50, 50)),
-                            );
-                        },
+                    ui.label(
+                        egui::RichText::new(title)
+                            .size(14.5)
+                            .strong()
+                            .color(egui::Color32::from_rgb(40, 40, 40)),
                     );
                 })
                 .response;
@@ -1326,7 +1322,7 @@ impl ChatPanel {
             ui.spacing_mut().item_spacing.x = gutter;
             ui.scope(|ui| {
                 ui.set_width(w);
-                if card(ui, "Explore this profile") {
+                if card(ui, "Give me an overview of this profile") {
                     submit = Some(
                         "Give me an overview of this profile — what ran, where the time \
                          went, and anything unusual.",
@@ -1335,10 +1331,14 @@ impl ChatPanel {
             });
             ui.scope(|ui| {
                 ui.set_width(w);
-                if card(ui, "Find the bottleneck") {
+                if card(
+                    ui,
+                    "Highlight idle gaps and find what's preventing them from starting \
+                     earlier",
+                ) {
                     submit = Some(
-                        "Diagnose the main performance bottleneck in this run and \
-                         highlight the evidence on the timeline.",
+                        "Highlight the largest idle gaps on the timeline and find what's \
+                         preventing that work from starting earlier.",
                     );
                 }
             });
@@ -1592,7 +1592,13 @@ impl ChatPanel {
                     // the popup is forced to open UPWARD like Claude Desktop's
                     // (menu_button drops down, straight out of a bottom bar).
                     let plus_resp = ui
-                        .button(egui::RichText::new("+").size(18.0).strong())
+                        .button(
+                            egui::RichText::new("+")
+                                .size(20.0)
+                                .strong()
+                                .color(egui::Color32::from_rgb(30, 30, 30)),
+                        )
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
                         .on_hover_text("Connect the profile DB or code repo, or attach a file");
                     let plus_menu_id = ui.make_persistent_id("plus_context_menu");
                     if plus_resp.clicked() {
@@ -1605,15 +1611,19 @@ impl ChatPanel {
                         egui::AboveOrBelow::Above,
                         egui::PopupCloseBehavior::CloseOnClick,
                         |ui| {
-                            ui.set_min_width(170.0);
+                            ui.set_min_width(190.0);
+                            menu_row_visuals(ui);
                             let item = |ui: &mut egui::Ui, label: &str| {
                                 ui.add(
                                     egui::Button::new(
-                                        egui::RichText::new(label).size(13.5),
+                                        egui::RichText::new(label)
+                                            .size(14.5)
+                                            .color(egui::Color32::from_rgb(30, 30, 30)),
                                     )
-                                    .frame(false)
-                                    .min_size(egui::vec2(ui.available_width(), 24.0)),
+                                    .rounding(6.0)
+                                    .min_size(egui::vec2(ui.available_width(), 28.0)),
                                 )
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
                                 .clicked()
                             };
                             #[cfg(not(target_arch = "wasm32"))]
@@ -1716,15 +1726,11 @@ impl ChatPanel {
                                 .add(
                                     egui::Button::new(
                                         egui::RichText::new(pill_label)
-                                            .size(14.0)
-                                            .color(egui::Color32::from_rgb(60, 60, 60)),
+                                            .size(15.0)
+                                            .strong()
+                                            .color(egui::Color32::from_rgb(30, 30, 30)),
                                     )
-                                    .fill(egui::Color32::WHITE)
-                                    .stroke(egui::Stroke::new(
-                                        1.0,
-                                        egui::Color32::from_rgb(190, 190, 190),
-                                    ))
-                                    .rounding(8.0)
+                                    .rounding(4.0)
                                     .min_size(egui::vec2(0.0, 30.0)),
                                 )
                                 .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -1742,6 +1748,7 @@ impl ChatPanel {
                                 egui::PopupCloseBehavior::CloseOnClick,
                                 |ui| {
                                     ui.set_min_width(190.0);
+                                    menu_row_visuals(ui);
                                     ui.label(
                                         egui::RichText::new("Backend")
                                             .size(11.5)
@@ -1754,14 +1761,17 @@ impl ChatPanel {
                                                selected: bool,
                                                locked: bool|
                                      -> bool {
-                                        let text = egui::RichText::new(label).size(13.5);
+                                        let text = egui::RichText::new(label)
+                                            .size(14.5)
+                                            .color(egui::Color32::from_rgb(30, 30, 30));
                                         let text = if selected { text.strong() } else { text };
                                         ui.add_enabled(
                                             !locked,
-                                            egui::Button::new(text).frame(false).min_size(
-                                                egui::vec2(ui.available_width(), 24.0),
+                                            egui::Button::new(text).rounding(6.0).min_size(
+                                                egui::vec2(ui.available_width(), 28.0),
                                             ),
                                         )
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand)
                                         .clicked()
                                     };
                                     let is_native = self.backend == ChatBackendKind::Native;
@@ -2119,6 +2129,18 @@ fn render_message(
             );
         }
     }
+}
+
+/// Menu-row visuals (Claude-style): rows are invisible until hovered, then a
+/// soft grey rounded box. Applied inside popup closures (scoped to that Ui).
+fn menu_row_visuals(ui: &mut egui::Ui) {
+    let v = ui.visuals_mut();
+    v.widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+    v.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+    v.widgets.hovered.weak_bg_fill = egui::Color32::from_rgb(234, 234, 234);
+    v.widgets.hovered.bg_stroke = egui::Stroke::NONE;
+    v.widgets.active.weak_bg_fill = egui::Color32::from_rgb(222, 222, 222);
+    v.widgets.active.bg_stroke = egui::Stroke::NONE;
 }
 
 /// The EFFECTIVE project root for a raw path-field value (P3v2): trims, treats
