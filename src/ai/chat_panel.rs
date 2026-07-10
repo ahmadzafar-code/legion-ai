@@ -130,261 +130,15 @@ pub struct SelectedItem {
 // ── @-mention context types ─────────────────────────────────────────────────
 
 /// The kind of context attachment, auto-detected from the filesystem entry.
-#[derive(Clone, Debug, PartialEq)]
-pub enum AttachmentKind {
-    /// A `.duckdb` file — used as the database for `run_query` tool.
-    Database,
-    /// A directory — used as the code root for `read_code` tool.
-    Folder,
-    /// A regular file — contents injected as inline context.
-    File,
-}
-
-/// A context attachment selected via the `@` picker.
+/// A file added as inline context via the ＋ menu. Folders and .duckdb files
+/// are not attachments: ＋ routes them to the project-root / DB-path settings
+/// directly (they configure TOOLS; only plain files are injected as text).
 #[derive(Clone, Debug)]
 pub struct ContextAttachment {
     /// Full absolute path on disk.
     pub path: String,
-    /// Display name (last path component, e.g. "legion_prof.duckdb").
+    /// Display name (last path component, e.g. "circuit.cc").
     pub display_name: String,
-    /// Auto-detected kind.
-    pub kind: AttachmentKind,
-}
-
-/// A filesystem entry shown in the `@` picker popup.
-#[derive(Clone, Debug)]
-struct FsEntry {
-    /// Full path.
-    path: String,
-    /// Just the file/directory name.
-    name: String,
-    /// Whether this is a directory.
-    is_dir: bool,
-}
-
-/// Transient state for the `@` mention picker popup.
-#[derive(Clone, Debug)]
-struct AtPickerState {
-    /// Whether the picker popup is currently visible.
-    active: bool,
-    /// The full query string after '@' (e.g. "leg" or "/Users/a").
-    filter: String,
-    /// Character offset of '@' in `input_buffer`.
-    at_char_offset: usize,
-    /// Cached directory listing, refreshed on filter changes.
-    entries: Vec<FsEntry>,
-    /// The resolved base directory currently being listed.
-    base_dir: String,
-    /// Index of the keyboard-selected entry.
-    selected_index: usize,
-    /// After drilling into a directory, skip cursor-based detection for one frame.
-    /// The TextEdit cursor hasn't caught up with the programmatic buffer edit.
-    drill_pending: bool,
-}
-
-impl Default for AtPickerState {
-    fn default() -> Self {
-        Self {
-            active: false,
-            filter: String::new(),
-            at_char_offset: 0,
-            entries: Vec::new(),
-            base_dir: String::new(),
-            selected_index: 0,
-            drill_pending: false,
-        }
-    }
-}
-
-// ── Path picker for tools popover ──────────────────────────────────────────
-
-/// State for a filesystem path picker popup attached to a tools path field.
-/// Same visual style as the `@` context picker but sets the path buffer directly.
-#[derive(Clone, Debug)]
-struct PathPicker {
-    /// Whether the popup is visible.
-    active: bool,
-    /// Filesystem entries matching the current filter.
-    entries: Vec<FsEntry>,
-    /// The parent directory being listed.
-    base_dir: String,
-    /// Keyboard-selected entry index.
-    selected_index: usize,
-    /// Rect of the associated TextEdit (for popup positioning).
-    edit_rect: Option<egui::Rect>,
-    /// Last buffer value we computed entries for (skip redundant refreshes).
-    last_query: String,
-}
-
-impl Default for PathPicker {
-    fn default() -> Self {
-        Self {
-            active: false,
-            entries: Vec::new(),
-            base_dir: String::new(),
-            selected_index: 0,
-            edit_rect: None,
-            last_query: String::new(),
-        }
-    }
-}
-
-// ── Workspace index ─────────────────────────────────────────────────────────
-
-/// An entry in the workspace index used for fast @ picker search.
-#[derive(Clone, Debug)]
-struct IndexEntry {
-    /// Relative path from workspace root (e.g. "src/ai/agent.rs").
-    rel_path: String,
-    /// Absolute path on disk.
-    abs_path: String,
-    /// Just the filename or directory name.
-    name: String,
-    /// Whether this is a directory.
-    is_dir: bool,
-}
-
-/// A lazily-built index of workspace files for fast @ picker filtering.
-#[derive(Clone, Debug)]
-struct WorkspaceIndex {
-    /// The workspace root directory.
-    root: String,
-    /// All indexed entries.
-    entries: Vec<IndexEntry>,
-    /// Whether the index has been built.
-    ready: bool,
-}
-
-impl Default for WorkspaceIndex {
-    fn default() -> Self {
-        Self {
-            root: String::new(),
-            entries: Vec::new(),
-            ready: false,
-        }
-    }
-}
-
-impl WorkspaceIndex {
-    /// Build the index by walking the workspace directory tree.
-    ///
-    /// Detects the workspace root by walking up from `cwd` looking for `.git`.
-    /// Falls back to `cwd` if no `.git` is found. Ignores heavy directories
-    /// (`.git`, `target`, `node_modules`, etc.) and caps entries at 5000.
-    fn build_from_cwd() -> Self {
-        let cwd = std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."));
-
-        // Walk up to find .git directory (workspace root)
-        let mut root = cwd.clone();
-        loop {
-            if root.join(".git").exists() {
-                break;
-            }
-            if !root.pop() {
-                root = cwd.clone();
-                break;
-            }
-        }
-
-        let root_str = root.to_string_lossy().to_string();
-        let mut entries = Vec::new();
-        let max_entries = 5000;
-
-        // Directories to skip
-        let skip_dirs: &[&str] = &[
-            ".git",
-            "target",
-            "node_modules",
-            "prof_results",
-            "profiles",
-            "__pycache__",
-            ".mypy_cache",
-            "build",
-            "dist",
-        ];
-
-        // BFS walk
-        let mut queue = vec![root.clone()];
-        while let Some(dir) = queue.pop() {
-            if entries.len() >= max_entries {
-                break;
-            }
-            let Ok(read_dir) = std::fs::read_dir(&dir) else {
-                continue;
-            };
-            for entry in read_dir.flatten() {
-                if entries.len() >= max_entries {
-                    break;
-                }
-                let path = entry.path();
-                let name = entry.file_name().to_string_lossy().to_string();
-
-                // Skip hidden files (except at root level)
-                if name.starts_with('.') {
-                    continue;
-                }
-
-                let is_dir = path.is_dir();
-
-                // Skip heavy directories
-                if is_dir && skip_dirs.contains(&name.as_str()) {
-                    continue;
-                }
-
-                let abs_path = path.to_string_lossy().to_string();
-                let rel_path = path
-                    .strip_prefix(&root)
-                    .unwrap_or(&path)
-                    .to_string_lossy()
-                    .to_string();
-
-                entries.push(IndexEntry {
-                    rel_path,
-                    abs_path,
-                    name,
-                    is_dir,
-                });
-
-                if is_dir {
-                    queue.push(path);
-                }
-            }
-        }
-
-        // Sort: directories first, then alphabetical by relative path
-        entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.rel_path.cmp(&b.rel_path)));
-
-        Self {
-            root: root_str,
-            entries,
-            ready: true,
-        }
-    }
-
-    /// Filter entries by a case-insensitive substring match on name or path.
-    /// Returns up to `limit` matching entries.
-    fn search(&self, query: &str, limit: usize) -> Vec<&IndexEntry> {
-        if query.is_empty() {
-            // Show top-level entries when no query
-            return self
-                .entries
-                .iter()
-                .filter(|e| !e.rel_path.contains('/') || e.rel_path.ends_with('/'))
-                .take(limit)
-                .collect();
-        }
-
-        let query_lower = query.to_lowercase();
-        self.entries
-            .iter()
-            .filter(|e| {
-                e.name.to_lowercase().contains(&query_lower)
-                    || e.rel_path.to_lowercase().contains(&query_lower)
-            })
-            .take(limit)
-            .collect()
-    }
 }
 
 // ── Tool status ──────────────────────────────────────────────────────────────
@@ -415,17 +169,9 @@ pub struct ChatPanel {
     /// Whether the settings drawer is expanded.
     settings_open: bool,
 
-    // ── @-mention context ─────────────────────────────────────────────────
-    /// Context attachments selected via the `@` picker.
+    // ── ＋-menu context ────────────────────────────────────────────────────
+    /// Plain-file attachments added via the ＋ menu (inline context).
     attachments: Vec<ContextAttachment>,
-    /// Transient state for the `@` mention picker.
-    at_picker: AtPickerState,
-    /// Rect of the composer TextEdit (for popup positioning).
-    composer_rect: Option<egui::Rect>,
-    /// Programmatic request to open the @ picker on the next frame.
-    request_at_picker: bool,
-    /// Lazily-built workspace file index for fast @ picker search.
-    workspace_index: WorkspaceIndex,
 
     // ── Tools configuration ──────────────────────────────────────────────
     /// DuckDB database path — required for `run_query` tool.
@@ -435,12 +181,6 @@ pub struct ChatPanel {
     /// Legion wiki root — required for `wiki_index`/`wiki_read`/`wiki_search`.
     /// Pre-filled from `--wiki` / auto-detection at startup (no settings widget).
     wiki_path_buffer: String,
-    /// Whether the tools setup popover is open.
-    tools_popover_open: bool,
-    /// Filesystem picker state for the DB path field.
-    db_picker: PathPicker,
-    /// Filesystem picker state for the Code path field.
-    code_picker: PathPicker,
 
     // ── Agent state ────────────────────────────────────────────────────────
     /// API key (from UI field; falls back to ANTHROPIC_API_KEY env var).
@@ -527,16 +267,9 @@ impl Clone for ChatPanel {
             scroll_to_bottom: self.scroll_to_bottom,
             settings_open: self.settings_open,
             attachments: self.attachments.clone(),
-            at_picker: self.at_picker.clone(),
-            composer_rect: self.composer_rect,
-            request_at_picker: self.request_at_picker,
-            workspace_index: self.workspace_index.clone(),
             duckdb_path_buffer: self.duckdb_path_buffer.clone(),
             code_path_buffer: self.code_path_buffer.clone(),
             wiki_path_buffer: self.wiki_path_buffer.clone(),
-            tools_popover_open: self.tools_popover_open,
-            db_picker: self.db_picker.clone(),
-            code_picker: self.code_picker.clone(),
             api_key_buffer: self.api_key_buffer.clone(),
             model_selection: self.model_selection.clone(),
             app_context_buffer: self.app_context_buffer.clone(),
@@ -604,16 +337,9 @@ impl ChatPanel {
             scroll_to_bottom: false,
             settings_open: true,
             attachments: Vec::new(),
-            at_picker: AtPickerState::default(),
-            composer_rect: None,
-            request_at_picker: false,
-            workspace_index: WorkspaceIndex::default(),
             duckdb_path_buffer: String::new(),
             code_path_buffer: String::new(),
             wiki_path_buffer: String::new(),
-            tools_popover_open: false,
-            db_picker: PathPicker::default(),
-            code_picker: PathPicker::default(),
             api_key_buffer: String::new(),
             model_selection: "claude-sonnet-4-6".into(),
             app_context_buffer: String::new(),
@@ -1114,25 +840,6 @@ impl ChatPanel {
             );
             return;
         }
-        // P3v2: an @-attached folder used to be a decoy — it injected a file
-        // LISTING the model had no tool to open, while the real code root sat
-        // unset. When no project folder is configured, adopt the first attached
-        // folder as the root (both backends benefit: read_code/list_files and,
-        // for a Claude Code child spawned this turn, --add-dir).
-        if effective_project_root(&self.code_path_buffer).is_none() {
-            if let Some(folder) = self
-                .attachments
-                .iter()
-                .find(|a| matches!(a.kind, AttachmentKind::Folder))
-                .map(|a| a.path.clone())
-            {
-                self.code_path_buffer = folder.clone();
-                self.add_message(
-                    ChatMessageKind::System,
-                    format!("Using attached folder as the project folder: {folder}"),
-                );
-            }
-        }
         match self.backend {
             ChatBackendKind::Native => self.trigger_native(user_query),
             ChatBackendKind::ClaudeCode => self.trigger_claude_code(user_query),
@@ -1274,78 +981,30 @@ impl ChatPanel {
             if total_context_bytes >= max_total_context {
                 break;
             }
-            match att.kind {
-                AttachmentKind::File | AttachmentKind::Database => {
-                    match std::fs::read_to_string(&att.path) {
-                        Ok(content) => {
-                            let truncated = if content.len() > max_per_file {
-                                format!(
-                                    "{}…\n(truncated at {} bytes)",
-                                    &content[..max_per_file],
-                                    max_per_file
-                                )
-                            } else {
-                                content
-                            };
-                            context_section.push_str(&format!(
-                                "## Attached file: {}\n```\n{}\n```\n\n",
-                                att.display_name, truncated
-                            ));
-                            total_context_bytes += truncated.len();
-                        }
-                        Err(e) => {
-                            context_section.push_str(&format!(
-                                "## Attached file: {} (could not read: {})\n\n",
-                                att.display_name, e
-                            ));
-                        }
-                    }
-                }
-                AttachmentKind::Folder => {
-                    // Shallow directory listing (depth 2)
+            // ＋-menu attachments are plain files (folders/.duckdb route to the
+            // project-root / DB settings instead of becoming attachments).
+            match std::fs::read_to_string(&att.path) {
+                Ok(content) => {
+                    let truncated = if content.len() > max_per_file {
+                        format!(
+                            "{}…\n(truncated at {} bytes)",
+                            &content[..max_per_file],
+                            max_per_file
+                        )
+                    } else {
+                        content
+                    };
                     context_section.push_str(&format!(
-                        "## Attached folder: {}\n```\n",
-                        att.display_name
+                        "## Attached file: {}\n```\n{}\n```\n\n",
+                        att.display_name, truncated
                     ));
-                    if let Ok(entries) = std::fs::read_dir(&att.path) {
-                        let mut count = 0;
-                        for entry in entries.flatten() {
-                            if count >= 50 {
-                                context_section.push_str("  …(more entries)\n");
-                                break;
-                            }
-                            let name = entry.file_name().to_string_lossy().to_string();
-                            if name.starts_with('.') {
-                                continue;
-                            }
-                            let is_dir = entry.path().is_dir();
-                            let suffix = if is_dir { "/" } else { "" };
-                            context_section
-                                .push_str(&format!("  {}{}\n", name, suffix));
-                            // Depth 2: list children of subdirectories
-                            if is_dir {
-                                if let Ok(sub) = std::fs::read_dir(entry.path()) {
-                                    for sub_entry in sub.flatten().take(20) {
-                                        let sub_name = sub_entry
-                                            .file_name()
-                                            .to_string_lossy()
-                                            .to_string();
-                                        if sub_name.starts_with('.') {
-                                            continue;
-                                        }
-                                        let sub_dir = sub_entry.path().is_dir();
-                                        let s = if sub_dir { "/" } else { "" };
-                                        context_section.push_str(&format!(
-                                            "    {}{}\n",
-                                            sub_name, s
-                                        ));
-                                    }
-                                }
-                            }
-                            count += 1;
-                        }
-                    }
-                    context_section.push_str("```\n\n");
+                    total_context_bytes += truncated.len();
+                }
+                Err(e) => {
+                    context_section.push_str(&format!(
+                        "## Attached file: {} (could not read: {})\n\n",
+                        att.display_name, e
+                    ));
                 }
             }
         }
@@ -1431,227 +1090,6 @@ impl ChatPanel {
                 }
             }
         });
-    }
-
-    // ── @-mention picker logic ──────────────────────────────────────────────
-
-    /// Detect whether the user has typed an active `@` trigger in the input buffer.
-    fn detect_at_trigger(&mut self, output: &egui::text_edit::TextEditOutput) {
-        if !output.response.has_focus() {
-            // Don't close the picker on focus loss — the user may be clicking
-            // entries in the popup (which steals focus from the TextEdit).
-            // The picker closes via Escape, file acceptance, or buffer invalidation.
-            return;
-        }
-
-        // After drilling into a directory, the TextEdit cursor hasn't caught up
-        // with our programmatic buffer edit. Skip one detection cycle.
-        if self.at_picker.drill_pending {
-            self.at_picker.drill_pending = false;
-            return;
-        }
-
-        // If picker is active, verify the buffer still contains our expected @filter
-        // at the known offset. This avoids cursor-position-dependent re-detection,
-        // which breaks after programmatic buffer edits (cursor may be mid-filter).
-        if self.at_picker.active {
-            let at_pos = self.at_picker.at_char_offset;
-            let expected = format!("@{}", self.at_picker.filter);
-            if self
-                .input_buffer
-                .get(at_pos..)
-                .map_or(false, |s| s.starts_with(&expected))
-            {
-                // Buffer still matches — check if user typed more AFTER the filter
-                if let Some(cursor_range) = &output.cursor_range {
-                    let cursor_pos = cursor_range.primary.ccursor.index;
-                    let filter_end = at_pos + 1 + self.at_picker.filter.len();
-                    if cursor_pos > filter_end {
-                        // User typed more characters after the known filter
-                        let new_end = cursor_pos.min(self.input_buffer.len());
-                        let new_filter =
-                            self.input_buffer[at_pos + 1..new_end].to_owned();
-                        if new_filter != self.at_picker.filter {
-                            self.at_picker.selected_index = 0;
-                            self.refresh_fs_entries(&new_filter);
-                            self.at_picker.filter = new_filter;
-                        }
-                    }
-                    // cursor <= filter_end: user's cursor is mid-filter, keep state
-                }
-                return;
-            }
-            // Buffer no longer matches — close picker, fall through to re-detect
-            self.at_picker.active = false;
-        }
-
-        let Some(cursor_range) = &output.cursor_range else {
-            return;
-        };
-
-        let cursor_pos = cursor_range.primary.ccursor.index;
-        let text = &self.input_buffer;
-        let end = cursor_pos.min(text.len());
-        let before_cursor = &text[..end];
-
-        // Scan backwards from cursor for '@'
-        if let Some(at_pos) = before_cursor.rfind('@') {
-            // Validate: '@' must be at start or preceded by whitespace
-            let valid_trigger = at_pos == 0 || {
-                let prev_char = text[..at_pos].chars().next_back();
-                prev_char.map_or(true, |c| c.is_whitespace())
-            };
-
-            if valid_trigger {
-                let filter = before_cursor[at_pos + 1..].to_owned();
-                // New @ trigger — initialize picker
-                self.at_picker.active = true;
-                self.at_picker.at_char_offset = at_pos;
-                self.at_picker.selected_index = 0;
-                self.refresh_fs_entries(&filter);
-                self.at_picker.filter = filter;
-                return;
-            }
-        }
-
-        // No valid @ found
-        if self.at_picker.active {
-            self.at_picker.active = false;
-        }
-    }
-
-    /// Refresh the filesystem entry listing based on the current filter.
-    ///
-    /// Two modes:
-    /// - **Workspace search** (no leading `/`): uses the in-memory workspace index
-    ///   for fast substring filtering. The index is built lazily on first use.
-    /// - **Absolute path browsing** (starts with `/`): uses live filesystem listing
-    ///   for drilling into arbitrary directories.
-    fn refresh_fs_entries(&mut self, filter: &str) {
-        if filter.starts_with('/') || filter.starts_with('~') {
-            // Absolute path browsing (existing behavior)
-            let expanded = if filter.starts_with('~') {
-                let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_owned());
-                filter.replacen('~', &home, 1)
-            } else {
-                filter.to_owned()
-            };
-            let (base_dir, name_filter) = if expanded.contains('/') {
-                let last_slash = expanded.rfind('/').unwrap();
-                (
-                    expanded[..=last_slash].to_owned(),
-                    &filter[filter.len() - (expanded.len() - last_slash - 1)..],
-                )
-            } else {
-                let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_owned());
-                (home, filter)
-            };
-            self.at_picker.base_dir = base_dir.clone();
-            self.at_picker.entries = list_directory(&base_dir, name_filter);
-        } else {
-            // Workspace index search — build lazily on first use
-            if !self.workspace_index.ready {
-                self.workspace_index = WorkspaceIndex::build_from_cwd();
-            }
-
-            self.at_picker.base_dir = self.workspace_index.root.clone();
-            let results = self.workspace_index.search(filter, 20);
-            self.at_picker.entries = results
-                .into_iter()
-                .map(|e| FsEntry {
-                    path: e.abs_path.clone(),
-                    name: if filter.is_empty() {
-                        e.name.clone()
-                    } else {
-                        e.rel_path.clone()
-                    },
-                    is_dir: e.is_dir,
-                })
-                .collect();
-        }
-    }
-
-    /// Handle keyboard navigation in the @ picker. Returns true if a key was consumed.
-    fn handle_picker_keys(&mut self, ui: &egui::Ui) -> bool {
-        if !self.at_picker.active || self.at_picker.entries.is_empty() {
-            return false;
-        }
-
-        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.at_picker.active = false;
-            return true;
-        }
-
-        if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
-            let max = self.at_picker.entries.len().saturating_sub(1);
-            if self.at_picker.selected_index < max {
-                self.at_picker.selected_index += 1;
-            }
-            return true;
-        }
-
-        if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
-            self.at_picker.selected_index = self.at_picker.selected_index.saturating_sub(1);
-            return true;
-        }
-
-        if ui.input(|i| i.key_pressed(egui::Key::Tab)) {
-            let idx = self.at_picker.selected_index;
-            self.accept_picker_entry(idx);
-            return true;
-        }
-
-        false
-    }
-
-    /// Accept the picker entry at `index` — attach it or drill into a directory.
-    fn accept_picker_entry(&mut self, index: usize) {
-        let Some(entry) = self.at_picker.entries.get(index).cloned() else {
-            return;
-        };
-
-        let at_offset = self.at_picker.at_char_offset;
-        let old_trigger_len = 1 + self.at_picker.filter.len(); // '@' + filter text
-
-        if entry.is_dir {
-            // Drill into directory: replace @filter with @full_path/
-            let new_filter = format!("{}/", entry.path);
-            let before = &self.input_buffer[..at_offset];
-            let after_start = (at_offset + old_trigger_len).min(self.input_buffer.len());
-            let after = self.input_buffer[after_start..].trim_start_matches('\n');
-            self.input_buffer = format!("{}@{}{}", before, new_filter, after);
-            self.at_picker.filter = new_filter;
-            let filter_clone = self.at_picker.filter.clone();
-            self.at_picker.selected_index = 0;
-            // Skip one detect_at_trigger cycle — cursor hasn't caught up with
-            // the programmatic buffer edit yet.
-            self.at_picker.drill_pending = true;
-            self.refresh_fs_entries(&filter_clone);
-            return;
-        }
-
-        // File: create attachment
-        let path = std::path::Path::new(&entry.path);
-        let kind = classify_path(path);
-        let display_name = entry.name.clone();
-
-        // Don't add duplicates
-        if !self.attachments.iter().any(|a| a.path == entry.path) {
-            self.attachments.push(ContextAttachment {
-                path: entry.path.clone(),
-                display_name,
-                kind,
-            });
-        }
-
-        // Remove @query from input buffer
-        let before = &self.input_buffer[..at_offset];
-        let after_start = (at_offset + old_trigger_len).min(self.input_buffer.len());
-        let after = self.input_buffer[after_start..].trim_start_matches('\n');
-        self.input_buffer = format!("{}{}", before, after);
-
-        // Close picker
-        self.at_picker = AtPickerState::default();
     }
 
     // ── Zone methods ────────────────────────────────────────────────────────
@@ -1756,21 +1194,11 @@ impl ChatPanel {
                 ToolStatus::Off => (
                     "DB ○",
                     egui::Color32::from_rgb(160, 160, 160),
-                    "Click to configure DB path".to_string(),
+                    "Add a DuckDB via the ＋ menu".to_string(),
                 ),
             };
-            if ui
-                .add(
-                    egui::Button::new(
-                        egui::RichText::new(db_label).small().color(db_color),
-                    )
-                    .frame(false),
-                )
-                .on_hover_text(&db_hover)
-                .clicked()
-            {
-                self.tools_popover_open = !self.tools_popover_open;
-            }
+            ui.label(egui::RichText::new(db_label).small().color(db_color))
+                .on_hover_text(&db_hover);
 
             // Code chip
             let (code_label, code_color, code_hover) = match &code_status {
@@ -1787,21 +1215,11 @@ impl ChatPanel {
                 ToolStatus::Off => (
                     "Code ○",
                     egui::Color32::from_rgb(160, 160, 160),
-                    "Optional — set code path for read_code".to_string(),
+                    "Optional — add a code repo via the ＋ menu".to_string(),
                 ),
             };
-            if ui
-                .add(
-                    egui::Button::new(
-                        egui::RichText::new(code_label).small().color(code_color),
-                    )
-                    .frame(false),
-                )
-                .on_hover_text(&code_hover)
-                .clicked()
-            {
-                self.tools_popover_open = !self.tools_popover_open;
-            }
+            ui.label(egui::RichText::new(code_label).small().color(code_color))
+                .on_hover_text(&code_hover);
 
             // Visual chip
             let (vis_label, vis_color) = match &visual_status {
@@ -1913,56 +1331,6 @@ impl ChatPanel {
                         .desired_width(ui.available_width()),
                 );
 
-                // P3v2: the project folder — ONE selection feeding the harness's
-                // file tools (Backend B --add-dir), the MCP code root (live), and
-                // the native agent's read_code sandbox.
-                ui.add_space(4.0);
-                ui.label("Project folder (the profiled app's source):");
-                ui.horizontal(|ui| {
-                    let browse_w = 70.0;
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.code_path_buffer)
-                            .hint_text("/path/to/app (optional — enables code reading)")
-                            .desired_width((ui.available_width() - browse_w).max(80.0)),
-                    );
-                    #[cfg(not(target_arch = "wasm32"))]
-                    if ui.button("Browse…").clicked() {
-                        if let Some(dir) = rfd::FileDialog::new()
-                            .set_title("Choose the profiled application's source folder")
-                            .pick_folder()
-                        {
-                            self.code_path_buffer = dir.to_string_lossy().into_owned();
-                        }
-                    }
-                });
-                match self.tool_status_code() {
-                    ToolStatus::Ready => {
-                        #[cfg(feature = "viewer-mcp")]
-                        let stale = self.cc_agent.lock().unwrap().is_some()
-                            && self.cc_spawn_root != self.code_path();
-                        #[cfg(not(feature = "viewer-mcp"))]
-                        let stale = false;
-                        if stale {
-                            ui.label(
-                                egui::RichText::new(
-                                    "changed — takes effect on ↺ New session (the running \
-                                     Claude Code keeps its original folder)",
-                                )
-                                .small()
-                                .color(egui::Color32::from_rgb(200, 120, 20)),
-                            );
-                        }
-                    }
-                    ToolStatus::Error(msg) => {
-                        ui.label(
-                            egui::RichText::new(format!("✕ {msg}"))
-                                .small()
-                                .color(egui::Color32::from_rgb(220, 60, 60)),
-                        );
-                    }
-                    ToolStatus::Off => {}
-                }
-
                 ui.add_space(4.0);
                 ui.label("App context:");
                 ui.add(
@@ -2070,49 +1438,88 @@ impl ChatPanel {
             });
     }
 
-    /// Render context attachment chips above the composer input.
-    fn ui_attachment_chips(&mut self, ui: &mut egui::Ui) {
-        if self.attachments.is_empty() {
+    /// Context chips above the composer input (Claude-Desktop style): the
+    /// active DuckDB, the project repo, and any attached files — each with a ✕.
+    /// The DB/repo chips mirror the SETTINGS buffers (however they were set:
+    /// ＋ menu, CLI flag, or persistence), so what the agent can touch is always
+    /// visible right where you type; ✕ genuinely unconfigures the tool.
+    fn ui_context_chips(&mut self, ui: &mut egui::Ui) {
+        let db_set = !self.duckdb_path_buffer.trim().is_empty();
+        let repo = effective_project_root(&self.code_path_buffer);
+        if !db_set && repo.is_none() && self.attachments.is_empty() {
             return;
         }
 
+        let chip = |ui: &mut egui::Ui,
+                    icon: &str,
+                    name: &str,
+                    hover: &str,
+                    bg: egui::Color32|
+         -> bool {
+            let mut remove = false;
+            egui::Frame::none()
+                .fill(bg)
+                .rounding(12.0)
+                .inner_margin(egui::Margin::symmetric(8.0, 3.0))
+                .show(ui, |ui: &mut egui::Ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        ui.label(egui::RichText::new(icon).size(11.0));
+                        ui.label(
+                            egui::RichText::new(name)
+                                .size(11.5)
+                                .color(egui::Color32::from_rgb(30, 30, 30)),
+                        )
+                        .on_hover_text(hover);
+                        if ui.small_button("✕").on_hover_text("Remove").clicked() {
+                            remove = true;
+                        }
+                    });
+                });
+            remove
+        };
+
         ui.horizontal_wrapped(|ui| {
+            if db_set {
+                let path = self.duckdb_path_buffer.trim().to_owned();
+                let name = std::path::Path::new(&path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.clone());
+                if chip(ui, "🗄", &name, &path, egui::Color32::from_rgb(219, 234, 254)) {
+                    self.duckdb_path_buffer.clear();
+                }
+            }
+            if let Some(root) = repo {
+                let name = std::path::Path::new(&root)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| root.clone());
+                #[cfg(feature = "viewer-mcp")]
+                let hover = if self.cc_agent.lock().unwrap().is_some()
+                    && self.cc_spawn_root.as_deref() != Some(root.as_str())
+                {
+                    format!("{root}\n(running Claude Code keeps its original folder until ↺)")
+                } else {
+                    root.clone()
+                };
+                #[cfg(not(feature = "viewer-mcp"))]
+                let hover = root.clone();
+                if chip(ui, "📁", &name, &hover, egui::Color32::from_rgb(220, 252, 231)) {
+                    self.code_path_buffer.clear();
+                }
+            }
             let mut to_remove = None;
             for (i, att) in self.attachments.iter().enumerate() {
-                let (icon, bg_color) = match att.kind {
-                    AttachmentKind::Database => {
-                        ("🗄", egui::Color32::from_rgb(219, 234, 254))
-                    }
-                    AttachmentKind::Folder => {
-                        ("📁", egui::Color32::from_rgb(220, 252, 231))
-                    }
-                    AttachmentKind::File => {
-                        ("📄", egui::Color32::from_rgb(243, 244, 246))
-                    }
-                };
-
-                egui::Frame::none()
-                    .fill(bg_color)
-                    .rounding(12.0)
-                    .inner_margin(egui::Margin::symmetric(8.0, 3.0))
-                    .show(ui, |ui: &mut egui::Ui| {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 4.0;
-                            ui.label(egui::RichText::new(icon).size(11.0));
-                            ui.label(
-                                egui::RichText::new(&att.display_name)
-                                    .size(11.5)
-                                    .color(egui::Color32::from_rgb(30, 30, 30)),
-                            );
-                            if ui
-                                .small_button("✕")
-                                .on_hover_text(&att.path)
-                                .clicked()
-                            {
-                                to_remove = Some(i);
-                            }
-                        });
-                    });
+                if chip(
+                    ui,
+                    "📄",
+                    &att.display_name,
+                    &att.path,
+                    egui::Color32::from_rgb(243, 244, 246),
+                ) {
+                    to_remove = Some(i);
+                }
             }
             if let Some(i) = to_remove {
                 self.attachments.remove(i);
@@ -2124,19 +1531,6 @@ impl ChatPanel {
     /// Zone 4: Composer card with attachment chips, multiline input, model selector, send button.
     fn ui_composer(&mut self, ui: &mut egui::Ui) {
         ui.separator();
-
-        // Handle programmatic @ picker open
-        if self.request_at_picker {
-            self.request_at_picker = false;
-            // Insert @ at end of buffer and activate picker
-            self.input_buffer.push('@');
-            let at_pos = self.input_buffer.len() - 1;
-            self.at_picker.active = true;
-            self.at_picker.at_char_offset = at_pos;
-            self.at_picker.filter.clear();
-            self.at_picker.selected_index = 0;
-            self.refresh_fs_entries("");
-        }
 
         // Composer card — rounded frame like Cursor
         egui::Frame::none()
@@ -2174,38 +1568,24 @@ impl ChatPanel {
                 // Current selection pill (live; updates on select/deselect)
                 self.ui_selection_pill(ui);
 
-                // Attachment chips
-                self.ui_attachment_chips(ui);
+                // Context chips (DB / repo / attached files)
+                self.ui_context_chips(ui);
 
                 // Text input (multiline, 2 rows) — use .show() for cursor access
                 let enabled = !self.pending_request || self.pending_question.is_some();
                 let output = egui::TextEdit::multiline(&mut self.input_buffer)
-                    .hint_text("Ask about this profile… (@ to attach context)")
+                    .hint_text("Ask about this profile…")
                     .desired_width(ui.available_width())
                     .desired_rows(2)
                     .frame(false)
                     .interactive(enabled)
                     .show(ui);
 
-                // Store rect for popup positioning
-                self.composer_rect = Some(output.response.rect);
-
-                // Detect @ trigger and update picker state
-                self.detect_at_trigger(&output);
-
-                // Handle keyboard navigation in picker (consumes ↑/↓/Tab/Esc)
-                let picker_consumed = self.handle_picker_keys(ui);
-
-                // Enter key handling: accept picker entry OR submit message
+                // Enter submits (Shift+Enter = newline)
                 let enter_pressed = output.response.has_focus()
                     && ui.input(|i| i.key_pressed(egui::Key::Enter))
                     && !ui.input(|i| i.modifiers.shift);
-
-                if enter_pressed && self.at_picker.active && !self.at_picker.entries.is_empty() {
-                    // Enter accepts the selected picker entry
-                    let idx = self.at_picker.selected_index;
-                    self.accept_picker_entry(idx);
-                } else if enter_pressed && !picker_consumed && !self.at_picker.active {
+                if enter_pressed {
                     // Normal submit (or answer a pending ask_user question)
                     let can_submit = !self.pending_request || self.pending_question.is_some();
                     if !self.input_buffer.trim().is_empty() && can_submit {
@@ -2215,23 +1595,59 @@ impl ChatPanel {
                     }
                 }
 
-                // Bottom row: @ Context | model pill | 🔧 Tools | ⏎ Send
+                // Bottom row: ＋ add-context | model pill | ⏎ Send
                 ui.horizontal(|ui| {
-                    // @ Context button (with count badge)
-                    let ctx_label = if self.attachments.is_empty() {
-                        "@ Context".to_string()
-                    } else {
-                        format!("@ Context ({})", self.attachments.len())
-                    };
-                    if ui
-                        .add_enabled(enabled, egui::Button::new(
-                            egui::RichText::new(&ctx_label).size(11.5),
-                        ))
-                        .on_hover_text("Attach files or folders as context")
-                        .clicked()
-                    {
-                        self.request_at_picker = true;
-                    }
+                    // ＋ menu (Claude-Desktop style): the ONE place to add context.
+                    // Folders/.duckdb configure tools; plain files attach as text.
+                    ui.menu_button(egui::RichText::new("＋").size(15.0), |ui| {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            if ui.button("🗄  Add DuckDB…").clicked() {
+                                ui.close_menu();
+                                if let Some(f) = rfd::FileDialog::new()
+                                    .set_title("Choose the profile DuckDB")
+                                    .add_filter("DuckDB", &["duckdb"])
+                                    .pick_file()
+                                {
+                                    self.duckdb_path_buffer = f.to_string_lossy().into_owned();
+                                }
+                            }
+                            if ui.button("📁  Add code repo…").clicked() {
+                                ui.close_menu();
+                                if let Some(d) = rfd::FileDialog::new()
+                                    .set_title("Choose the profiled application's source folder")
+                                    .pick_folder()
+                                {
+                                    self.code_path_buffer = d.to_string_lossy().into_owned();
+                                }
+                            }
+                            if ui.button("📄  Add file…").clicked() {
+                                ui.close_menu();
+                                if let Some(f) = rfd::FileDialog::new()
+                                    .set_title("Attach a file as context")
+                                    .pick_file()
+                                {
+                                    let path = f.to_string_lossy().into_owned();
+                                    // A .duckdb picked here is a DB, not a text
+                                    // attachment (binary would inject garbage).
+                                    if f.extension().is_some_and(|e| e == "duckdb") {
+                                        self.duckdb_path_buffer = path;
+                                    } else if !self.attachments.iter().any(|a| a.path == path) {
+                                        let display_name = f
+                                            .file_name()
+                                            .map(|n| n.to_string_lossy().into_owned())
+                                            .unwrap_or_else(|| path.clone());
+                                        self.attachments
+                                            .push(ContextAttachment { path, display_name });
+                                    }
+                                }
+                            }
+                        }
+                        #[cfg(target_arch = "wasm32")]
+                        ui.label("File dialogs are unavailable in the browser");
+                    })
+                    .response
+                    .on_hover_text("Add context: DuckDB, code repo, or a file");
 
                     // Model selector as a compact ComboBox
                     egui::ComboBox::from_id_salt("model_pill")
@@ -2254,11 +1670,10 @@ impl ChatPanel {
                             );
                         });
 
-                    // Right-aligned: Tools + Send
+                    // Right-aligned: Send
                     ui.with_layout(
                         egui::Layout::right_to_left(egui::Align::Center),
                         |ui| {
-                            // Send button
                             if ui
                                 .add_enabled(
                                     enabled && !self.input_buffer.trim().is_empty(),
@@ -2276,267 +1691,9 @@ impl ChatPanel {
                                     self.submit_input(text);
                                 }
                             }
-
-                            // Tools button
-                            let tools_text = if self.tools_popover_open {
-                                "🔧 ▾"
-                            } else {
-                                "🔧"
-                            };
-                            if ui
-                                .button(egui::RichText::new(tools_text).size(11.5))
-                                .on_hover_text("Tools Setup — configure DB & code paths")
-                                .clicked()
-                            {
-                                self.tools_popover_open = !self.tools_popover_open;
-                            }
                         },
                     );
                 });
-            });
-    }
-
-    /// Render the `@` mention picker popup above the composer.
-    fn show_at_picker(&mut self, ctx: &egui::Context, anchor_rect: egui::Rect) {
-        if !self.at_picker.active || self.at_picker.entries.is_empty() {
-            return;
-        }
-
-        let popup_id = egui::Id::new("at_mention_picker");
-        let pos = egui::pos2(anchor_rect.left(), anchor_rect.top() - 4.0);
-
-        egui::Area::new(popup_id)
-            .order(egui::Order::Foreground)
-            .fixed_pos(pos)
-            .pivot(egui::Align2::LEFT_BOTTOM)
-            .show(ctx, |ui| {
-                egui::Frame::popup(ui.style())
-                    .show(ui, |ui: &mut egui::Ui| {
-                        ui.set_max_width(anchor_rect.width().max(280.0));
-                        ui.set_max_height(250.0);
-
-                        // Breadcrumb: current directory
-                        ui.label(
-                            egui::RichText::new(&self.at_picker.base_dir)
-                                .small()
-                                .color(egui::Color32::from_rgb(120, 120, 120)),
-                        );
-                        ui.separator();
-
-                        egui::ScrollArea::vertical()
-                            .max_height(220.0)
-                            .show(ui, |ui| {
-                                for (i, entry) in self.at_picker.entries.iter().enumerate() {
-                                    let is_selected = i == self.at_picker.selected_index;
-                                    let icon = if entry.is_dir {
-                                        "📁"
-                                    } else if entry.name.ends_with(".duckdb") {
-                                        "🗄"
-                                    } else {
-                                        "📄"
-                                    };
-                                    let suffix = if entry.is_dir { "/" } else { "" };
-                                    let label = format!("{} {}{}", icon, entry.name, suffix);
-
-                                    let response = ui.selectable_label(is_selected, &label);
-
-                                    if response.clicked() {
-                                        self.accept_picker_entry(i);
-                                        return; // exit early — entries may have changed
-                                    }
-                                }
-                            });
-                    });
-            });
-    }
-
-    /// Render the Tools Setup popover (DB path, Code path, capabilities).
-    fn show_tools_popover(&mut self, ctx: &egui::Context, anchor_rect: egui::Rect) {
-        let popup_id = egui::Id::new("tools_setup_popover");
-        let pos = egui::pos2(anchor_rect.left(), anchor_rect.top() - 4.0);
-
-        egui::Area::new(popup_id)
-            .order(egui::Order::Foreground)
-            .fixed_pos(pos)
-            .pivot(egui::Align2::LEFT_BOTTOM)
-            .show(ctx, |ui| {
-                egui::Frame::popup(ui.style())
-                    .show(ui, |ui: &mut egui::Ui| {
-                        ui.set_max_width(anchor_rect.width().max(300.0));
-
-                        // Force dark text
-                        ui.visuals_mut().override_text_color =
-                            Some(egui::Color32::from_rgb(30, 30, 30));
-
-                        ui.label(
-                            egui::RichText::new("Tools Setup")
-                                .strong()
-                                .size(13.0),
-                        );
-                        ui.separator();
-
-                        // ── Quick Setup ──────────────────────────────────
-                        ui.label(egui::RichText::new("Quick Setup").strong().size(12.0));
-                        ui.add_space(2.0);
-
-                        // DB path with picker
-                        ui.label("Database path:");
-                        ui.horizontal(|ui| {
-                            path_field_with_picker(
-                                ui,
-                                egui::Id::new("tools_db_path"),
-                                &mut self.duckdb_path_buffer,
-                                &mut self.db_picker,
-                                "/path/to/legion_prof.duckdb",
-                            );
-                            #[cfg(not(target_arch = "wasm32"))]
-                            if ui.small_button("Browse…").clicked() {
-                                if let Some(f) = rfd::FileDialog::new()
-                                    .set_title("Choose the profile DuckDB")
-                                    .add_filter("DuckDB", &["duckdb"])
-                                    .pick_file()
-                                {
-                                    self.duckdb_path_buffer = f.to_string_lossy().into_owned();
-                                }
-                            }
-                        });
-                        let db_status = self.tool_status_db();
-                        let (db_icon, db_msg, db_color) = match &db_status {
-                            ToolStatus::Ready => (
-                                "●",
-                                "Ready".to_string(),
-                                egui::Color32::from_rgb(34, 139, 34),
-                            ),
-                            ToolStatus::Off => (
-                                "○",
-                                "Not set".to_string(),
-                                egui::Color32::from_rgb(160, 160, 160),
-                            ),
-                            ToolStatus::Error(e) => (
-                                "✕",
-                                e.clone(),
-                                egui::Color32::from_rgb(220, 60, 60),
-                            ),
-                        };
-                        ui.label(
-                            egui::RichText::new(format!("{db_icon} {db_msg}"))
-                                .small()
-                                .color(db_color),
-                        );
-
-                        ui.add_space(4.0);
-
-                        // Project folder with picker (same buffer as ⚙ Settings)
-                        ui.label("Project folder:");
-                        ui.horizontal(|ui| {
-                            path_field_with_picker(
-                                ui,
-                                egui::Id::new("tools_code_path"),
-                                &mut self.code_path_buffer,
-                                &mut self.code_picker,
-                                "/path/to/app (optional)",
-                            );
-                            #[cfg(not(target_arch = "wasm32"))]
-                            if ui.small_button("Browse…").clicked() {
-                                if let Some(dir) = rfd::FileDialog::new()
-                                    .set_title("Choose the profiled application's source folder")
-                                    .pick_folder()
-                                {
-                                    self.code_path_buffer = dir.to_string_lossy().into_owned();
-                                }
-                            }
-                        });
-                        let code_status = self.tool_status_code();
-                        let (code_icon, code_msg, code_color) = match &code_status {
-                            ToolStatus::Ready => (
-                                "●",
-                                "Ready".to_string(),
-                                egui::Color32::from_rgb(34, 139, 34),
-                            ),
-                            ToolStatus::Off => (
-                                "○",
-                                "Optional".to_string(),
-                                egui::Color32::from_rgb(160, 160, 160),
-                            ),
-                            ToolStatus::Error(e) => (
-                                "✕",
-                                e.clone(),
-                                egui::Color32::from_rgb(220, 60, 60),
-                            ),
-                        };
-                        ui.label(
-                            egui::RichText::new(format!("{code_icon} {code_msg}"))
-                                .small()
-                                .color(code_color),
-                        );
-
-                        ui.add_space(8.0);
-                        ui.separator();
-
-                        // ── Capabilities ─────────────────────────────────
-                        ui.label(egui::RichText::new("Capabilities").strong().size(12.0));
-                        ui.add_space(2.0);
-
-                        let cap_muted = egui::Color32::from_rgb(100, 100, 100);
-
-                        // run_query
-                        ui.horizontal(|ui| {
-                            let (icon, color) = if db_status == ToolStatus::Ready {
-                                ("●", egui::Color32::from_rgb(34, 139, 34))
-                            } else {
-                                ("○", egui::Color32::from_rgb(160, 160, 160))
-                            };
-                            ui.label(egui::RichText::new(icon).color(color));
-                            ui.vertical(|ui| {
-                                ui.label(egui::RichText::new("Query profile database").size(12.0));
-                                let desc = if db_status == ToolStatus::Ready {
-                                    "Ready — run_query"
-                                } else {
-                                    "Needs DB path"
-                                };
-                                ui.label(egui::RichText::new(desc).small().color(cap_muted));
-                            });
-                        });
-
-                        // read_code
-                        ui.horizontal(|ui| {
-                            let (icon, color) = if code_status == ToolStatus::Ready {
-                                ("●", egui::Color32::from_rgb(34, 139, 34))
-                            } else {
-                                ("○", egui::Color32::from_rgb(160, 160, 160))
-                            };
-                            ui.label(egui::RichText::new(icon).color(color));
-                            ui.vertical(|ui| {
-                                ui.label(
-                                    egui::RichText::new("Read application code").size(12.0),
-                                );
-                                let desc = if code_status == ToolStatus::Ready {
-                                    "Ready — read_code"
-                                } else {
-                                    "Optional — set code path"
-                                };
-                                ui.label(egui::RichText::new(desc).small().color(cap_muted));
-                            });
-                        });
-
-                        // screenshot / zoom_to
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                egui::RichText::new("●")
-                                    .color(egui::Color32::from_rgb(34, 139, 34)),
-                            );
-                            ui.vertical(|ui| {
-                                ui.label(
-                                    egui::RichText::new("Visual inspection").size(12.0),
-                                );
-                                ui.label(
-                                    egui::RichText::new("Ready — screenshot, zoom_to")
-                                        .small()
-                                        .color(cap_muted),
-                                );
-                            });
-                        });
-                    });
             });
     }
 
@@ -2598,38 +1755,6 @@ impl ChatPanel {
                         self.ui_transcript(ui);
                     });
             });
-
-        // Popups (rendered AFTER the panel so they overlay correctly)
-        if self.visible && self.at_picker.active {
-            if let Some(rect) = self.composer_rect {
-                self.show_at_picker(ctx, rect);
-            }
-        }
-        if self.visible && self.tools_popover_open {
-            if let Some(rect) = self.composer_rect {
-                self.show_tools_popover(ctx, rect);
-            }
-        }
-
-        // Path picker popups (rendered AFTER tools popover so they overlay on top)
-        if self.visible && self.tools_popover_open && self.db_picker.active {
-            show_path_picker_popup(
-                ctx,
-                &mut self.db_picker,
-                &mut self.duckdb_path_buffer,
-                "db_path_picker",
-                egui::Id::new("tools_db_path"),
-            );
-        }
-        if self.visible && self.tools_popover_open && self.code_picker.active {
-            show_path_picker_popup(
-                ctx,
-                &mut self.code_picker,
-                &mut self.code_path_buffer,
-                "code_path_picker",
-                egui::Id::new("tools_code_path"),
-            );
-        }
 
         // P2v2: the tool-approval dialog (rendered LAST so it overlays everything).
         #[cfg(feature = "viewer-mcp")]
@@ -2896,232 +2021,6 @@ fn render_message(
     }
 }
 
-/// Render analysis text with basic markdown formatting.
-///
-/// Supports: `## headings`, `**bold**`, `- bullets`, `| tables` (monospace),
-/// blank-line paragraph breaks, and numbered lists.
-/// Render a path text field with an associated filesystem picker.
-///
-/// Handles Tab-completion, keyboard navigation (↑/↓/Enter/Escape), and
-/// picker state updates. The actual popup is rendered separately via
-/// `show_path_picker_popup()` — this function only manages state and the TextEdit.
-fn path_field_with_picker(
-    ui: &mut egui::Ui,
-    edit_id: egui::Id,
-    buffer: &mut String,
-    picker: &mut PathPicker,
-    hint: &str,
-) {
-    let had_focus = ui.ctx().memory(|m| m.has_focus(edit_id));
-
-    // Consume keys BEFORE the TextEdit renders to prevent default focus behavior.
-    let tab = had_focus
-        && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
-    let enter = had_focus
-        && picker.active
-        && !picker.entries.is_empty()
-        && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
-    let up = had_focus
-        && picker.active
-        && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp));
-    let down = had_focus
-        && picker.active
-        && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown));
-    let esc = had_focus
-        && picker.active
-        && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
-
-    let resp = ui.add(
-        egui::TextEdit::singleline(buffer)
-            .id(edit_id)
-            .hint_text(hint)
-            .desired_width(ui.available_width()),
-    );
-
-    // Tab-completion (inline, modifies buffer)
-    if tab {
-        tab_complete_path(buffer);
-    }
-
-    // Picker keyboard navigation
-    if esc {
-        picker.active = false;
-    } else if up {
-        picker.selected_index = picker.selected_index.saturating_sub(1);
-    } else if down {
-        let max = picker.entries.len().saturating_sub(1);
-        if picker.selected_index < max {
-            picker.selected_index += 1;
-        }
-    } else if enter {
-        let idx = picker.selected_index;
-        accept_path_picker_entry(picker, buffer, idx);
-    }
-
-    // Update picker state and store rect for popup positioning
-    picker.edit_rect = Some(resp.rect);
-    update_path_picker(picker, buffer, resp.has_focus());
-}
-
-/// Update a path picker's entries based on the current buffer text.
-///
-/// Only refreshes when the TextEdit has focus and the buffer has changed.
-/// Intentionally does NOT close the picker on focus loss — the user may be
-/// clicking entries in the popup (which steals focus from the TextEdit).
-fn update_path_picker(picker: &mut PathPicker, buffer: &str, has_focus: bool) {
-    let trimmed = buffer.trim();
-
-    // Close if buffer is empty
-    if trimmed.is_empty() {
-        picker.active = false;
-        picker.entries.clear();
-        picker.last_query.clear();
-        return;
-    }
-
-    // Expand ~ to $HOME
-    let expanded = if trimmed.starts_with('~') {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_owned());
-        trimmed.replacen('~', &home, 1)
-    } else {
-        trimmed.to_owned()
-    };
-
-    // Only show for path-like text (starting with / or ~ which was expanded)
-    if !expanded.starts_with('/') {
-        picker.active = false;
-        picker.entries.clear();
-        return;
-    }
-
-    // Only refresh when focused; on focus loss, keep current state for popup clicks
-    if !has_focus {
-        return;
-    }
-
-    // Skip refresh if query hasn't changed
-    if expanded == picker.last_query {
-        return;
-    }
-    picker.last_query = expanded.clone();
-
-    // Split into (parent_dir, partial_name)
-    let (dir, partial) = if expanded.ends_with('/') {
-        (expanded.as_str(), "")
-    } else if let Some(pos) = expanded.rfind('/') {
-        (&expanded[..=pos], &expanded[pos + 1..])
-    } else {
-        picker.active = false;
-        return;
-    };
-
-    if !std::path::Path::new(dir).is_dir() {
-        picker.entries.clear();
-        picker.active = false;
-        return;
-    }
-
-    picker.base_dir = dir.to_owned();
-    picker.entries = list_directory(dir, partial);
-    picker.selected_index = 0;
-    picker.active = !picker.entries.is_empty();
-}
-
-/// Accept the selected entry in a path picker.
-///
-/// - **Directory**: updates buffer to `entry.path/` and refreshes entries (drill).
-/// - **File**: sets buffer to `entry.path` and closes the picker.
-fn accept_path_picker_entry(picker: &mut PathPicker, buffer: &mut String, index: usize) {
-    let Some(entry) = picker.entries.get(index).cloned() else {
-        return;
-    };
-
-    if entry.is_dir {
-        // Drill into directory — update buffer and refresh entries inline
-        let new_path = format!("{}/", entry.path);
-        *buffer = new_path.clone();
-        picker.base_dir = new_path.clone();
-        picker.entries = list_directory(&new_path, "");
-        picker.selected_index = 0;
-        picker.last_query = new_path;
-        picker.active = !picker.entries.is_empty();
-        return;
-    }
-
-    // File selected — set buffer and close
-    *buffer = entry.path.clone();
-    picker.active = false;
-    picker.last_query.clear();
-}
-
-/// Render a path picker popup below its associated TextEdit.
-///
-/// Same visual style as the `@` context picker (breadcrumb + scrollable entries).
-/// `edit_id` is used to re-request focus on the TextEdit after directory drills.
-fn show_path_picker_popup(
-    ctx: &egui::Context,
-    picker: &mut PathPicker,
-    buffer: &mut String,
-    popup_id_str: &str,
-    edit_id: egui::Id,
-) {
-    let Some(rect) = picker.edit_rect else {
-        return;
-    };
-    if picker.entries.is_empty() {
-        return;
-    }
-
-    let popup_id = egui::Id::new(popup_id_str);
-    let pos = egui::pos2(rect.left(), rect.bottom() + 2.0);
-
-    egui::Area::new(popup_id)
-        .order(egui::Order::Foreground)
-        .fixed_pos(pos)
-        .show(ctx, |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui: &mut egui::Ui| {
-                ui.set_max_width(rect.width().max(280.0));
-                ui.set_max_height(200.0);
-
-                // Breadcrumb: current directory
-                ui.label(
-                    egui::RichText::new(&picker.base_dir)
-                        .small()
-                        .color(egui::Color32::from_rgb(120, 120, 120)),
-                );
-                ui.separator();
-
-                egui::ScrollArea::vertical()
-                    .max_height(175.0)
-                    .show(ui, |ui| {
-                        for (i, entry) in picker.entries.iter().enumerate() {
-                            let is_selected = i == picker.selected_index;
-                            let icon = if entry.is_dir {
-                                "📁"
-                            } else if entry.name.ends_with(".duckdb")
-                                || entry.name.contains("duckdb")
-                            {
-                                "🗄"
-                            } else {
-                                "📄"
-                            };
-                            let suffix = if entry.is_dir { "/" } else { "" };
-                            let label = format!("{} {}{}", icon, entry.name, suffix);
-
-                            if ui.selectable_label(is_selected, &label).clicked() {
-                                accept_path_picker_entry(picker, buffer, i);
-                                // Re-focus the TextEdit so the user can keep typing
-                                ctx.memory_mut(|m| m.request_focus(edit_id));
-                                return;
-                            }
-                        }
-                    });
-            });
-        });
-}
-
-// ── Filesystem helpers ──────────────────────────────────────────────────────
-
 /// The EFFECTIVE project root for a raw path-field value (P3v2): trims, treats
 /// empty as unset, and normalizes a FILE path to its parent directory — the
 /// fallback the old Code chip claimed but never implemented. Every consumer
@@ -3141,148 +2040,6 @@ fn effective_project_root(raw: &str) -> Option<String> {
             .filter(|s| !s.is_empty());
     }
     Some(trimmed.to_owned())
-}
-
-/// Classify a filesystem path into an attachment kind.
-fn classify_path(path: &std::path::Path) -> AttachmentKind {
-    if path.is_dir() {
-        AttachmentKind::Folder
-    } else if path.extension().map_or(false, |e| e == "duckdb") {
-        AttachmentKind::Database
-    } else {
-        AttachmentKind::File
-    }
-}
-
-/// List filesystem entries in `dir`, filtered by `name_filter` (case-insensitive prefix).
-///
-/// Returns up to 20 entries, directories first, then alphabetically.
-/// Hidden files (starting with `.`) are skipped unless `name_filter` starts with `.`.
-fn list_directory(dir: &str, name_filter: &str) -> Vec<FsEntry> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-
-    let filter_lower = name_filter.to_lowercase();
-    let mut results: Vec<FsEntry> = entries
-        .flatten()
-        .filter_map(|e| {
-            let path = e.path();
-            let name = e.file_name().to_string_lossy().to_string();
-            // Skip hidden files unless the filter explicitly starts with '.'
-            if name.starts_with('.') && !filter_lower.starts_with('.') {
-                return None;
-            }
-            // Case-insensitive prefix match
-            if !name_filter.is_empty() && !name.to_lowercase().starts_with(&filter_lower) {
-                return None;
-            }
-            Some(FsEntry {
-                path: path.to_string_lossy().to_string(),
-                name,
-                is_dir: path.is_dir(),
-            })
-        })
-        .collect();
-
-    // Sort: directories first, then alphabetical
-    results.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
-
-    // Limit to 20 entries for UI performance
-    results.truncate(20);
-    results
-}
-
-/// Attempt terminal-style tab-completion on a path buffer.
-///
-/// Splits the text at the last `/` into (parent_dir, partial_name), lists the
-/// parent directory, and:
-/// - **Single match** → replaces buffer with full path (appends `/` for dirs).
-/// - **Multiple matches** → extends buffer to the longest common prefix.
-/// - **No matches** → leaves buffer unchanged.
-///
-/// Returns `true` if the buffer was modified.
-fn tab_complete_path(buffer: &mut String) -> bool {
-    let trimmed = buffer.trim_end();
-    if trimmed.is_empty() {
-        return false;
-    }
-
-    // Expand ~ to $HOME
-    let expanded = if trimmed.starts_with('~') {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_owned());
-        trimmed.replacen('~', &home, 1)
-    } else {
-        trimmed.to_owned()
-    };
-
-    let exp_path = std::path::Path::new(&expanded);
-
-    // If the text exactly matches an existing directory, append /
-    if exp_path.is_dir() && !expanded.ends_with('/') {
-        *buffer = format!("{}/", expanded);
-        return true;
-    }
-
-    // Split into (parent_dir, partial_name)
-    let (dir, partial) = if expanded.ends_with('/') {
-        // Trailing / → list that directory with no name filter
-        (expanded.as_str(), "")
-    } else if let Some(pos) = expanded.rfind('/') {
-        (&expanded[..=pos], &expanded[pos + 1..])
-    } else {
-        // No slash — can't tab-complete a bare name here
-        return false;
-    };
-
-    if !std::path::Path::new(dir).is_dir() {
-        return false;
-    }
-
-    let entries = list_directory(dir, partial);
-    if entries.is_empty() {
-        return false;
-    }
-
-    if entries.len() == 1 {
-        // Single match → complete to full path
-        let entry = &entries[0];
-        let suffix = if entry.is_dir { "/" } else { "" };
-        *buffer = format!("{}{}", entry.path, suffix);
-        return true;
-    }
-
-    // Multiple matches → extend to longest common prefix
-    let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
-    let common = longest_common_prefix(&names);
-    if common.len() > partial.len() {
-        *buffer = format!("{}{}", dir, common);
-        return true;
-    }
-
-    false
-}
-
-/// Find the longest common prefix among a slice of strings.
-fn longest_common_prefix(strings: &[&str]) -> String {
-    if strings.is_empty() {
-        return String::new();
-    }
-    let first = strings[0];
-    let mut len = first.len();
-    for s in &strings[1..] {
-        len = len.min(s.len());
-        for (i, (a, b)) in first.bytes().zip(s.bytes()).enumerate() {
-            if i >= len {
-                break;
-            }
-            if a != b {
-                len = i;
-                break;
-            }
-        }
-    }
-    first[..len].to_string()
 }
 
 /// Format a nanosecond duration into a human-readable string.
