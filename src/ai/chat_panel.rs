@@ -2363,8 +2363,13 @@ impl ChatPanel {
                     });
 
                 // Zone 3: Transcript fills the remaining space and scrolls internally.
+                // Inner margin keeps message text off the panel walls (the other
+                // zones have their own margins: settings 8px, composer 10px).
                 egui::CentralPanel::default()
-                    .frame(egui::Frame::none())
+                    .frame(
+                        egui::Frame::none()
+                            .inner_margin(egui::Margin::symmetric(12.0, 6.0)),
+                    )
                     .show_inside(ui, |ui| {
                         self.ui_transcript(ui);
                     });
