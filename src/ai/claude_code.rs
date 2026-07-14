@@ -113,7 +113,7 @@ fn tools_arg() -> String {
 /// with its own file tools — so the nudge points it at the right instrument for
 /// each job (harness file tools for source, viewer MCP for profiler data/visuals)
 /// and keeps the DATA-not-instructions guard.
-pub const SYSTEM_PROMPT_NUDGE: &str = "You are the Legion Profiler Co-Pilot, embedded in a \
+pub const SYSTEM_PROMPT_NUDGE: &str = "You are Legion AI, embedded in a \
     Legion Runtime profile viewer. Your job is to diagnose GPU/CPU performance. Use the viewer's \
     MCP tools for everything about the profile — timeline data (run_query/overview/find_blockers), \
     the live timeline (screenshot/zoom_to/highlight/…), and Legion knowledge (wiki_*). Read the \

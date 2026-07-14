@@ -1,7 +1,7 @@
-# Legion Prof Viewer — AI Co-Pilot
+# Legion AI
 
-An AI diagnostic co-pilot built into the Legion Prof timeline viewer. Open a
-profile, click **Legion AI Co-Pilot**, and ask questions in plain English —
+**Legion AI** is an AI diagnostic co-pilot built into the Legion Prof timeline
+viewer. Open a profile, click **Legion AI**, and ask questions in plain English —
 the agent runs SQL over your profile, looks at the live timeline (it can zoom,
 filter, and take screenshots), reads your application's source if you connect
 it, and answers with root-cause diagnoses and clickable highlights on the
@@ -74,8 +74,8 @@ the plain upstream viewer.
 
 ```sh
 # 1. Build the viewer with the full AI layer
-git clone https://github.com/ahmadzafar-code/prof-viewer.git
-cd prof-viewer
+git clone https://github.com/ahmadzafar-code/legion-ai.git
+cd legion-ai
 cargo build --release --features viewer-mcp
 
 # 2. Profile your Legion app, then convert the logs (see Steps 1–2)
@@ -85,7 +85,7 @@ legion_prof duckdb  -o myrun_db      prof_*.gz
 # 3. Launch — the *_db file is auto-detected next to the *_archive
 ./target/release/legion_prof_viewer myrun_archive
 
-# 4. Click "Legion AI Co-Pilot" (top right) and ask:
+# 4. Click "Legion AI" (top right) and ask:
 #      "Give me an overview of this profile"
 ```
 
@@ -145,7 +145,7 @@ over persisted values when both exist.
 
 ## Step 4 — Ask questions
 
-Open the panel with the **Legion AI Co-Pilot** button (top right). Good first
+Open the panel with the **Legion AI** button (top right). Good first
 questions:
 
 - *"Give me an overview of this profile — what ran, where the time went, and
@@ -164,7 +164,7 @@ you can audit exactly which SQL produced which number.
 
 | Control | What it does |
 |---|---|
-| **Legion AI Co-Pilot** (top bar, right) | shows/hides the chat panel |
+| **Legion AI** (top bar, right) | shows/hides the chat panel |
 | **Sidebar** (top bar, left) | shows/hides the controls sidebar — more room for timeline + chat |
 | **DB / Code / Visual chips** | live status of the agent's three tool groups; hover for detail |
 | **+ menu** (composer) | **Connect DuckDB…**, **Connect Code…** (lets the agent read your source), **Add file…** (attach a text file as context) — connected items show as chips with **×** to disconnect |

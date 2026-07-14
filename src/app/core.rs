@@ -3675,7 +3675,7 @@ impl eframe::App for ProfApp {
                 });
 
                 // Toggle for the left controls sidebar — the counterpart of the
-                // Co-Pilot toggle on the right. NOT named "Controls": the
+                // Legion AI toggle on the right. NOT named "Controls": the
                 // sidebar's bottom "Show Controls" button (the shortcuts help
                 // window) already owns that word. Text-only (hamburger glyphs
                 // are tofu in egui's default fonts); subtle selected fill while
@@ -3689,7 +3689,7 @@ impl eframe::App for ProfApp {
                     cx.sidebar_hidden = !cx.sidebar_hidden;
                 }
 
-                // Right-aligned Legion AI Co-Pilot toggle button
+                // Right-aligned Legion AI toggle button
                 #[cfg(feature = "ai")]
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // A real button: filled Legion red while the panel is open,
@@ -3704,7 +3704,7 @@ impl eframe::App for ProfApp {
                             egui::Color32::from_rgb(30, 30, 30),
                         )
                     };
-                    let label = egui::RichText::new("Legion AI Co-Pilot")
+                    let label = egui::RichText::new("Legion AI")
                         .strong()
                         .size(15.5)
                         .color(text_color);
@@ -3720,7 +3720,7 @@ impl eframe::App for ProfApp {
                                 .min_size(egui::vec2(0.0, 28.0)),
                         )
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .on_hover_text("Toggle the Legion AI Co-Pilot")
+                        .on_hover_text("Toggle Legion AI")
                         .clicked()
                     {
                         cx.chat_panel.toggle();
@@ -4295,11 +4295,11 @@ fn get_locator(data_sources: &[Box<dyn DeferredDataSource>]) -> String {
 /// Optional startup configuration (e.g. AI assistant tool paths from the CLI).
 #[derive(Default)]
 pub struct StartOptions {
-    /// Pre-fills the Co-Pilot's DuckDB path (from `--duckdb` or auto-detection).
+    /// Pre-fills Legion AI's DuckDB path (from `--duckdb` or auto-detection).
     pub ai_duckdb_path: Option<String>,
-    /// Pre-fills the Co-Pilot's source-code path (from `--code`).
+    /// Pre-fills Legion AI's source-code path (from `--code`).
     pub ai_code_path: Option<String>,
-    /// Pre-fills the Co-Pilot's Legion wiki root (from `--wiki` or auto-detection).
+    /// Pre-fills Legion AI's Legion wiki root (from `--wiki` or auto-detection).
     pub ai_wiki_path: Option<String>,
 }
 

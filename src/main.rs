@@ -77,7 +77,7 @@ fn main() {
     legion_prof_viewer::app::start(ds);
 }
 
-/// With the `ai` feature, the AI Co-Pilot adds three flags on top of upstream's
+/// With the `ai` feature, Legion AI adds three flags on top of upstream's
 /// URL/path arguments:
 ///   --duckdb <path.duckdb>   profile database for the data tools
 ///   --code <dir>             profiled application's source (read_code root)
@@ -158,14 +158,14 @@ fn main() {
         duckdb_path = file_paths.iter().find_map(|p| detect_sibling_duckdb(p));
     }
     if let Some(ref db) = duckdb_path {
-        println!("Legion AI Co-Pilot DuckDB: {db}");
+        println!("Legion AI DuckDB: {db}");
     }
 
     // The code root is explicit-only: set solely by the `--code` flag (no
     // autodetect, no cwd default) — guessing an application source tree wrong
     // is worse than leaving read_code off until the user connects one.
     if let Some(ref code) = code_path {
-        println!("Legion AI Co-Pilot code root: {code}");
+        println!("Legion AI code root: {code}");
     }
 
     // Auto-detect the Legion wiki at `wiki-legion/wiki` (relative to the launch
@@ -177,7 +177,7 @@ fn main() {
         }
     }
     if let Some(ref wiki) = wiki_path {
-        println!("Legion AI Co-Pilot wiki root: {wiki}");
+        println!("Legion AI wiki root: {wiki}");
     }
 
     legion_prof_viewer::app::start_with_options(

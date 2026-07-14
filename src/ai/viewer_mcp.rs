@@ -597,7 +597,7 @@ mod tests {
             .as_str()
             .expect("instructions over HTTP");
         assert!(
-            instr.contains("Legion Profiler Co-Pilot"),
+            instr.contains("Legion AI"),
             "framing must reach the client"
         );
         assert!(

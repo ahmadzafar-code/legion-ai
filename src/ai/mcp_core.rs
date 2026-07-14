@@ -185,7 +185,7 @@ pub fn handle_request(req: &Value, ctx: &ServerCtx) -> Option<Value> {
 /// names and no absolute paths beyond the configured roots themselves.
 fn server_instructions(ctx: &ServerCtx) -> String {
     let mut parts: Vec<String> = vec![
-        "Legion Profiler Co-Pilot — diagnose Legion task-based runtime performance from \
+        "Legion AI — diagnose Legion task-based runtime performance from \
          this profile. Verify every number with run_query before stating it; rank issues \
          by share of total time, not ratios; state root causes as hypotheses, not \
          certainties; never invent speedups. Before ANY sizing/config verdict (e.g. \
@@ -829,7 +829,7 @@ mod tests {
         assert!(!instr.is_empty(), "instructions must be non-empty");
         // Always-framing.
         assert!(
-            instr.contains("Legion Profiler Co-Pilot"),
+            instr.contains("Legion AI"),
             "missing framing"
         );
         assert!(
@@ -856,7 +856,7 @@ mod tests {
             .as_str()
             .expect("instructions present");
         assert!(
-            instr.contains("Legion Profiler Co-Pilot"),
+            instr.contains("Legion AI"),
             "framing must still be present"
         );
         assert!(
