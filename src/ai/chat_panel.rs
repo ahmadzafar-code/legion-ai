@@ -1315,6 +1315,11 @@ impl ChatPanel {
         });
         ui.add_space(28.0);
 
+        // Suggestion cards: ONE centered column of equal-width pills — stays
+        // symmetric at every panel width (side-by-side columns went ragged the
+        // moment one title wrapped to a second line). Identical, explicit
+        // typography on every card; border warms to Legion red on hover.
+        let card_w = (ui.available_width() - 16.0).min(420.0);
         let card = |ui: &mut egui::Ui, title: &str| -> bool {
             let resp = egui::Frame::none()
                 .fill(egui::Color32::WHITE)
@@ -1323,50 +1328,50 @@ impl ChatPanel {
                     egui::Color32::from_rgb(225, 225, 225),
                 ))
                 .rounding(12.0)
-                .inner_margin(egui::Margin::same(14.0))
+                .inner_margin(egui::Margin::symmetric(14.0, 12.0))
                 .show(ui, |ui: &mut egui::Ui| {
-                    ui.set_width(ui.available_width());
-                    ui.set_min_height(64.0);
-                    ui.label(
-                        egui::RichText::new(title)
-                            .size(14.5)
-                            .strong()
-                            .color(egui::Color32::from_rgb(40, 40, 40)),
+                    ui.set_width(card_w - 28.0);
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(title)
+                                .size(14.5)
+                                .family(egui::FontFamily::Proportional)
+                                .color(egui::Color32::from_rgb(40, 40, 40)),
+                        )
+                        .wrap(),
                     );
                 })
-                .response;
-            let resp = resp.interact(egui::Sense::click());
+                .response
+                .interact(egui::Sense::click());
             if resp.hovered() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                ui.painter().rect_stroke(
+                    resp.rect,
+                    12.0,
+                    egui::Stroke::new(1.5, egui::Color32::from_rgb(236, 57, 55)),
+                );
             }
-            resp.clicked()
+            resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
         };
 
-        // Two side-by-side cards. `ui.columns` does the equal-width split and
-        // spacing math itself — the previous manual width math overflowed the
-        // panel edge and cut card 2 off.
-        egui::Frame::none()
-            .inner_margin(egui::Margin::symmetric(8.0, 0.0))
-            .show(ui, |ui: &mut egui::Ui| {
-                ui.columns(2, |cols| {
-                    if card(&mut cols[0], "Give me an overview of this profile") {
-                        submit = Some(
-                            "Give me an overview of this profile — what ran, where the \
-                             time went, and anything unusual.",
-                        );
-                    }
-                    if card(
-                        &mut cols[1],
-                        "Highlight idle gaps and find what's preventing them from \
-                         starting earlier",
-                    ) {
-                        submit = Some(
-                            "Highlight the largest idle gaps on the timeline and find \
-                             what's preventing that work from starting earlier.",
-                        );
-                    }
-                });
-            });
+        ui.vertical_centered(|ui| {
+            if card(ui, "Give me an overview of this profile") {
+                submit = Some(
+                    "Give me an overview of this profile — what ran, where the \
+                     time went, and anything unusual.",
+                );
+            }
+            ui.add_space(10.0);
+            if card(
+                ui,
+                "Highlight idle gaps and find what's preventing them from \
+                 starting earlier",
+            ) {
+                submit = Some(
+                    "Highlight the largest idle gaps on the timeline and find \
+                     what's preventing that work from starting earlier.",
+                );
+            }
+        });
 
         if let Some(prompt) = submit {
             self.submit_input(prompt.to_owned());
