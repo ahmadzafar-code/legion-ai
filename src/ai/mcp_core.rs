@@ -28,7 +28,7 @@ const HEADLESS_TOOLS: &[&str] = &["run_query", "overview", "list_files", "read_c
 /// The VISUAL tools advertised ONLY when a [`UiBridge`](super::bridge::UiBridge) is
 /// present (the in-viewer HTTP server). They drive the live timeline over the
 /// bridge. `ask_user` (no human at the MCP end) and `update_findings`
-/// (embedded-only scratchpad) are intentionally NOT exposed. (V1.2)
+/// (embedded-only scratchpad) are intentionally NOT exposed.
 const VISUAL_TOOLS: &[&str] = &[
     "screenshot",
     "zoom_to",
@@ -42,18 +42,18 @@ const VISUAL_TOOLS: &[&str] = &[
 ];
 
 /// The JIT wiki tools advertised ONLY when a `wiki_root` is configured. They give
-/// the client on-demand retrieval over the Legion knowledge wiki. (wiki-tool)
+/// the client on-demand retrieval over the Legion knowledge wiki.
 const WIKI_TOOLS: &[&str] = &["wiki_index", "wiki_read", "wiki_search"];
 
 /// Valid `answer_type` values for the `final_answer` tool (the eval grader pins
 /// this enum).
 const ANSWER_TYPES: &[&str] = &["uid", "number", "set", "label", "tuple", "diagnosis"];
 
-/// The LIVE project-root handle (P3v2): shared between the UI (which the user
+/// The LIVE project-root handle: shared between the UI (which the user
 /// edits at any time) and every reader — MCP tool gating, the instructions
-/// briefing, and the `read_code`/`list_files` sandbox root. Replaces the old
-/// snapshot-at-spawn `Option<String>`, whose frame-1 capture meant a root typed
-/// into the panel AFTER startup never reached the server for the whole app run.
+/// briefing, and the `read_code`/`list_files` sandbox root. Always read per
+/// request; caching the inner value across requests reintroduces the bug where
+/// a root set in the panel after startup never reaches the server.
 pub type SharedCodeRoot = std::sync::Arc<std::sync::RwLock<Option<String>>>;
 
 /// Server context: which case DB to query, an optional source root for the code
@@ -66,7 +66,7 @@ pub struct ServerCtx {
     /// [`Self::code_root`] — never cache the inner value across requests.
     pub code_root: SharedCodeRoot,
     /// Legion wiki root. When set, the `wiki_*` tools are advertised + routed
-    /// (mirrors `code_root` gating `read_code`). (wiki-tool)
+    /// (mirrors `code_root` gating `read_code`).
     pub wiki_root: Option<String>,
     pub protocol_version: &'static str,
     /// Present only on the in-viewer HTTP server: enables the VISUAL tools, which
@@ -102,7 +102,7 @@ impl ServerCtx {
         }
     }
 
-    /// The CURRENT project root (P3v2: read per request — the user can change it
+    /// The CURRENT project root (read per request — the user can change it
     /// in the panel at any time). Empty strings normalize to `None`.
     pub fn code_root(&self) -> Option<String> {
         self.code_root
@@ -133,14 +133,14 @@ impl ServerCtx {
         self
     }
 
-    /// Attach a Legion wiki root, enabling the `wiki_*` tools. (wiki-tool)
+    /// Attach a Legion wiki root, enabling the `wiki_*` tools.
     pub fn with_wiki_root(mut self, wiki_root: Option<String>) -> Self {
         self.wiki_root = wiki_root.filter(|r| !r.is_empty());
         self
     }
 
     /// Attach a [`UiBridge`](super::bridge::UiBridge), enabling the VISUAL tools.
-    /// Used by the in-viewer HTTP server (wired live in V1.3).
+    /// Used by the in-viewer HTTP server.
     pub fn with_ui_bridge(mut self, bridge: super::bridge::UiBridge) -> Self {
         self.ui_bridge = Some(bridge);
         self
@@ -261,7 +261,7 @@ fn tools_list_result(ctx: &ServerCtx) -> Value {
         })
         .collect();
 
-    // V1.4: get_selection is a non-driving READ, advertised only with a UI bridge
+    // get_selection is a non-driving READ, advertised only with a UI bridge
     // (like the visual tools). No args.
     if has_bridge {
         tools.push(json!({
@@ -340,7 +340,7 @@ fn tools_call_result(params: &Value, ctx: &ServerCtx) -> Value {
         };
     }
 
-    // get_selection (V1.4): a non-driving READ over the bridge (no viewport claim).
+    // get_selection: a non-driving READ over the bridge (no viewport claim).
     if name == "get_selection" {
         return match &ctx.ui_bridge {
             Some(bridge) => get_selection_result(bridge),
@@ -351,8 +351,9 @@ fn tools_call_result(params: &Value, ctx: &ServerCtx) -> Value {
     let (text, is_error) = match name {
         "run_query" => {
             let sql = args.get("sql").and_then(Value::as_str).unwrap_or("");
-            // Inherits read-only + enable_external_access(false) + 50-row cap from
-            // P0(a); the JSON (incl. any future `_truncated` marker) is verbatim.
+            // Inherits the exfil hardening (read-only + enable_external_access(false)
+            // + 50-row cap) from `execute_run_query_raw`; the JSON (incl. any future
+            // `_truncated` marker) is verbatim.
             into_tool_result(execute_run_query_raw(&ctx.duckdb_path, sql))
         }
         "find_blockers" => match args.get("start_uid").and_then(Value::as_u64) {
@@ -551,7 +552,7 @@ fn visual_tool_result(
             let (Some(start_ns), Some(stop_ns)) = (i64_arg("start_ns"), i64_arg("stop_ns")) else {
                 return text_result("highlight requires start_ns and stop_ns (integers).", true);
             };
-            // P0(b) parity: reject an unknown slug (same check the embedded agent
+            // Reject an unknown slug (the same check the embedded agent
             // uses) BEFORE driving the UI — an invalid highlight is a tool error,
             // not a silent no-op overlay.
             if !super::tools::slug_exists(duckdb_path, slug) {
@@ -605,7 +606,7 @@ fn visual_tool_result(
     }
 }
 
-/// Execute `get_selection` (V1.4): a non-driving READ of the human's timeline
+/// Execute `get_selection`: a non-driving READ of the human's timeline
 /// selection over the bridge. Uses `request_read` — it does NOT claim the viewport
 /// token, so it succeeds even while a driver holds the viewport. Formats
 /// `SelectionData` as structured JSON, or an explicit note when nothing is selected.
@@ -891,11 +892,11 @@ mod tests {
         }
     }
 
-    /// P3v2: the code root is LIVE — a root set (or cleared) through the shared
+    /// The code root is LIVE — a root set (or cleared) through the shared
     /// handle AFTER the ctx exists changes tool advertising, the instructions
-    /// briefing, and dispatch on the very next request. This is the fix for the
-    /// old snapshot-at-spawn behavior, where a root typed into the panel after
-    /// frame 1 never reached the server.
+    /// briefing, and dispatch on the very next request. Guards against
+    /// snapshot-at-spawn caching, where a root typed into the panel after
+    /// frame 1 would never reach the server.
     #[test]
     fn test_code_root_is_live_across_requests() {
         let ctx = dummy_ctx();
@@ -1068,7 +1069,7 @@ mod tests {
         assert!(is_error, "bogus answer_type must be rejected");
     }
 
-    // ── V1.2 visual tools (stub UiBridge — no live window) ───────────────────
+    // ── Visual tools (stub UiBridge — no live window) ────────────────────────
     use crate::ai::agent::{AgentEvent, SelectedItemInfo, UiCommand};
     use crate::ai::bridge::{UiBridge, ViewportGuard, ViewportToken, MCP_CONSUMER_ID};
     use std::sync::mpsc::channel;
@@ -1150,8 +1151,8 @@ mod tests {
 
     #[test]
     fn test_visual_highlight_valid_slug_routes_and_acks() {
-        // Needs the real DB: the highlight arm validates the slug (P0(b) parity)
-        // against `entries` BEFORE driving the UI.
+        // Needs the real DB: the highlight arm validates the slug against
+        // `entries` BEFORE driving the UI (the same check the embedded agent uses).
         let Some(path) = test_db() else {
             eprintln!("skipping: test DB absent");
             return;
@@ -1183,7 +1184,7 @@ mod tests {
 
     #[test]
     fn test_visual_highlight_unknown_slug_rejected() {
-        // P0(b): an unknown slug is rejected as a tool error BEFORE the bridge is
+        // An unknown slug is rejected as a tool error BEFORE the bridge is
         // driven (dangling bridge proves no event is sent — else it would block).
         let Some(path) = test_db() else {
             eprintln!("skipping: test DB absent");
@@ -1275,7 +1276,7 @@ mod tests {
         assert!(text.contains("zoom_to requires"), "actionable message: {text}");
     }
 
-    // ── V1.4 get_selection (READ) ────────────────────────────────────────────
+    // ── get_selection (READ) ─────────────────────────────────────────────────
     #[test]
     fn test_get_selection_formats_json() {
         // Stub UI asserts the event is GetSelection, replies with a seeded selection.

@@ -111,7 +111,7 @@ pub enum AgentEvent {
     },
     /// Agent wants all timeline highlight overlays cleared.
     ClearHighlights,
-    /// MCP-driven (V1.2): apply a highlight overlay to the live timeline, then ACK
+    /// MCP-driven: apply a highlight overlay to the live timeline, then ACK
     /// via `UiCommand::Ack`. The embedded agent accumulates highlights in
     /// `run_highlights` and never emits this — only the in-viewer MCP bridge does.
     HighlightRequest {
@@ -122,15 +122,15 @@ pub enum AgentEvent {
         severity: String,
         label: String,
     },
-    /// MCP-driven (V1.2): clear all highlight overlays, then ACK via
+    /// MCP-driven: clear all highlight overlays, then ACK via
     /// `UiCommand::Ack`. The embedded agent emits the reply-less `ClearHighlights`.
     ClearHighlightsRequest { request_id: u64 },
-    /// MCP-driven (V1.4): READ the human's current timeline selection and reply via
+    /// MCP-driven: READ the human's current timeline selection and reply via
     /// `UiCommand::SelectionData`. A non-driving read — the bridge services it
     /// WITHOUT claiming the viewport token. The embedded agent reads its own
     /// selection state directly (`build_selection_preamble`) and never emits this.
     GetSelection { request_id: u64 },
-    /// Backend B (P4): an INTERIM assistant text message from the streamed
+    /// Claude Code backend: an INTERIM assistant text message from the streamed
     /// transcript — narration between tool calls, rendered progressively so the
     /// chat feels alive during long runs. The final turn text still arrives via
     /// `Complete` (deduplicated by the emitter). The native agent never emits this.
@@ -158,9 +158,9 @@ pub enum UiCommand {
     UserAnswer { request_id: u64, answer: String },
     /// Acknowledgement for a non-screenshot bridge request (highlight / clear).
     /// `message` is the model-readable confirmation text. Used only by the
-    /// in-viewer MCP bridge path (V1.2).
+    /// in-viewer MCP bridge path.
     Ack { request_id: u64, message: String },
-    /// The human's current timeline selection, in reply to `GetSelection` (V1.4).
+    /// The human's current timeline selection, in reply to `GetSelection`.
     /// `items` are selected task bars; `range` is the dragged region (entry label,
     /// start_ns, stop_ns), if any. Both empty/None ⇒ nothing selected.
     SelectionData {
@@ -170,7 +170,7 @@ pub enum UiCommand {
     },
 }
 
-/// One selected task bar reported by `get_selection` over the bridge (V1.4). A
+/// One selected task bar reported by `get_selection` over the bridge. A
 /// self-contained mirror of the chat panel's `SelectedItem`, so the UI↔bridge
 /// command layer carries no dependency on the chat-panel type. The UI drain maps
 /// `SelectedItem` → this when building [`UiCommand::SelectionData`].
@@ -212,10 +212,10 @@ pub struct AgentSession {
     /// Monotonically increasing ID for screenshot/zoom requests.
     next_request_id: u64,
 
-    /// Shared viewport-ownership token (V1.2). When set, the screenshot/navigation
+    /// Shared viewport-ownership token. When set, the screenshot/navigation
     /// path claims it for each round-trip so the embedded agent and an external
     /// MCP driver are mutually exclusive. `None` (tests, or before the chat panel
-    /// wires it) keeps the legacy sole-driver behavior: no claim, always proceeds.
+    /// wires it) keeps the sole-driver behavior: no claim, always proceeds.
     viewport_token: Option<super::bridge::ViewportToken>,
     /// Consumer id used when claiming `viewport_token`.
     viewport_consumer_id: u64,
@@ -334,13 +334,12 @@ impl AgentSession {
         self.command_rx = command_rx;
     }
 
-    /// P3v2: re-read the (user-editable) project folder on a REUSED session.
-    /// Historically `code_path`/`has_code` were frozen at `new()`, so setting the
-    /// path mid-conversation silently did nothing until ↺ New session. When the
-    /// value changed, the tool list and system prompt are rebuilt so `read_code`/
-    /// `list_files` (and the code-pointer bullet) appear/disappear on the next
-    /// request. Rebuilding the system prompt invalidates the prompt cache — fine
-    /// for a rare, user-initiated change.
+    /// Re-read the (user-editable) project folder on a REUSED session — without
+    /// this, setting the path mid-conversation would silently do nothing until
+    /// ↺ New session. When the value changes, the tool list and system prompt
+    /// are rebuilt so `read_code`/`list_files` (and the code-pointer bullet)
+    /// appear/disappear on the next request. Rebuilding the system prompt
+    /// invalidates the prompt cache — fine for a rare, user-initiated change.
     pub fn refresh_code_path(&mut self, code_path: &str) {
         if self.code_path == code_path {
             return;
@@ -353,7 +352,7 @@ impl AgentSession {
         self.system_prompt = build_system_prompt(has_code);
     }
 
-    /// Wire the shared viewport token (V1.2). After this, the screenshot/navigation
+    /// Wire the shared viewport token. After this, the screenshot/navigation
     /// path claims `token` for each round-trip under `consumer_id`, so the embedded
     /// agent and the in-viewer MCP driver are mutually exclusive (single outstanding
     /// screenshot across both). Idempotent. When never called, the agent stays the
@@ -369,11 +368,11 @@ impl AgentSession {
         let _ = self.event_tx.send(event);
     }
 
-    /// Claim the shared viewport for a viewport round-trip (V1.2). Returns an RAII
+    /// Claim the shared viewport for a viewport round-trip. Returns an RAII
     /// guard the caller holds for the duration of emit+wait — releasing it on every
     /// exit path. `Err` with a model-readable "viewport busy" message if an external
     /// driver holds it. When no token is wired, returns `Ok(None)` and the request
-    /// proceeds as the sole driver (legacy behavior, unchanged).
+    /// proceeds as the sole driver.
     fn claim_viewport(&self) -> Result<Option<super::bridge::ViewportGuard>, String> {
         match &self.viewport_token {
             Some(token) => token.try_claim(self.viewport_consumer_id).map(Some).map_err(|_| {
@@ -1047,7 +1046,7 @@ impl AgentSession {
     /// enabled with `output_config.effort = "high"` and max_tokens is doubled to
     /// 16 000. `claude-opus-4-8` rejects a fixed thinking budget, so we must use
     /// adaptive thinking here. Thinking is NOT added on Sonnet (the fast path) —
-    /// the guard is `model.contains("opus")` exactly as documented in MEMORY.md.
+    /// the guard is `model.contains("opus")`.
     fn call_claude(&self) -> Result<ApiResponse, String> {
         let use_opus = self.model.contains("opus");
 
@@ -1105,8 +1104,7 @@ impl AgentSession {
         // Extended thinking — Opus only. `claude-opus-4-8` does not accept a fixed
         // thinking budget (`{"type":"enabled","budget_tokens":N}` returns a 400),
         // so we use adaptive thinking and steer depth via `output_config.effort`.
-        // The model-id bump and this thinking-block change must ship together —
-        // bumping the model alone returns a 400. Sonnet keeps no thinking block.
+        // Sonnet keeps no thinking block.
         if use_opus {
             req_body["thinking"] = serde_json::json!({ "type": "adaptive" });
             req_body["output_config"] = serde_json::json!({ "effort": "high" });
@@ -1255,7 +1253,7 @@ fn compact_messages(messages: &mut [serde_json::Value]) -> (usize, usize) {
     let mut images_stripped = 0usize;
     let mut chars_saved = 0usize;
 
-    // --- A1: keep images only in the most recent image-bearing message ---
+    // --- keep images only in the most recent image-bearing message ---
     let mut kept_latest = false;
     for msg in messages.iter_mut().rev() {
         let Some(content) = msg.get_mut("content").and_then(|c| c.as_array_mut()) else {
@@ -1293,7 +1291,7 @@ fn compact_messages(messages: &mut [serde_json::Value]) -> (usize, usize) {
         }
     }
 
-    // --- A2: truncate oversized text tool_results, except in the last message ---
+    // --- truncate oversized text tool_results, except in the last message ---
     let last_idx = messages.len().saturating_sub(1);
     for (i, msg) in messages.iter_mut().enumerate() {
         if i == last_idx {
@@ -1676,8 +1674,9 @@ Found issues.
         assert!(no_code.contains("wiki_index"), "wiki pointer should remain without code");
     }
 
-    /// P0(b): the `highlight` handler must reject an unknown `entry_slug` with an
-    /// explicit `Err` instead of silently no-opping while reporting success; a
+    /// Unknown-slug rejection: the `highlight` handler must reject an unknown
+    /// `entry_slug` with an explicit `Err` instead of silently no-opping while
+    /// reporting success; a
     /// real slug from `entries` must succeed. Also exercises `slug_exists`
     /// directly. Requires the bg4N2 fixture; soft-skips if absent.
     #[cfg(feature = "duckdb")]

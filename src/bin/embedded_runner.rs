@@ -9,7 +9,7 @@
 //! Exit codes: 0 = envelope emitted (agent-level errors ride IN the envelope);
 //! 2 = precondition failure (no ANTHROPIC_API_KEY / bad args) with stderr text.
 //!
-//! Headless hazards (spec-reviewed): a drainer thread auto-replies to the two
+//! Headless hazards: a drainer thread auto-replies to the two
 //! blocking event classes — `QuestionForUser` gets a canned `UserAnswer` and
 //! every nav/screenshot request gets `ScreenshotData` with EMPTY png bytes,
 //! which returns an immediate clean tool error ("Screenshot capture returned

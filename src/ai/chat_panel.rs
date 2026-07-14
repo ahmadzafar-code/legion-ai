@@ -2,9 +2,11 @@
 //!
 //! Provides a Cursor-inspired toggleable right-side panel where users can:
 //! - Ask questions about their profile in a composer input
-//! - Attach files/folders via `@` mentions (DuckDB databases, code roots, files)
+//! - Add context via the ＋ menu (plain files attach inline; folders set the
+//!   project root; `.duckdb` files set the database path)
 //! - View progressive analysis results with markdown rendering
-//! - Configure API key and other settings behind a gear icon
+//! - Enter an API key in a popup when the built-in API engine is active (the
+//!   engine itself is auto-detected: Claude Code when installed, else the API loop)
 //!
 //! When built with `--features ai`, the panel calls the native Rust agent
 //! (`agent::AgentSession`) directly — no Python sidecar required.
@@ -35,8 +37,7 @@ pub enum ChatMessageKind {
     Analysis,
 }
 
-/// Which backend serves the embedded chat (P1, Backend B plan —
-/// `IMPLEMENTATION-PLAN-cc-backend.md`).
+/// Which backend serves the embedded chat.
 ///
 /// - `Native`: the hand-rolled in-process agent (`AgentSession` over raw HTTP).
 ///   Needs an API key. Drives the viewport in-process as `EMBEDDED_CONSUMER_ID`.
@@ -45,7 +46,7 @@ pub enum ChatMessageKind {
 ///   `viewer-mcp` feature + a running server). No API key — rides on the user's
 ///   `claude` login. Drives the viewport over the MCP bridge (`MCP_CONSUMER_ID`).
 ///
-/// CHANNEL-LIFETIME CONTRACT (load-bearing, from the plan's P1): the Native arm
+/// CHANNEL-LIFETIME CONTRACT (load-bearing): the Native arm
 /// keeps the existing PER-TURN `(event_tx, event_rx)` swap in
 /// `trigger_diagnosis`. The ClaudeCode arm must create its channels ONCE at
 /// child spawn and keep them for the child's lifetime — follow-up turns only
@@ -129,7 +130,7 @@ pub struct SelectedItem {
     pub stop_ns: i64,
 }
 
-// ── @-mention context types ─────────────────────────────────────────────────
+// ── ＋-menu context types ───────────────────────────────────────────────────
 
 /// The kind of context attachment, auto-detected from the filesystem entry.
 /// A file added as inline context via the ＋ menu. Folders and .duckdb files
@@ -214,29 +215,29 @@ pub struct ChatPanel {
     pending_clear_selection: bool,
     /// User-initiated highlight actions from chip clicks, consumed by core.rs.
     pending_highlight_actions: Vec<HighlightAction>,
-    /// Shared viewport-ownership token (V1.2), handed to each spawned
+    /// Shared viewport-ownership token, handed to each spawned
     /// `AgentSession` so the embedded agent and the in-viewer MCP driver are
     /// mutually exclusive. `None` until `core.rs` wires it from the `Context`.
     viewport_token: Option<crate::ai::bridge::ViewportToken>,
     /// The in-viewer MCP server endpoint — (ACTUAL bound port, per-session bearer
     /// token) — wired by `core.rs` after spawn. `None` = server not running yet
-    /// (Backend B unavailable). Backend B's `--mcp-config` needs BOTH: the real
-    /// port and an `Authorization: Bearer <token>` header (server hardening).
+    /// (the Claude Code backend is unavailable). Its `--mcp-config` needs BOTH: the
+    /// real port and an `Authorization: Bearer <token>` header (server hardening).
     #[cfg(feature = "viewer-mcp")]
     mcp_endpoint: Option<(u16, String)>,
-    /// Backend B (P2a): the persistent Claude Code subprocess. Arc-shared across
+    /// The persistent Claude Code subprocess. Arc-shared across
     /// panel clones (like `agent_session`); the kill/reap lives in
-    /// `SubprocessAgent::Drop`, which runs when the LAST Arc drops — a throwaway
+    /// `ClaudeCodeAgent::Drop`, which runs when the LAST Arc drops — a throwaway
     /// panel clone can never kill the shared child.
     #[cfg(feature = "viewer-mcp")]
-    cc_agent: Arc<Mutex<Option<Arc<crate::ai::claude_code::SubprocessAgent>>>>,
-    /// P2v2: the approval broker behind the MCP server's /approve route — the
+    cc_agent: Arc<Mutex<Option<Arc<crate::ai::claude_code::ClaudeCodeAgent>>>>,
+    /// The approval broker behind the MCP server's /approve route — the
     /// panel polls it each frame and renders the Deny/Allow/Always-allow dialog
     /// for hook-gated tool calls (Bash/Edit/Write/WebFetch/…). Wired by core.rs
     /// alongside `mcp_endpoint`; Arc-shared with the server thread.
     #[cfg(feature = "viewer-mcp")]
     approval_broker: Option<Arc<crate::ai::claude_code::ApprovalBroker>>,
-    /// P3v2: the LIVE project-root handle shared with the MCP server (created
+    /// The LIVE project-root handle shared with the MCP server (created
     /// here, handed to `viewer_mcp::spawn` by core.rs). Synced each frame from
     /// the normalized `code_path_buffer`.
     #[cfg(feature = "viewer-mcp")]
@@ -361,7 +362,7 @@ impl ChatPanel {
         self.visible = !self.visible;
     }
 
-    /// Wire the shared viewport token (V1.2). Idempotent; called by `core.rs` once
+    /// Wire the shared viewport token. Idempotent; called by `core.rs` once
     /// the `Context` is available so each spawned `AgentSession` claims the same
     /// token the in-viewer MCP driver does.
     pub fn ensure_viewport_token(&mut self, token: crate::ai::bridge::ViewportToken) {
@@ -493,7 +494,7 @@ impl ChatPanel {
         s
     }
 
-    /// V1.4: structured snapshot of the current selection for the in-viewer MCP
+    /// Structured snapshot of the current selection for the in-viewer MCP
     /// `get_selection` tool. Reads the SAME state the embedded
     /// `build_selection_preamble` reads (selected task bars + dragged region), so
     /// the MCP read and the embedded preamble report identical information. Returns
@@ -590,7 +591,7 @@ impl ChatPanel {
     // ── Tool status helpers ────────────────────────────────────────────────
 
     /// The configured DuckDB path (trimmed, non-empty), if any — the database the
-    /// in-viewer MCP server (V1.1) serves `run_query`/`overview`/`find_blockers`
+    /// in-viewer MCP server serves `run_query`/`overview`/`find_blockers`
     /// against.
     #[cfg(feature = "viewer-mcp")]
     pub fn duckdb_path(&self) -> Option<String> {
@@ -606,17 +607,17 @@ impl ChatPanel {
         (!trimmed.is_empty()).then(|| trimmed.to_owned())
     }
 
-    /// The EFFECTIVE project root, if any (P3v2: file paths normalize to their
-    /// parent directory) — used for the Backend B child's `--add-dir` and the
+    /// The EFFECTIVE project root, if any (file paths normalize to their
+    /// parent directory) — used for the Claude Code child's `--add-dir` and the
     /// native agent's per-turn refresh.
     #[cfg(feature = "viewer-mcp")]
     pub fn code_path(&self) -> Option<String> {
         effective_project_root(&self.code_path_buffer)
     }
 
-    /// The LIVE project-root handle shared with the in-viewer MCP server (P3v2):
+    /// The LIVE project-root handle shared with the in-viewer MCP server:
     /// the server reads it per request, so a folder set in the panel at ANY time
-    /// reaches read_code/list_files/instructions — no more snapshot-at-spawn.
+    /// reaches read_code/list_files/instructions (never a snapshot at spawn).
     /// The panel keeps it in sync with the (normalized) path buffer each frame.
     #[cfg(feature = "viewer-mcp")]
     pub fn project_root_handle(&self) -> crate::ai::mcp_core::SharedCodeRoot {
@@ -638,14 +639,14 @@ impl ChatPanel {
     /// Wire the in-viewer MCP server endpoint — (ACTUAL bound port, per-session
     /// bearer token) — called by `core.rs` right after the server spawns; `None`
     /// = bind failed. The ClaudeCode backend refuses to start until this is
-    /// `Some`, and P2a builds its `--mcp-config` (URL + `Authorization: Bearer`
+    /// `Some`, and builds its `--mcp-config` (URL + `Authorization: Bearer`
     /// header) from exactly this pair.
     #[cfg(feature = "viewer-mcp")]
     pub fn set_mcp_endpoint(&mut self, endpoint: Option<(u16, String)>) {
         self.mcp_endpoint = endpoint;
     }
 
-    /// Wire the approval broker (P2v2) — called by `core.rs` alongside
+    /// Wire the approval broker — called by `core.rs` alongside
     /// [`Self::set_mcp_endpoint`]. The panel polls it each frame and renders the
     /// Deny/Allow/Always-allow dialog for the child's hook-gated tool calls.
     #[cfg(feature = "viewer-mcp")]
@@ -656,7 +657,7 @@ impl ChatPanel {
         self.approval_broker = broker;
     }
 
-    /// P3v2 persistence: snapshot the user's AI settings for eframe storage
+    /// Persistence: snapshot the user's AI settings for eframe storage
     /// (called by `ProfApp::save`). The API key is deliberately EXCLUDED —
     /// eframe storage is plaintext on disk; use ANTHROPIC_API_KEY instead.
     pub fn export_persisted(&self) -> crate::app::PersistedAiSettings {
@@ -667,7 +668,7 @@ impl ChatPanel {
         }
     }
 
-    /// P3v2 persistence: restore a previous session's AI settings (called by
+    /// Persistence: restore a previous session's AI settings (called by
     /// `ProfApp::new` BEFORE `set_tool_paths`, so explicit CLI flags win).
     pub fn apply_persisted(&mut self, saved: &crate::app::PersistedAiSettings) {
         if !saved.project_root.is_empty() {
@@ -683,8 +684,8 @@ impl ChatPanel {
 
     /// End-of-turn receiver cleanup — CHANNEL-LIFETIME critical (see
     /// [`ChatBackendKind`]): Native uses per-turn channels, so dropping the
-    /// receiver after Complete/Error is correct. Backend B's channel is
-    /// once-at-spawn and must OUTLIVE turns — dropping it would orphan the
+    /// receiver after Complete/Error is correct. The Claude Code backend's channel
+    /// is once-at-spawn and must OUTLIVE turns — dropping it would orphan the
     /// persistent child's event stream (turn 2 would never render). Keep the
     /// receiver installed while a ClaudeCode child is alive.
     fn end_of_turn_channel_cleanup(&mut self) {
@@ -715,12 +716,12 @@ impl ChatPanel {
         ToolStatus::Ready
     }
 
-    /// Derive the Code tool status from the EFFECTIVE project root (P3v2): green
+    /// Derive the Code tool status from the EFFECTIVE project root: green
     /// only when the effective root is a real directory — the value every
-    /// consumer actually uses, so the chip can no longer show Ready for a
-    /// configuration that would fail (the old false-green: a file path was
-    /// accepted citing a parent-dir fallback that didn't exist; the fallback is
-    /// now real, in [`effective_project_root`]).
+    /// consumer actually uses, so the chip never shows Ready for a
+    /// configuration that would fail (a FILE path is accepted because
+    /// [`effective_project_root`] really does normalize it to its parent
+    /// directory).
     fn tool_status_code(&self) -> ToolStatus {
         if self.code_path_buffer.trim().is_empty() {
             return ToolStatus::Off;
@@ -787,13 +788,12 @@ impl ChatPanel {
         }
     }
 
-    /// Trigger an agent request on the SELECTED backend (P1 dispatch seam).
+    /// Trigger an agent request on the SELECTED backend.
     ///
     /// `Native` runs the in-process `AgentSession` (needs an API key);
     /// `ClaudeCode` drives the user's own Claude Code over the in-viewer MCP
     /// server (no key). Exactly one backend runs a request at a time —
-    /// `pending_request` is the shared guard, and the settings toggle is
-    /// disabled while a request is in flight.
+    /// `pending_request` is the shared guard.
     /// Inline context from ＋-menu file attachments, rendered as fenced blocks
     /// (folders/.duckdb never become attachments — they configure the project
     /// root / DB path instead). Capped per file and in total so a large attach
@@ -870,9 +870,10 @@ impl ChatPanel {
         }
     }
 
-    /// Backend B (P2a): the user's own Claude Code as a persistent stream-json
-    /// subprocess over the in-viewer MCP server. Spawned lazily on the first
-    /// turn; follow-up turns write to the SAME live stdin (P0-proven).
+    /// The Claude Code backend: the user's own Claude Code as a persistent
+    /// stream-json subprocess over the in-viewer MCP server. Spawned lazily on
+    /// the first turn; follow-up turns write to the SAME live stdin (verified
+    /// empirically against claude 2.1.x).
     ///
     /// CHANNEL-LIFETIME CONTRACT (vs. Native's per-turn swap): the
     /// `(event_tx, event_rx)` pair is created ONCE at spawn, `event_rx` stays
@@ -910,12 +911,12 @@ impl ChatPanel {
                 };
                 let (event_tx, event_rx) = mpsc::channel::<AgentEvent>();
                 // Grant the harness's own Read/Glob/Grep access to the profiled app's
-                // source (via --add-dir), so Backend B can read code with the full
-                // harness rather than only the MCP read_code tool.
+                // source (via --add-dir), so the Claude Code backend can read code
+                // with the full harness rather than only the MCP read_code tool.
                 let code_root = self.code_path();
                 // No --model: the child uses the user's own Claude Code default
                 // (their install, their model choice).
-                match crate::ai::claude_code::SubprocessAgent::spawn(
+                match crate::ai::claude_code::ClaudeCodeAgent::spawn(
                     port,
                     &token,
                     "",
@@ -926,7 +927,7 @@ impl ChatPanel {
                         *self.event_rx.lock().unwrap() = Some(event_rx);
                         *self.cc_agent.lock().unwrap() = Some(agent);
                         // --add-dir is fixed per child: remember what this one got
-                        // so the settings row can flag a later change (P3v2).
+                        // so the settings row can flag a later change.
                         self.cc_spawn_root = code_root.clone();
                         self.add_message(
                             ChatMessageKind::System,
@@ -989,7 +990,7 @@ impl ChatPanel {
         unreachable!("ClaudeCode backend dispatched without the viewer-mcp feature");
     }
 
-    /// Backend A: the native in-process agent (`AgentSession` over raw HTTP).
+    /// The native backend: the in-process agent (`AgentSession` over raw HTTP).
     /// Runs in a background thread; the session persists across follow-ups.
     /// NOTE: the per-turn `(event_tx, event_rx)` swap below is Native-ONLY —
     /// see [`ChatBackendKind`] for the channel-lifetime contract.
@@ -1004,7 +1005,7 @@ impl ChatPanel {
         };
 
         // Tool paths from dedicated fields. The project root is the EFFECTIVE
-        // value (P3v2: a file normalizes to its parent directory).
+        // value (a file normalizes to its parent directory).
         let duckdb_path = self.duckdb_path_buffer.trim().to_owned();
         let code_path = effective_project_root(&self.code_path_buffer).unwrap_or_default();
         let wiki_path = self.wiki_path_buffer.trim().to_owned();
@@ -1042,8 +1043,8 @@ impl ChatPanel {
             let mut session = match existing {
                 Some(mut s) => {
                     // Reused session: update channels (old ones are disconnected)
-                    // and re-read the project root (P3v2: the user can set/change
-                    // it mid-conversation; before, it was frozen at creation).
+                    // and re-read the project root (the user can set/change it
+                    // mid-conversation).
                     s.update_channels(event_tx.clone(), cmd_rx);
                     s.refresh_code_path(&code_path);
                     s
@@ -1059,14 +1060,14 @@ impl ChatPanel {
                 ),
             };
 
-            // V1.2: claim the shared viewport for each screenshot/nav round-trip so
+            // Claim the shared viewport for each screenshot/nav round-trip so
             // the embedded agent and the in-viewer MCP driver never have two
             // screenshots in flight at once. No token wired => unchanged sole driver.
             if let Some(token) = viewport_token {
                 session.set_viewport(token, crate::ai::bridge::EMBEDDED_CONSUMER_ID);
             }
 
-            // Run the agent — prepend selection context + @ attachments to the question.
+            // Run the agent — prepend selection context + file attachments to the question.
             let enriched = format!("{selection_preamble}{context_section}{query_clone}");
             let result = session.ask(&enriched);
 
@@ -1096,12 +1097,10 @@ impl ChatPanel {
         ui.horizontal(|ui| {
             // Right-aligned controls (no title — it's redundant with the toolbar toggle)
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // New session button (the guaranteed cancel — the old separate
-                // ⏹ best-effort interrupt button was unrecognizable and removed;
-                // interrupt_turn() remains available in code).
-                // ↺ is the guaranteed cancel for Backend B, so it stays clickable
-                // MID-turn while a Claude Code child exists (hard_stop kills the
-                // child; the reader sees EOF). Native keeps the original
+                // New session button — the guaranteed cancel.
+                // ↺ is the guaranteed cancel for the Claude Code backend, so it
+                // stays clickable MID-turn while a Claude Code child exists
+                // (hard_stop kills the child; the reader sees EOF). Native keeps
                 // disabled-while-pending behavior (its thread can't be stopped).
                 #[cfg(feature = "viewer-mcp")]
                 let can_reset =
@@ -1114,7 +1113,7 @@ impl ChatPanel {
                     .clicked()
                 {
                     *self.agent_session.lock().unwrap() = None;
-                    // Backend B: hard-stop + drop the persistent Claude Code child
+                    // Hard-stop + drop the persistent Claude Code child
                     // (Drop reaps + joins). Its once-at-spawn receiver dies with it.
                     #[cfg(feature = "viewer-mcp")]
                     if let Some(agent) = self.cc_agent.lock().unwrap().take() {
@@ -1122,7 +1121,7 @@ impl ChatPanel {
                         *self.event_rx.lock().unwrap() = None;
                         self.pending_request = false;
                     }
-                    // P2v2: deny any in-flight approval and clear the session's
+                    // Deny any in-flight approval and clear the session's
                     // always-allow rules — they must not outlive the child.
                     #[cfg(feature = "viewer-mcp")]
                     if let Some(broker) = &self.approval_broker {
@@ -1710,12 +1709,12 @@ impl ChatPanel {
     /// Render the chat panel. Must be called BEFORE CentralPanel in the layout.
     pub fn show(&mut self, ctx: &egui::Context) {
         self.poll_events();
-        // P3v2: keep the MCP server's live project-root handle in sync with the
+        // Keep the MCP server's live project-root handle in sync with the
         // (normalized) path buffer — the server reads it per request.
         #[cfg(feature = "viewer-mcp")]
         self.sync_project_root();
 
-        // These run even while the panel is hidden — a Backend B turn may be
+        // These run even while the panel is hidden — a Claude Code turn may be
         // live: the approval dialog must stay answerable (egui Windows float
         // independently of panels) and events must keep draining.
         #[cfg(feature = "viewer-mcp")]
@@ -1782,7 +1781,7 @@ impl ChatPanel {
             });
     }
 
-    /// P2v2: the Deny / Allow / Always-allow dialog for the Claude Code child's
+    /// The Deny / Allow / Always-allow dialog for the Claude Code child's
     /// hook-gated tool calls (Bash/Edit/Write/NotebookEdit/WebFetch/WebSearch).
     /// The /approve handler thread is BLOCKED on this verdict; the modal shows the
     /// FULL command/path/URL (never the 120-char transcript preview — an approval
@@ -2042,12 +2041,11 @@ fn menu_row_visuals(ui: &mut egui::Ui) {
     v.widgets.active.bg_stroke = egui::Stroke::NONE;
 }
 
-/// The EFFECTIVE project root for a raw path-field value (P3v2): trims, treats
-/// empty as unset, and normalizes a FILE path to its parent directory — the
-/// fallback the old Code chip claimed but never implemented. Every consumer
-/// (chip, native agent, MCP handle, Backend B --add-dir) reads through this, so
-/// they can never disagree; the buffer itself stays exactly as the user typed it
-/// (no cursor-fighting rewrites).
+/// The EFFECTIVE project root for a raw path-field value: trims, treats
+/// empty as unset, and normalizes a FILE path to its parent directory.
+/// Every consumer (chip, native agent, MCP handle, Claude Code `--add-dir`)
+/// reads through this, so they can never disagree; the buffer itself stays
+/// exactly as the user typed it (no cursor-fighting rewrites).
 fn effective_project_root(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -2076,11 +2074,9 @@ fn format_duration_ns(ns: i64) -> String {
     }
 }
 
-/// The embedded chat panel as an [`EventSink`]: each method is the verbatim body
-/// of the corresponding former `poll_events` match arm, so behavior is unchanged —
-/// `poll_events` now delegates here via `apply_agent_event`. The embedded
-/// screenshot reply is delivered by core.rs through `ui_command_tx`, so this sink
-/// does not use `reply_tx`.
+/// The embedded chat panel as an [`EventSink`] — `poll_events` delegates here
+/// via `apply_agent_event`. The embedded screenshot reply is delivered by
+/// core.rs through `ui_command_tx`, so this sink does not use `reply_tx`.
 impl crate::ai::bridge::EventSink for ChatPanel {
     fn on_tool_call(&mut self, name: String, purpose: String) {
         self.add_message(ChatMessageKind::System, format!("  ↳ {name}: {purpose}"));
@@ -2117,7 +2113,7 @@ impl crate::ai::bridge::EventSink for ChatPanel {
         self.add_message(ChatMessageKind::System, "Cleared timeline highlights.");
     }
 
-    /// Backend B (P4): interim assistant narration streamed mid-turn — rendered
+    /// Claude Code backend: interim assistant narration streamed mid-turn — rendered
     /// immediately as an Analysis bubble so long runs feel alive. The emitter
     /// (claude_code::map_line) deduplicates the FINAL text against `Complete`.
     fn on_interim_text(&mut self, text: String) {
@@ -2149,9 +2145,10 @@ impl crate::ai::bridge::EventSink for ChatPanel {
             });
         }
 
-        // Embed highlights in the Analysis message as clickable chips. Backend B
-        // deduplicates the final text against its streamed interim messages, so
-        // an empty text here means "already rendered" — skip the empty bubble.
+        // Embed highlights in the Analysis message as clickable chips. The Claude
+        // Code backend deduplicates the final text against its streamed interim
+        // messages, so an empty text here means "already rendered" — skip the
+        // empty bubble.
         if !display.trim().is_empty() || !highlights.is_empty() {
             self.messages.push(ChatMessage {
                 kind: ChatMessageKind::Analysis,
@@ -2171,7 +2168,7 @@ impl crate::ai::bridge::EventSink for ChatPanel {
                 ),
             );
         } else {
-            // Backend B: queries run inside the MCP server, uncounted here.
+            // Claude Code backend: queries run inside the MCP server, uncounted here.
             self.add_message(ChatMessageKind::System, "Done.");
         }
         self.pending_request = false;
@@ -2191,7 +2188,7 @@ mod selection_tests {
     use crate::data::EntryID;
     use crate::timestamp::{Interval, Timestamp};
 
-    /// V1.4: selection_snapshot mirrors the embedded `build_selection_preamble`
+    /// selection_snapshot mirrors the embedded `build_selection_preamble`
     /// state — the data `get_selection` returns over the MCP. Empty when nothing is
     /// selected; carries item_uid/entry_slug/title/interval + the dragged region.
     #[test]
@@ -2229,11 +2226,11 @@ mod selection_tests {
 }
 
 #[cfg(test)]
-mod p3v2_tests {
+mod project_root_tests {
     use super::*;
 
-    /// P3v2: the read-boundary normalization every consumer shares — trims,
-    /// empty→None, FILE→parent directory (the fallback the old chip claimed).
+    /// The read-boundary normalization every consumer shares — trims,
+    /// empty→None, FILE→parent directory.
     #[test]
     fn effective_project_root_normalizes() {
         assert_eq!(effective_project_root(""), None);
@@ -2260,7 +2257,7 @@ mod p3v2_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// P3v2 persistence: export → apply round-trips the persistable settings,
+    /// Persistence: export → apply round-trips the persistable settings,
     /// empty saved values never clobber, and the API key is never exported.
     #[test]
     fn persisted_settings_round_trip_and_precedence() {
@@ -2288,7 +2285,7 @@ mod p3v2_tests {
         assert_eq!(c.code_path_buffer, "/from-cli");
     }
 
-    /// P3v2: the shared handle follows buffer edits (and normalizes) — this is
+    /// The shared handle follows buffer edits (and normalizes) — this is
     /// what the MCP server reads per request.
     #[cfg(feature = "viewer-mcp")]
     #[test]

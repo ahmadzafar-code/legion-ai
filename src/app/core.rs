@@ -282,7 +282,7 @@ impl ItemLinkNavigationMode {
     }
 }
 
-/// P3v2: AI-panel settings persisted across app restarts via eframe storage.
+/// AI-panel settings persisted across app restarts via eframe storage.
 /// The `ChatPanel` itself is `serde(skip)` (channels, sessions, caches), so this
 /// small plain-data mirror carries the values worth keeping. The API key is
 /// deliberately absent — eframe storage is plaintext on disk. Empty strings mean
@@ -344,7 +344,7 @@ struct Context {
     #[serde(skip)]
     chat_panel: crate::ai::ChatPanel,
 
-    /// P3v2: the AI settings that DO survive restarts (the panel itself is
+    /// The AI settings that DO survive restarts (the panel itself is
     /// serde-skip). Synced FROM the panel in `save()`, applied TO the panel in
     /// `ProfApp::new` (before CLI flags, which win). Plain data — never the API
     /// key (eframe storage is plaintext on disk).
@@ -408,7 +408,7 @@ struct Context {
     mcp_awaiting_screenshot:
         Option<(u64, std::sync::mpsc::Sender<crate::ai::UiCommand>, std::time::Instant)>,
 
-    /// V1.1: whether the in-viewer HTTP MCP server (data tools) has been started.
+    /// Whether the in-viewer HTTP MCP server has been started.
     /// One spawn attempt is made once a DuckDB path is configured.
     #[cfg(feature = "viewer-mcp")]
     #[serde(skip)]
@@ -1708,7 +1708,7 @@ impl SearchState {
     }
 }
 
-// ── Agent highlight helpers (Phase 3) ────────────────────────────────────────
+// ── Agent highlight helpers ──────────────────────────────────────────────────
 
 /// Reproduce the slug-part algorithm from `duckdb_data::sanitize_short`:
 /// remove spaces, extract ASCII alphanumeric runs, join with `_`, lowercase.
@@ -1811,7 +1811,7 @@ fn encode_screenshot_png(color_image: &egui::ColorImage) -> Vec<u8> {
 
 /// Apply a navigation/screenshot request to the live view (zoom / pan / scroll /
 /// filter / search / reset). Shared by the embedded chat agent and any second
-/// consumer (the V1.0 bridge) so both run identical view logic. Does NOT request
+/// consumer (the in-viewer MCP bridge) so both run identical view logic. Does NOT request
 /// the screenshot — the caller sends the `ViewportCommand` and records the
 /// awaiting slot.
 #[cfg(feature = "ai")]
@@ -1906,8 +1906,7 @@ fn apply_navigation(cx: &mut Context, windows: &mut [Window], nav: &crate::ai::P
     }
 }
 
-/// The `request_id` carried by any navigation variant.
-/// A1: build the header "Selected:" banner line from a `selection_snapshot`
+/// Build the header "Selected:" banner line from a `selection_snapshot`
 /// (`items`, `range`). Pure + egui-free so it is unit-testable, and it reads the
 /// SAME snapshot `get_selection` returns, so the header and the MCP agent agree on
 /// what is selected. Returns `None` when nothing is selected (the header then
@@ -1946,6 +1945,7 @@ fn format_selection_banner(
     Some(format!("Selected: {}", parts.join("  ·  ")))
 }
 
+/// The `request_id` carried by any navigation variant.
 #[cfg(feature = "ai")]
 fn pending_nav_request_id(nav: &crate::ai::PendingNavigation) -> u64 {
     use crate::ai::PendingNavigation;
@@ -1964,7 +1964,7 @@ fn pending_nav_request_id(nav: &crate::ai::PendingNavigation) -> u64 {
 /// path (`window.config.ai_highlights`): expand the row, dedup-push the overlay,
 /// enable rendering. Returns the matched `EntryID` (for scroll-to). Mirrors the
 /// embedded highlight-action application (kept separate to leave the embedded
-/// sole-driver path byte-for-byte unchanged); used by the MCP source. (V1.3)
+/// sole-driver path independent); used by the MCP source.
 #[cfg(feature = "ai")]
 fn apply_one_highlight(windows: &mut [Window], hl: &crate::ai::Highlight) -> Option<EntryID> {
     let mut found = None;
@@ -1992,7 +1992,7 @@ fn apply_one_highlight(windows: &mut [Window], hl: &crate::ai::Highlight) -> Opt
 }
 
 /// Clear ALL AI highlight overlays from every window. Returns the number of rows
-/// that had highlights (for a truthful ACK). (V1.3)
+/// that had highlights (for a truthful ACK).
 #[cfg(feature = "ai")]
 fn clear_all_highlights(windows: &mut [Window]) -> usize {
     let mut n = 0;
@@ -2047,7 +2047,7 @@ struct McpDrainSink {
         Option<(crate::ai::Highlight, u64, std::sync::mpsc::Sender<crate::ai::UiCommand>)>,
     /// (request_id, reply channel) for a clear-highlights request.
     pending_clear: Option<(u64, std::sync::mpsc::Sender<crate::ai::UiCommand>)>,
-    /// (request_id, reply channel) for a get_selection READ (V1.4 — non-driving).
+    /// (request_id, reply channel) for a get_selection READ (non-driving).
     pending_selection: Option<(u64, std::sync::mpsc::Sender<crate::ai::UiCommand>)>,
 }
 
@@ -2703,7 +2703,7 @@ impl Window {
         self.search_results(ui, cx);
     }
 
-    /// Highlight manager (Task 3) — reuses the search-results backend shape (count
+    /// Highlight manager — reuses the search-results backend shape (count
     /// header + ScrollArea + the zoom/expand/scroll click handler). FLAT list across
     /// `ai_highlights`, sorted by `id`; each row = an enable checkbox + the label as a
     /// button that zooms to (and expands) the highlight. Globals: toggle all / clear
@@ -2807,9 +2807,9 @@ impl ProfApp {
 
         #[cfg(feature = "ai")]
         {
-            // P3v2: restore last session's AI settings FIRST (project folder, DB
-            // path, app context, font scale, backend choice), then let explicit
-            // CLI flags overwrite — set_tool_paths only writes non-empty values.
+            // Restore last session's AI settings FIRST (project folder, DB path,
+            // wiki path), then let explicit CLI flags overwrite — set_tool_paths
+            // only writes non-empty values.
             let saved = result.cx.ai_settings.clone();
             result.cx.chat_panel.apply_persisted(&saved);
             // Pre-fill the assistant's tool paths from CLI flags / auto-detection.
@@ -3421,7 +3421,7 @@ impl ProfApp {
 impl eframe::App for ProfApp {
     /// Called to save state before shutdown.
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        // P3v2: mirror the (serde-skip) chat panel's persistable settings into
+        // Mirror the (serde-skip) chat panel's persistable settings into
         // the serialized Context so they survive restarts.
         #[cfg(feature = "ai")]
         {
@@ -3441,21 +3441,21 @@ impl eframe::App for ProfApp {
             ..
         } = self;
 
-        // V1.2: hand the embedded chat agent a clone of the shared viewport token so
+        // Hand the embedded chat agent a clone of the shared viewport token so
         // its screenshot/nav round-trips are mutually exclusive with the in-viewer
         // MCP driver (single outstanding screenshot across both). Idempotent; no
         // effect on the sole-driver path (the token is always free for it).
         #[cfg(feature = "ai")]
         cx.chat_panel.ensure_viewport_token(cx.viewport_token.clone());
 
-        // V1.1: start the in-viewer HTTP MCP server (data tools only) once a DuckDB
-        // path is configured. Runs on its OWN thread — never the egui main thread.
-        // One spawn attempt; serves run_query/overview/find_blockers over HTTP so
-        // Claude Code can connect to this live process.
+        // Start the in-viewer HTTP MCP server once a DuckDB path is configured.
+        // Runs on its OWN thread — never the egui main thread. One spawn attempt;
+        // serves the data, source, wiki, and visual tools over HTTP so Claude Code
+        // can connect to this live process.
         #[cfg(feature = "viewer-mcp")]
         if !cx.viewer_mcp_started {
             if let Some(duckdb_path) = cx.chat_panel.duckdb_path() {
-                // V1.3: mint a UiBridge (consumer MCP_CONSUMER_ID) and hand it to the
+                // Mint a UiBridge (consumer MCP_CONSUMER_ID) and hand it to the
                 // server so it advertises + routes the 9 VISUAL tools, driving this
                 // live window. The bridge's UI-side ends (mcp_event_rx / mcp_cmd_tx)
                 // are drained + replied to by the per-frame second-source loop below.
@@ -3467,22 +3467,22 @@ impl eframe::App for ProfApp {
                     .ui_bridge(crate::ai::bridge::MCP_CONSUMER_ID)
                     .with_wake(move || egui_ctx.request_repaint());
                 // Hand the configured wiki root + the LIVE project-root handle to
-                // the server (P3v2: the handle is read per request, so a folder set
-                // in the panel at ANY time reaches instructions/read_code — the old
-                // snapshot-at-spawn silently ignored late-set paths forever).
+                // the server (the handle is read per request, so a folder set in
+                // the panel at ANY time reaches instructions/read_code — a
+                // snapshot at spawn would silently ignore late-set paths forever).
                 let wiki_root = cx.chat_panel.wiki_path();
                 let code_root = cx.chat_panel.project_root_handle();
-                // P1 (Backend B): STORE the bound port instead of discarding it.
                 // Prefer the stable well-known port 8765 so existing external
                 // `claude mcp add …:8765/mcp` registrations keep working; fall back
                 // to an ephemeral port (0) only if 8765 is already taken. Either
-                // way, the REAL bound port lands in `cx.viewer_mcp_port` and the
-                // chat panel, so Backend B never assumes a port.
+                // way, the REAL bound port lands in the chat panel, so the Claude
+                // Code backend never assumes a port.
                 // The spawn also mints the per-session bearer token every POST /mcp
                 // must present (server hardening); the (port, token) pair flows to
-                // the chat panel so Backend B can build its --mcp-config.
+                // the chat panel so the Claude Code backend can build its
+                // --mcp-config.
                 let mut endpoint: Option<(u16, String)> = None;
-                // P2v2: the spawn also returns the ApprovalBroker behind POST
+                // The spawn also returns the ApprovalBroker behind POST
                 // /approve — handed to the chat panel, which renders the
                 // Deny/Allow/Always-allow dialog for hook-gated tool calls.
                 let mut approval_broker = None;
@@ -3610,7 +3610,7 @@ impl eframe::App for ProfApp {
             *last_update = Some(now);
         }
 
-        // A1: header "Selected:" banner — always visible when something is selected,
+        // Header "Selected:" banner — always visible when something is selected,
         // INDEPENDENT of whether the chat panel is open. Computed before the panel
         // closure (immutable snapshot read) so the closure can still mutably toggle
         // the chat panel.
@@ -3666,7 +3666,7 @@ impl eframe::App for ProfApp {
                 });
             });
 
-            // A1: compact, centered "Selected:" line under the menu bar — shown only
+            // Compact, centered "Selected:" line under the menu bar — shown only
             // when something is selected (no empty chrome otherwise).
             #[cfg(feature = "ai")]
             if let Some(banner) = &selection_banner {
@@ -3848,9 +3848,9 @@ impl eframe::App for ProfApp {
             // Phase 1: Check for Event::Screenshot delivered by egui.
             // Extract data inside ctx.input() closure, send outside to avoid
             // capturing &mut cx across the send call.
-            // Embedded slot is checked FIRST (unchanged behavior); the second
-            // source's slot only if the embedded one is empty, so the single egui
-            // screenshot pipeline serves whichever source is currently active.
+            // Embedded slot is checked FIRST; the second source's slot only if
+            // the embedded one is empty, so the single egui screenshot pipeline
+            // serves whichever source is currently active.
             let captured: Option<(u64, Vec<u8>, bool)> = ctx.input(|i| {
                 for event in &i.events {
                     if let egui::Event::Screenshot { image, .. } = event {
@@ -3881,17 +3881,16 @@ impl eframe::App for ProfApp {
 
             // Phase 2: Check for new navigation requests from the agent thread.
             if let Some(nav) = cx.chat_panel.take_pending_navigation() {
-                // Embedded source: apply the view change via the SHARED handler,
-                // then request the screenshot. Behavior is identical to the prior
-                // inline match — the logic now lives in `apply_navigation`, reused
-                // by the second source below.
+                // Embedded source: apply the view change via the SHARED handler
+                // (`apply_navigation`, reused by the second source below), then
+                // request the screenshot.
                 let request_id = pending_nav_request_id(&nav);
                 apply_navigation(cx, windows, &nav);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
                 cx.awaiting_screenshot = Some(request_id);
             }
 
-            // Second source (the V1.0 bridge): drain the MCP event channel and
+            // Second source (the in-viewer MCP bridge): drain the MCP event channel and
             // service ONE navigation this frame, replying on its OWN channel. Empty
             // until a `UiBridge` is minted, so this is dormant for the embedded
             // agent. Only runs when the screenshot pipeline is free this frame.
@@ -3937,7 +3936,7 @@ impl eframe::App for ProfApp {
                     };
                     let _ = reply_tx.send(crate::ai::UiCommand::Ack { request_id, message });
                 }
-                // get_selection (V1.4): a non-driving READ of the human's current
+                // get_selection: a non-driving READ of the human's current
                 // selection — the SAME state the embedded `build_selection_preamble`
                 // reads. No viewport claim, no screenshot; reply synchronously.
                 if let Some((request_id, reply_tx)) = sink.pending_selection {
@@ -4097,7 +4096,7 @@ impl eframe::App for ProfApp {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
 
-        // V1.3: while an MCP screenshot is mid-flight, keep repainting so the
+        // While an MCP screenshot is mid-flight, keep repainting so the
         // capture frame (which delivers `Event::Screenshot`) actually happens — the
         // window is otherwise idle and would stall the request to timeout. A watchdog
         // resets the slot if egui somehow never delivers the screenshot, so this
@@ -4305,7 +4304,7 @@ pub fn start(data_sources: Vec<Box<dyn DeferredDataSource>>) {
     });
 }
 
-/// V1.3: pins that the in-viewer MCP sink (`McpDrainSink`) RECORDS each visual
+/// Pins that the in-viewer MCP sink (`McpDrainSink`) RECORDS each visual
 /// variant rather than silently no-op'ing (the default `EventSink` methods are
 /// no-ops; an unrecorded request would block `UiBridge::request` to timeout). The
 /// actual UI application (`apply_navigation` / `apply_one_highlight`) needs a live
@@ -4386,7 +4385,7 @@ mod mcp_sink_tests {
     }
 }
 
-/// A1: pins the header "Selected:" banner formatting (egui-free).
+/// Pins the header "Selected:" banner formatting (egui-free).
 #[cfg(all(test, feature = "ai"))]
 mod banner_tests {
     use super::format_selection_banner;
@@ -4437,7 +4436,7 @@ mod banner_tests {
     }
 }
 
-/// Highlight-model tests (Task 1): the apply path builds an AiHighlight with the
+/// Highlight-model tests: the apply path builds an AiHighlight with the
 /// right fields and a unique, monotonic id.
 #[cfg(all(test, feature = "ai"))]
 mod highlight_model_tests {

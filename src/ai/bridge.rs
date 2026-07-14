@@ -29,8 +29,8 @@ use std::time::{Duration, Instant};
 // ── EventSink + apply_agent_event: the one shared event handler ──────────────
 
 /// The UI's response to an [`AgentEvent`]. Implemented by every consumer-facing
-/// surface (the embedded chat panel today, a headless adapter for the in-viewer
-/// MCP next). Navigation is the only required method; the chat-specific callbacks
+/// surface (the embedded chat panel and the in-viewer MCP drain sink).
+/// Navigation is the only required method; the chat-specific callbacks
 /// default to no-ops so a navigation-only consumer need not implement them.
 pub trait EventSink {
     /// A navigation / screenshot request. `reply_tx` is the channel the eventual
@@ -49,9 +49,9 @@ pub trait EventSink {
     }
     fn on_clear_highlights(&mut self) {}
 
-    /// MCP-driven (V1.2) highlight request: apply the overlay to the live timeline
-    /// and ACK on `reply_tx` (`UiCommand::Ack`). Default no-op until the live sink
-    /// is wired (V1.3); the embedded agent never emits the triggering event.
+    /// MCP-driven highlight request: apply the overlay to the live timeline
+    /// and ACK on `reply_tx` (`UiCommand::Ack`). Default no-op — the live sink
+    /// overrides it; the embedded agent never emits the triggering event.
     #[allow(clippy::too_many_arguments)]
     fn on_highlight(
         &mut self,
@@ -65,16 +65,16 @@ pub trait EventSink {
     ) {
     }
 
-    /// MCP-driven (V1.2) clear-highlights request: clear overlays and ACK on
-    /// `reply_tx`. Default no-op until the live sink is wired (V1.3).
+    /// MCP-driven clear-highlights request: clear overlays and ACK on
+    /// `reply_tx`. Default no-op — the live sink overrides it.
     fn on_clear_highlights_request(&mut self, _request_id: u64, _reply_tx: &Sender<UiCommand>) {}
 
-    /// MCP-driven (V1.4) READ of the human's timeline selection: reply with
+    /// MCP-driven READ of the human's timeline selection: reply with
     /// `UiCommand::SelectionData` on `reply_tx`. A non-driving read (no viewport
     /// token). Default no-op; the live sink (`McpDrainSink`) overrides it.
     fn on_get_selection(&mut self, _request_id: u64, _reply_tx: &Sender<UiCommand>) {}
 
-    /// Backend B (P4): interim assistant text streamed mid-turn. Default no-op —
+    /// Claude Code backend: interim assistant text streamed mid-turn. Default no-op —
     /// only the chat panel renders it (the MCP drain sink has no transcript).
     fn on_interim_text(&mut self, _text: String) {}
 
@@ -172,7 +172,7 @@ pub fn drain_source<S: EventSink>(
     }
 }
 
-/// Consumer id the embedded chat agent uses when it claims the viewport (V1.2).
+/// Consumer id the embedded chat agent uses when it claims the viewport.
 /// Distinct from [`MCP_CONSUMER_ID`] so the two drivers are mutually exclusive
 /// rather than re-entrant.
 pub const EMBEDDED_CONSUMER_ID: u64 = 0;
@@ -259,7 +259,7 @@ impl Drop for ViewportGuard {
 /// frame; this bounds how long a consumer blocks if the UI never replies).
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A thread-safe handle the future in-viewer MCP server thread holds to drive the
+/// A thread-safe handle the in-viewer MCP server thread holds to drive the
 /// live window. Mirrors the embedded agent's request/reply primitive
 /// (`emit` + `wait_for_command`) but adds the viewport-ownership guard so a
 /// non-owning consumer is cleanly locked out rather than interleaving.
@@ -328,7 +328,7 @@ impl UiBridge {
     }
 
     /// Issue a blocking READ against the live viewer WITHOUT claiming the viewport
-    /// token (V1.4). A read (e.g. `get_selection`) does not conflict with driving,
+    /// token. A read (e.g. `get_selection`) does not conflict with driving,
     /// so it must succeed even while the embedded agent or another consumer holds
     /// the viewport. Still wakes the UI so an idle window services the request.
     pub fn request_read(
@@ -545,7 +545,7 @@ mod tests {
         assert!(event_rx.try_recv().is_err());
     }
 
-    /// THE single-outstanding invariant (V1.2): with TWO sources sharing one token,
+    /// THE single-outstanding invariant: with TWO sources sharing one token,
     /// source A holds the viewport across a FULL screenshot round-trip (request ->
     /// DELAYED reply). While A's request is in flight, source B's request returns
     /// `Err("viewport busy")` (no interleaving, no clobbered slot); after A's
@@ -643,7 +643,7 @@ mod tests {
         }
     }
 
-    /// THE V1.4 read-not-blocked property: a `request_read` (e.g. get_selection)
+    /// THE read-not-blocked property: a `request_read` (e.g. get_selection)
     /// SUCCEEDS even while another consumer HOLDS the viewport token — reads don't
     /// conflict with driving — whereas a driving `request` from the same consumer is
     /// cleanly locked out ("viewport busy").

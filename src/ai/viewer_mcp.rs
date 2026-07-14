@@ -34,7 +34,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
-/// The streamable-HTTP protocol version Claude Code negotiates (Step 0: the client
+/// The streamable-HTTP protocol version Claude Code negotiates (observed: the client
 /// requested 2025-11-25 but accepted our 2025-03-26 and echoed it thereafter).
 const HTTP_PROTOCOL_VERSION: &str = "2025-03-26";
 
@@ -249,7 +249,7 @@ fn is_approve_request(raw: &[u8]) -> bool {
     req.parse(raw).is_ok() && req.method == Some("POST") && req.path == Some("/approve")
 }
 
-/// P2v2: the PreToolUse approval bridge. The hook's stdin JSON (tool_name +
+/// The PreToolUse approval bridge. The hook's stdin JSON (tool_name +
 /// tool_input + …) arrives as the POST body; the response body is the
 /// `hookSpecificOutput` decision JSON the hook prints on stdout. Same Origin +
 /// bearer checks as /mcp (the curl command in the child's settings file carries
@@ -300,7 +300,7 @@ pub fn handle_approve_request(
 /// `claude mcp add` line.
 ///
 /// `bridge` is the [`UiBridge`](crate::ai::bridge::UiBridge) minted via
-/// `Context::ui_bridge(MCP_CONSUMER_ID)`; attaching it to the `ServerCtx` (V1.3)
+/// `Context::ui_bridge(MCP_CONSUMER_ID)`; attaching it to the `ServerCtx`
 /// flips the server to advertise + route the 9 VISUAL tools, driving the live
 /// timeline. The single accept loop processes ONE connection at a time, so MCP
 /// `tools/call`s are SERIALIZED — there is no concurrent access to the bridge's
@@ -321,7 +321,7 @@ pub fn spawn(
     // Server hardening: every POST /mcp must present this bearer token. Random
     // per session; LEGION_VIEWER_MCP_TOKEN overrides for a stable registration.
     let token = session_token();
-    // P2v2: the approval broker behind POST /approve (the PreToolUse hook bridge).
+    // The approval broker behind POST /approve (the PreToolUse hook bridge).
     // Returned so core.rs can hand it to the chat panel (which renders the dialog).
     let broker = std::sync::Arc::new(crate::ai::claude_code::ApprovalBroker::new());
     eprintln!("[legion-viewer] in-viewer MCP (data + visual tools) on http://127.0.0.1:{bound}/mcp");
@@ -405,7 +405,7 @@ mod tests {
         ServerCtx::new("unused".to_owned(), None).with_protocol(HTTP_PROTOCOL_VERSION)
     }
 
-    /// A ctx with a UiBridge attached (the LIVE-wired server, V1.3). The UI-side
+    /// A ctx with a UiBridge attached (the LIVE-wired server). The UI-side
     /// channels dangle — fine for `tools/list`, which never drives the bridge.
     fn ctx_with_bridge() -> ServerCtx {
         use crate::ai::bridge::{UiBridge, ViewportToken, MCP_CONSUMER_ID};
@@ -505,8 +505,8 @@ mod tests {
 
     #[test]
     fn test_http_tools_list_visual_with_bridge() {
-        // The LIVE-wired server (ServerCtx with a UiBridge, as ProfApp builds it in
-        // V1.3) advertises the 9 visual tools over HTTP, alongside the data tools.
+        // The LIVE-wired server (ServerCtx with a UiBridge, as ProfApp builds it)
+        // advertises the 9 visual tools over HTTP, alongside the data tools.
         let req = post(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#, None);
         let (status, body) = split_response(&handle_http_request(&req, &ctx_with_bridge()));
         assert_eq!(status, 200);
@@ -667,7 +667,8 @@ mod tests {
         let v: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["result"]["isError"], false);
 
-        // Exfil probe -> isError:true, no file contents (the P0 gate holds over HTTP).
+        // Exfil probe -> isError:true, no file contents (the anti-exfil hardening
+        // of execute_run_query_raw holds over HTTP).
         let req = post(
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"run_query","arguments":{"sql":"SELECT content FROM read_text('/etc/hosts')"}}}"#,
             None,
@@ -680,7 +681,7 @@ mod tests {
         assert!(!text.contains("localhost"), "must not leak /etc/hosts: {text}");
     }
 
-    // ── P2v2: /approve (PreToolUse hook bridge) ─────────────────────────────
+    // ── /approve (PreToolUse hook bridge) ───────────────────────────────────
 
     /// Build a raw `POST /approve` request carrying a hook event body.
     fn post_approve(body: &str, auth: Option<&str>) -> Vec<u8> {

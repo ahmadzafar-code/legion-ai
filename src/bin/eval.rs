@@ -1,7 +1,7 @@
-//! `eval run` — oracle-graded tool-correctness eval (Rung 0).
+//! `eval run` — oracle-graded tool-correctness eval.
 //!
-//! Drives a natural-language question through Claude Code over the P1.1 `mcp`
-//! server, captures the agent's `final_answer`, computes the ground truth
+//! Drives a natural-language question through Claude Code over the stdio `mcp`
+//! server binary, captures the agent's `final_answer`, computes the ground truth
 //! INDEPENDENTLY, and grades programmatically.
 //!
 //! ## The one principle: ORACLE INDEPENDENCE
@@ -27,7 +27,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
-// ── Case manifest (§4) ───────────────────────────────────────────────────────
+// ── Case manifest ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 struct Case {
@@ -256,7 +256,7 @@ fn compute_oracle(case: &Case) -> Result<String, String> {
     Ok(value)
 }
 
-// ── Grader (§7) ──────────────────────────────────────────────────────────────
+// ── Grader ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug)]
 struct Grade {
@@ -899,7 +899,7 @@ fn list_fixture_ids() -> Result<Vec<String>, String> {
 /// change to the agent loop, prompts, or tool layer.
 ///
 /// Exit: 0 only if at least one case RAN and none graded fail/error. Zero-ran
-/// (everything skipped) is a FAILURE — the old soft-skip trap must not let a
+/// (everything skipped) is a FAILURE — silent skips must not let a
 /// clean checkout pretend it was gated.
 fn run_all(
     harness: &str,
@@ -1211,8 +1211,9 @@ mod tests {
             return;
         }
         let oracle = compute_oracle(&case).expect("oracle should compute + match expected");
-        // Reconciled to CLIPPED OCCUPANCY (most running time WITHIN the range): uid
-        // 221 (278.6ms in-range) wins over the old longest-single-slice uid 48.
+        // The oracle metric is CLIPPED OCCUPANCY (most running time WITHIN the
+        // range): uid 221 (278.6ms in-range) wins, not the longest-single-slice
+        // uid 48.
         assert_eq!(oracle, "221");
         assert_eq!(case.expected.as_deref(), Some("221"));
     }

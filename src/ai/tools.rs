@@ -974,14 +974,14 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     out.push_str(&format!("## Slots by Kind\n{slots}\n\n"));
 
     // ── Sample item (compact) ─────────────────────────────────────────────────
-    // `SELECT *` dumped every lifecycle + cross-ref STRUCT for one row — ~63 KB on
-    // bg4N2 (85% of the old overview, and overflowed the MCP tool-result budget).
+    // A `SELECT *` here dumps every lifecycle + cross-ref STRUCT — ~63 KB on
+    // bg4N2, enough to overflow the MCP tool-result budget on its own.
     // The Schema section already lists the columns; a 4-column projection still
     // shows the populated STRUCT SHAPE (a lifecycle struct + a cross-ref struct)
     // without the dump. Full rows are one `run_query` away.
     // The inner LIMIT 1 is wrapped in a subquery: execute_run_query_raw strips a
     // TRAILING `LIMIT n` and re-applies its 50-row cap, so a bare `... LIMIT 1`
-    // returned 50 FULL rows (the old 63 KB / 85%-of-output dump).
+    // would return 50 FULL rows (the ~63 KB dump).
     let sample = execute_run_query_raw(
         duckdb_path,
         "SELECT item_uid, title, running, critical_path FROM (\
@@ -1291,10 +1291,10 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
 
     // ── Channel copy patterns ──────────────────────────────────────────────
     // Copies live on %chan% slots and carry their cost in `lifetime` + `size`,
-    // NEVER `running` (title = "Copy"). The old `running IS NOT NULL` filter +
-    // `SUM(running.duration)` reported 0 copies / 0ms while the truth on bg4N2 is
-    // 207 distinct copies / 53.3ms. Dedup by item_uid (235 raw chan rows -> 207
-    // distinct copies). Byte volume is intentionally omitted here: `size` is a
+    // NEVER `running` (title = "Copy") — filtering on `running` reports zero
+    // copies and zero comm time. Dedup by item_uid: a multi-hop copy appears
+    // on several chan slots but must be counted once (the regression test pins
+    // the numbers). Byte volume is intentionally omitted here: `size` is a
     // unit-suffixed TEXT column, and summing it across hops double-counts
     // multi-hop copies — the "Data-Size Evidence" section reports volume with
     // the unit-aware, deduplicated query instead.
@@ -2078,8 +2078,6 @@ pub fn slug_exists(duckdb_path: &str, slug: &str) -> bool {
 /// - `has_duckdb`: include `run_query` tool (only if duckdb feature AND path is set)
 /// - `has_code`: include `read_code` tool (only if code path is configured)
 /// - `has_wiki`: include `wiki_index`/`wiki_read`/`wiki_search` (only if a wiki root is configured)
-///
-/// `screenshot` and `zoom_to` are included as stubs (Phase 3b implementation).
 pub fn tool_definitions(has_duckdb: bool, has_code: bool, has_wiki: bool) -> Vec<serde_json::Value> {
     let mut tools = Vec::new();
 
@@ -2697,7 +2695,7 @@ mod tests {
         );
     }
 
-    /// Task 2 unit (no DB): the 50-row cap is marked only when MORE than 50 rows
+    /// Unit (no DB): the 50-row cap is marked only when MORE than 50 rows
     /// were present; everything else is returned UNCHANGED.
     #[test]
     fn test_mark_truncation_if_over() {
@@ -2724,7 +2722,7 @@ mod tests {
         assert_eq!(marked[50]["_shown"], serde_json::json!(50));
     }
 
-    /// Task 2 integration: a >50-row query is marked; a small one is not.
+    /// Integration: a >50-row query is marked; a small one is not.
     /// `json_group_array`-in-one-row aggregates are len 1 → never marked.
     #[test]
     fn test_run_query_truncation_marker_live() {
@@ -2830,7 +2828,7 @@ mod tests {
         }
     }
 
-    /// P0(a): the read-only + `enable_external_access(false)` hardening must block
+    /// Exfil hardening: the read-only + `enable_external_access(false)` hardening must block
     /// table-function file reads (e.g. `read_text`) in a FROM clause, while benign
     /// SELECTs still work. The probe MUST use the FROM form: scalar `SELECT
     /// read_text(...)` raises a Binder Error regardless of hardening (false positive).
@@ -2875,7 +2873,7 @@ mod tests {
         );
     }
 
-    /// P0(c): the canonical per-`item_uid` dedup (`dedup_select_sql`) must yield
+    /// Regression (duration dedup): the canonical per-`item_uid` dedup (`dedup_select_sql`) must yield
     /// the TRUE durations for uid 48, not the inflated naive `SUM(lifetime…)`.
     /// Pins the NUMBERS (never the title). Owns a WRITABLE temp copy of the DB
     /// because the live connection is read-only (CREATE VIEW is rejected there).
@@ -2935,11 +2933,11 @@ mod tests {
         let _ = std::fs::remove_file(&tmp);
     }
 
-    /// P1.0: the find_blockers critical-path walk must be cycle-guarded. Pins ROW
+    /// Cycle guard: the find_blockers critical-path walk must be cycle-guarded. Pins ROW
     /// COUNTS and the final uid (never the word "depth-N"). Uses a DIRECT
     /// connection — the unguarded variant's 100001 rows would be impossible
-    /// through execute_run_query_raw's 50-row cap; mirrors P0(c)'s writable
-    /// temp-copy style.
+    /// through execute_run_query_raw's 50-row cap; mirrors the dedup test's
+    /// writable temp-copy style.
     #[test]
     fn test_find_blockers_cycle_guard() {
         let src = test_db_path();
@@ -3031,8 +3029,8 @@ mod tests {
         let _ = std::fs::remove_file(&tmp);
     }
 
-    /// P1.A(1): channel copies use `lifetime`, not `running`. The pre-fix overview
-    /// query (`running IS NOT NULL` on `%chan%`) reported 0 copies / 0ms — a lie;
+    /// Regression (channel copies use `lifetime`, not `running`): a buggy overview
+    /// query shape (`running IS NOT NULL` on `%chan%`) reports 0 copies / 0ms — a lie;
     /// the truth on bg4N2 is 207 distinct copies / 53.3ms via lifetime. Red→green
     /// on a DIRECT oracle connection, then asserts the real `gather_overview`
     /// (tool path) now surfaces the corrected numbers.
@@ -3109,13 +3107,12 @@ mod tests {
         rows.first()?.get(key)?.as_f64()
     }
 
-    /// P1.A(2) L1: "which task in [1.0s,1.5s] ran longest?" — scope matters. Uses a
+    /// Scope regression: "which task in [1.0s,1.5s] ran longest?" — scope matters. Uses a
     /// DETERMINISTIC per-slice argmax oracle (NOT `any_value` over multi-slice
     /// items, which is non-deterministic: uid 48 has ~33 running slices, uid 1 is a
     /// long-lived io thread). app-procs scope (cpu/gpudev) -> uid 48; all-items
     /// scope (no proc filter) -> uid 1. Asserts oracle == tool-path on both, and
-    /// that the two scopes disagree. (The spec's 221/1461 were `any_value`
-    /// artifacts — see executor log P1.A(2).)
+    /// that the two scopes disagree.
     #[test]
     fn test_l1_longest_in_range_scope_matters() {
         let src = test_db_path();
@@ -3163,7 +3160,7 @@ mod tests {
         let _ = std::fs::remove_file(&tmp);
     }
 
-    /// P1.A(2) L3: compute- vs communication-bound in [1.8s,2.3s]. compute =
+    /// Compute- vs communication-bound in [1.8s,2.3s]: compute =
     /// SUM(running) on cpu/gpudev (dedup'd) ~= 478.7ms; comm = SUM(lifetime) on
     /// chan (dedup'd) ~= 49.8ms -> computation-bound. The comm side is the key
     /// parity check: the tool-path (lifetime-based) comm query must equal the

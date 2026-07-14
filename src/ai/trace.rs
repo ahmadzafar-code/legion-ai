@@ -1,4 +1,4 @@
-//! Structured tracing for the AI agent loop (Task 12).
+//! Structured tracing for the AI agent loop.
 //!
 //! Emits one JSON Line per closed span to `{out_dir}/agent_traces/agent.jsonl`.
 //! Span hierarchy: `agent.run` → `agent.turn` → {`agent.tool_call`, `agent.claude_api`}.

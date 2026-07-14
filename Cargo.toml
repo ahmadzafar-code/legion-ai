@@ -27,7 +27,7 @@ client = ["dep:reqwest", "dep:url"]
 server = ["dep:actix-cors", "dep:actix-web"]
 nvtxw = ["dep:nvtxw"]
 ai = ["dep:ureq", "dep:serde_json", "dep:image", "dep:base64", "dep:tracing", "dep:tracing-subscriber", "dep:egui_commonmark", "dep:rfd"]  # AI analysis + screenshot encoding + agent tracing + chat markdown + native file dialogs
-# In-viewer HTTP MCP server (V1.1). OFF by default — the 4 standard combos skip it.
+# In-viewer HTTP MCP server. OFF by default — the 4 standard combos skip it.
 # Verified surface (empirical, claude-code 2.1.150): plain POST /mcp, Content-Length
 # JSON, single application/json response, Connection: close, no SSE/keep-alive/
 # session-id needed -> httparse + std::net::TcpListener (smallest network surface).
@@ -68,7 +68,7 @@ base64 = { version = "0.22", optional = true }
 # lists, fenced code blocks, tables — Claude-Desktop-like). 0.18 = egui 0.29.
 egui_commonmark = { version = "0.18", optional = true }
 
-# ai agent tracing (Task 12):
+# ai agent tracing:
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["json", "env-filter", "fmt", "registry"], optional = true }
 
@@ -100,7 +100,7 @@ nvtxw = { version = "0.1", optional = true }
 env_logger = "0.11"
 rayon = "1.10"
 reqwest = { version = "0.12", features = ["blocking"], optional = true }
-# ai chat panel (P3v2): native OS folder/file dialogs for the Project-folder and
+# ai chat panel: native OS folder/file dialogs for the Project-folder and
 # DB "Browse…" buttons. Native-only — the wasm build has no filesystem paths.
 rfd = { version = "0.15", optional = true }
 
