@@ -333,6 +333,12 @@ struct Context {
 
     debug: bool,
 
+    /// Hide the left controls sidebar (toggled from the top menu bar).
+    /// Inverted flag so state persisted before the field existed
+    /// (absent -> false) keeps the sidebar visible.
+    #[serde(default)]
+    sidebar_hidden: bool,
+
     #[serde(skip)]
     show_controls: bool,
 
@@ -3668,6 +3674,18 @@ impl eframe::App for ProfApp {
                     }
                 });
 
+                // Toggle for the left controls sidebar — the counterpart of the
+                // Co-Pilot toggle on the right. Text-only (hamburger glyphs are
+                // tofu in egui's default fonts); subtle selected fill while open.
+                if ui
+                    .selectable_label(!cx.sidebar_hidden, "Controls")
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text("Show / hide the controls sidebar")
+                    .clicked()
+                {
+                    cx.sidebar_hidden = !cx.sidebar_hidden;
+                }
+
                 // Right-aligned Legion AI Co-Pilot toggle button
                 #[cfg(feature = "ai")]
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -3721,79 +3739,85 @@ impl eframe::App for ProfApp {
             }
         });
 
-        egui::SidePanel::left("side_panel").show(ctx, |ui| {
-            let body = TextStyle::Body.resolve(ui.style()).size;
-            let heading = TextStyle::Heading.resolve(ui.style()).size;
-            // Just set this on every frame for now
-            cx.subheading_size = (heading + body) * 0.5;
+        // Toggleable from the top menu bar ("Controls"). All subheading_size
+        // consumers live inside this panel, so skipping the per-frame compute
+        // while hidden is safe — it recomputes at the top of the closure the
+        // frame the panel reappears.
+        if !cx.sidebar_hidden {
+            egui::SidePanel::left("side_panel").show(ctx, |ui| {
+                let body = TextStyle::Body.resolve(ui.style()).size;
+                let heading = TextStyle::Heading.resolve(ui.style()).size;
+                // Just set this on every frame for now
+                cx.subheading_size = (heading + body) * 0.5;
 
-            const WIDGET_PADDING: f32 = 8.0;
-            ui.add_space(WIDGET_PADDING);
+                const WIDGET_PADDING: f32 = 8.0;
+                ui.add_space(WIDGET_PADDING);
 
-            for window in windows.iter_mut() {
-                egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    window.controls(ui, cx);
-                });
-            }
+                for window in windows.iter_mut() {
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        window.controls(ui, cx);
+                    });
+                }
 
-            for window in windows.iter_mut() {
-                egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    window.search_controls(ui, cx);
-                });
-            }
+                for window in windows.iter_mut() {
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        window.search_controls(ui, cx);
+                    });
+                }
 
-            // Highlight manager — under the profile-search section. Reuses search's
-            // count + ScrollArea + zoom/expand click backend. Subsumes the former
-            // standalone Toggle/Delete highlight buttons (now its globals row).
-            #[cfg(feature = "ai")]
-            for window in windows.iter_mut() {
-                egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    window.highlight_manager(ui, cx);
-                });
-            }
+                // Highlight manager — under the profile-search section. Reuses search's
+                // count + ScrollArea + zoom/expand click backend. Subsumes the former
+                // standalone Toggle/Delete highlight buttons (now its globals row).
+                #[cfg(feature = "ai")]
+                for window in windows.iter_mut() {
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        window.highlight_manager(ui, cx);
+                    });
+                }
 
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 0.0;
-                    ui.label("powered by ");
-                    ui.hyperlink_to("egui", "https://github.com/emilk/egui");
-                    ui.label(" and ");
-                    ui.hyperlink_to(
-                        "eframe",
-                        "https://github.com/emilk/egui/tree/master/crates/eframe",
-                    );
-                    ui.label(".");
-                });
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        ui.label("powered by ");
+                        ui.hyperlink_to("egui", "https://github.com/emilk/egui");
+                        ui.label(" and ");
+                        ui.hyperlink_to(
+                            "eframe",
+                            "https://github.com/emilk/egui/tree/master/crates/eframe",
+                        );
+                        ui.label(".");
+                    });
 
-                ui.horizontal(|ui| {
-                    egui::widgets::global_theme_preference_buttons(ui);
-                });
+                    ui.horizontal(|ui| {
+                        egui::widgets::global_theme_preference_buttons(ui);
+                    });
 
-                ui.horizontal(|ui| {
-                    if ui.button("Show Controls").clicked() {
-                        cx.show_controls = true;
-                    }
-
-                    ui.toggle_value(&mut cx.debug, "🛠 Debug");
-
-                    #[cfg(not(target_arch = "wasm32"))]
-                    {
-                        if cx.debug {
-                            ui.label(format!("FPS: {_fps:.0}"));
+                    ui.horizontal(|ui| {
+                        if ui.button("Show Controls").clicked() {
+                            cx.show_controls = true;
                         }
-                    }
+
+                        ui.toggle_value(&mut cx.debug, "🛠 Debug");
+
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            if cx.debug {
+                                ui.label(format!("FPS: {_fps:.0}"));
+                            }
+                        }
+                    });
+
+                    // (The former standalone "Toggle highlights" / "Delete highlights"
+                    // buttons moved into the highlight manager's globals row above.)
+
+                    ui.separator();
+                    egui::warn_if_debug_build(ui);
                 });
-
-                // (The former standalone "Toggle highlights" / "Delete highlights"
-                // buttons moved into the highlight manager's globals row above.)
-
-                ui.separator();
-                egui::warn_if_debug_build(ui);
             });
-        });
+        }
 
         // AI Chat panel — must be added BEFORE CentralPanel in egui layout
         #[cfg(feature = "ai")]
