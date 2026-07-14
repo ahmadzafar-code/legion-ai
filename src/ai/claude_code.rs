@@ -590,6 +590,27 @@ impl ClaudeCodeAgent {
             })
     }
 
+    /// Gracefully stop the in-flight turn (the composer's Stop button): queue a
+    /// stream-json `control_request { subtype: "interrupt" }` on the child's
+    /// stdin. claude ends the current turn and still emits its terminal `result`
+    /// line, so the panel's pending state clears through the normal event path —
+    /// and the child STAYS ALIVE: the session continues (unlike [`Self::hard_stop`]).
+    pub fn interrupt(&self) -> Result<(), String> {
+        static STOP_SEQ: AtomicU64 = AtomicU64::new(1);
+        let line = interrupt_line(STOP_SEQ.fetch_add(1, Ordering::Relaxed));
+        self.stdin_tx
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or("Claude Code backend is shutting down")?
+            .send(line)
+            .map_err(|_| {
+                "Claude Code subprocess is no longer accepting input (it may have \
+                 exited — check the transcript for an error)"
+                    .to_string()
+            })
+    }
+
     /// HARD STOP: kill the child now (used by "↺ New session"). NEVER conflated
     /// with Drop — Drop also reaps+joins.
     pub fn hard_stop(&self) {
@@ -599,6 +620,18 @@ impl ClaudeCodeAgent {
             kill_child(child);
         }
     }
+}
+
+/// The stream-json interrupt control line (the Agent-SDK wire shape). claude
+/// echoes the `request_id` in a `control_response`, which the stdout pump
+/// treats as noise (`map_noise_lines_emit_nothing` pins this).
+fn interrupt_line(seq: u64) -> String {
+    json!({
+        "type": "control_request",
+        "request_id": format!("legion-stop-{seq}"),
+        "request": { "subtype": "interrupt" }
+    })
+    .to_string()
 }
 
 impl Drop for ClaudeCodeAgent {
@@ -1444,6 +1477,16 @@ mod tests {
         }
     }
 
+    /// The Stop button's wire line: a well-formed stream-json interrupt
+    /// control_request with a unique, recognizable request_id.
+    #[test]
+    fn interrupt_line_is_wellformed_control_request() {
+        let v: Value = serde_json::from_str(&interrupt_line(7)).unwrap();
+        assert_eq!(v["type"], "control_request");
+        assert_eq!(v["request_id"], "legion-stop-7");
+        assert_eq!(v["request"]["subtype"], "interrupt");
+    }
+
     /// `result.usage` + `total_cost_usd` surface as a compact note on Complete;
     /// zero components are omitted.
     #[test]
@@ -1483,6 +1526,8 @@ mod tests {
             r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"},"session_id":"s"}"#,
             r#"{"type":"control_request","request_id":"r","request":{"subtype":"oauth_token_refresh"}}"#,
             r#"{"type":"control_cancel_request","request_id":"r"}"#,
+            // claude's ack of OUR interrupt control_request (Stop button).
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"legion-stop-1"}}"#,
             "not json at all",
             "", // truncated-by-cap lines parse to nothing
         ] {

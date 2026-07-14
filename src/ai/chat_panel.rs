@@ -216,6 +216,10 @@ pub struct ChatPanel {
     /// Pending question from the agent (human-in-the-loop): (request_id, question, options).
     /// Rendered in the composer; answered via `send_user_answer`.
     pending_question: Option<(u64, String, Vec<String>)>,
+    /// True from a Stop click until the interrupted turn's terminal event —
+    /// dims the Stop button (one interrupt per turn) and renders the turn's
+    /// terminal error as a plain "Stopped." instead of a scary error.
+    stop_requested: bool,
     /// Request to clear all timeline highlight overlays (from the Clear button or
     /// the agent's `clear_highlights` tool), consumed by core.rs.
     pending_clear_highlights: bool,
@@ -284,6 +288,7 @@ impl Clone for ChatPanel {
             ui_command_tx: self.ui_command_tx.clone(),
             pending_navigation: self.pending_navigation.clone(),
             pending_question: self.pending_question.clone(),
+            stop_requested: self.stop_requested,
             pending_clear_highlights: self.pending_clear_highlights,
             pending_clear_selection: self.pending_clear_selection,
             pending_highlight_actions: self.pending_highlight_actions.clone(),
@@ -348,6 +353,7 @@ impl ChatPanel {
             ui_command_tx: None,
             pending_navigation: None,
             pending_question: None,
+            stop_requested: false,
             pending_clear_highlights: false,
             pending_clear_selection: false,
             pending_highlight_actions: Vec::new(),
@@ -1145,6 +1151,7 @@ impl ChatPanel {
                         agent.hard_stop();
                         *self.event_rx.lock().unwrap() = None;
                         self.pending_request = false;
+                        self.stop_requested = false;
                     }
                     // Deny any in-flight approval and clear the session's
                     // always-allow rules — they must not outlive the child.
@@ -1595,36 +1602,110 @@ impl ChatPanel {
                     self.try_submit();
                 }
 
-                // Bottom row: + add-context | model pill | ⏎ Send
+                // Bottom row: + add-context | model pill | ⏎ Send / ■ Stop
                 ui.horizontal(|ui| {
                     self.ui_plus_menu(ui);
 
-                    // Right-aligned: Send
+                    // Right-aligned: Stop while a Claude Code turn is in flight
+                    // (standard chatbot UI), otherwise Send.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add_enabled(
-                                enabled && !self.input_buffer.trim().is_empty(),
-                                egui::Button::new(
-                                    // ↵ lives in Hack (the monospace font) —
-                                    // the proportional font lacks all the
-                                    // arrow glyphs (they render as boxes).
-                                    egui::RichText::new("↵")
-                                        .monospace()
-                                        .size(19.0)
-                                        .color(egui::Color32::WHITE),
+                        #[cfg(feature = "viewer-mcp")]
+                        let cc_turn_running = self.pending_request
+                            && self.pending_question.is_none()
+                            && self.cc_agent.lock().unwrap().is_some();
+                        #[cfg(not(feature = "viewer-mcp"))]
+                        let cc_turn_running = false;
+
+                        if cc_turn_running {
+                            #[cfg(feature = "viewer-mcp")]
+                            self.ui_stop_button(ui);
+                        } else {
+                            let ready = enabled && !self.input_buffer.trim().is_empty();
+                            if ui
+                                .add_enabled(
+                                    ready,
+                                    egui::Button::new(
+                                        // ↵ lives in Hack (the monospace font) —
+                                        // the proportional font lacks all the
+                                        // arrow glyphs (they render as boxes).
+                                        egui::RichText::new("↵")
+                                            .monospace()
+                                            .size(19.0)
+                                            .color(egui::Color32::WHITE),
+                                    )
+                                    // Accent fill when ready — the flat dark disc
+                                    // read as non-interactive; pale when there is
+                                    // nothing to send.
+                                    .fill(if ready {
+                                        egui::Color32::from_rgb(193, 95, 60)
+                                    } else {
+                                        egui::Color32::from_rgb(190, 190, 190)
+                                    })
+                                    .rounding(18.0)
+                                    .min_size(egui::vec2(36.0, 36.0)),
                                 )
-                                .fill(egui::Color32::from_rgb(50, 50, 50))
-                                .rounding(18.0)
-                                .min_size(egui::vec2(36.0, 36.0)),
-                            )
-                            .on_hover_cursor(egui::CursorIcon::PointingHand)
-                            .clicked()
-                        {
-                            self.try_submit();
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                .on_hover_text("Send")
+                                .clicked()
+                            {
+                                self.try_submit();
+                            }
                         }
                     });
                 });
             });
+    }
+
+    /// The composer Stop control (standard chatbot UI): a filled circle with a
+    /// painted square — `rect_filled`, not a glyph, so font coverage can't tofu
+    /// it. Shown in place of Send while a Claude Code turn is in flight. Click
+    /// queues a graceful `interrupt` on the child's stdin: the turn ends, the
+    /// child survives, the session continues (↺ New session stays the hard
+    /// kill). Dims once a stop is already queued.
+    #[cfg(feature = "viewer-mcp")]
+    fn ui_stop_button(&mut self, ui: &mut egui::Ui) {
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(36.0, 36.0), egui::Sense::click());
+        let active = !self.stop_requested;
+        let fill = if !active {
+            egui::Color32::from_rgb(190, 190, 190) // stop already queued — inert
+        } else if resp.hovered() {
+            egui::Color32::from_rgb(216, 116, 80)
+        } else {
+            egui::Color32::from_rgb(193, 95, 60)
+        };
+        let painter = ui.painter();
+        painter.circle_filled(rect.center(), 18.0, fill);
+        painter.rect_filled(
+            egui::Rect::from_center_size(rect.center(), egui::vec2(12.0, 12.0)),
+            2.0,
+            egui::Color32::WHITE,
+        );
+        let resp = resp
+            .on_hover_cursor(if active {
+                egui::CursorIcon::PointingHand
+            } else {
+                egui::CursorIcon::Default
+            })
+            .on_hover_text(if active { "Stop generating" } else { "Stopping…" });
+        if active && resp.clicked() {
+            // Scope the lock: add_message needs &mut self after it.
+            let err = {
+                let guard = self.cc_agent.lock().unwrap();
+                match guard.as_ref() {
+                    Some(agent) => agent.interrupt().err(),
+                    None => Some("no Claude Code turn to stop".to_string()),
+                }
+            };
+            match err {
+                None => {
+                    self.stop_requested = true;
+                    self.add_message(ChatMessageKind::System, "Stopping…");
+                }
+                Some(e) => {
+                    self.add_message(ChatMessageKind::System, format!("Stop failed: {e}"));
+                }
+            }
+        }
     }
 
     /// The ＋ context menu (Claude-Desktop style): the ONE place to add context.
@@ -2211,12 +2292,20 @@ impl crate::ai::bridge::EventSink for ChatPanel {
                 None => self.add_message(ChatMessageKind::System, "Done."),
             }
         }
+        self.stop_requested = false;
         self.pending_request = false;
         self.end_of_turn_channel_cleanup();
     }
 
     fn on_error(&mut self, error: String) {
-        self.add_message(ChatMessageKind::System, format!("Error: {error}"));
+        if self.stop_requested {
+            // The user interrupted the turn on purpose — claude reports the
+            // abort as an error result; render the standard-UI "Stopped.".
+            self.add_message(ChatMessageKind::System, "Stopped.");
+        } else {
+            self.add_message(ChatMessageKind::System, format!("Error: {error}"));
+        }
+        self.stop_requested = false;
         self.pending_request = false;
         self.end_of_turn_channel_cleanup();
     }
