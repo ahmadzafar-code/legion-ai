@@ -807,6 +807,49 @@ impl ChatPanel {
     /// server (no key). Exactly one backend runs a request at a time —
     /// `pending_request` is the shared guard, and the settings toggle is
     /// disabled while a request is in flight.
+    /// Inline context from ＋-menu file attachments, rendered as fenced blocks
+    /// (folders/.duckdb never become attachments — they configure the project
+    /// root / DB path instead). Capped per file and in total so a large attach
+    /// cannot blow the request. Used by BOTH engines: the native agent prepends
+    /// it to the request, the Claude Code backend appends it to the turn text.
+    fn build_attachment_context(&self) -> String {
+        let mut context_section = String::new();
+        let mut total_context_bytes: usize = 0;
+        let max_total_context: usize = 80_000;
+        let max_per_file: usize = 16_000;
+
+        for att in &self.attachments {
+            if total_context_bytes >= max_total_context {
+                break;
+            }
+            match std::fs::read_to_string(&att.path) {
+                Ok(content) => {
+                    let truncated = if content.len() > max_per_file {
+                        format!(
+                            "{}…\n(truncated at {} bytes)",
+                            &content[..max_per_file],
+                            max_per_file
+                        )
+                    } else {
+                        content
+                    };
+                    context_section.push_str(&format!(
+                        "## Attached file: {}\n```\n{}\n```\n\n",
+                        att.display_name, truncated
+                    ));
+                    total_context_bytes += truncated.len();
+                }
+                Err(e) => {
+                    context_section.push_str(&format!(
+                        "## Attached file: {} (could not read: {})\n\n",
+                        att.display_name, e
+                    ));
+                }
+            }
+        }
+        context_section
+    }
+
     /// Resolve which engine serves this session (cached until ↺): the user's
     /// own Claude Code when installed — their login/API key/model choices all
     /// live there — else the built-in API loop (key from popup or env).
@@ -859,7 +902,7 @@ impl ChatPanel {
                 self.add_message(
                     ChatMessageKind::System,
                     "⚠ Claude Code backend needs the in-viewer MCP server. Load a \
-                     profile (set the DB path in the tools popover) so the server \
+                     profile (connect the profile DuckDB via the + menu) so the server \
                      starts, then try again. (If the server failed to bind, the \
                      terminal log has the reason — a restart is needed in that case.)",
                 );
@@ -916,12 +959,27 @@ impl ChatPanel {
                 }
             }
 
+            // Attachment context + timeline-selection preamble travel WITH the
+            // turn text — without this, chips render but their content silently
+            // never reaches the model on this engine.
+            let mut turn_text = String::new();
+            let preamble = self.build_selection_preamble();
+            if !preamble.is_empty() {
+                turn_text.push_str(&preamble);
+                turn_text.push('\n');
+            }
+            let attachment_context = self.build_attachment_context();
+            if !attachment_context.is_empty() {
+                turn_text.push_str(&attachment_context);
+            }
+            turn_text.push_str(&user_query);
+
             let send_result = self
                 .cc_agent
                 .lock()
                 .unwrap()
                 .as_ref()
-                .map(|agent| agent.send_turn(&user_query));
+                .map(|agent| agent.send_turn(&turn_text));
             match send_result {
                 Some(Ok(())) => {
                     self.add_message(
@@ -968,43 +1026,7 @@ impl ChatPanel {
         let code_path = effective_project_root(&self.code_path_buffer).unwrap_or_default();
         let wiki_path = self.wiki_path_buffer.trim().to_owned();
 
-        // Collect inline context from @ attachments (Part D)
-        let mut context_section = String::new();
-        let mut total_context_bytes: usize = 0;
-        let max_total_context: usize = 80_000;
-        let max_per_file: usize = 16_000;
-
-        for att in &self.attachments {
-            if total_context_bytes >= max_total_context {
-                break;
-            }
-            // ＋-menu attachments are plain files (folders/.duckdb route to the
-            // project-root / DB settings instead of becoming attachments).
-            match std::fs::read_to_string(&att.path) {
-                Ok(content) => {
-                    let truncated = if content.len() > max_per_file {
-                        format!(
-                            "{}…\n(truncated at {} bytes)",
-                            &content[..max_per_file],
-                            max_per_file
-                        )
-                    } else {
-                        content
-                    };
-                    context_section.push_str(&format!(
-                        "## Attached file: {}\n```\n{}\n```\n\n",
-                        att.display_name, truncated
-                    ));
-                    total_context_bytes += truncated.len();
-                }
-                Err(e) => {
-                    context_section.push_str(&format!(
-                        "## Attached file: {} (could not read: {})\n\n",
-                        att.display_name, e
-                    ));
-                }
-            }
-        }
+        let context_section = self.build_attachment_context();
 
         self.add_message(ChatMessageKind::User, &user_query);
         let time_hint = if self.model_selection.contains("opus") {

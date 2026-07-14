@@ -1,14 +1,13 @@
 //! Generalized agent↔UI bridge: lets MORE THAN ONE consumer drive the live
 //! viewer through the same request/reply primitive the embedded chat agent uses.
 //!
-//! V1.0 is a FOUNDATIONAL REFACTOR only — no HTTP, no MCP server, no new tools.
-//! It provides three durable pieces, all unit-tested here without a live window:
+//! Three durable pieces, all unit-tested here without a live window:
 //!
 //! 1. [`EventSink`] + [`apply_agent_event`] — the ONE shared handler that turns an
 //!    [`AgentEvent`] into a UI effect, routing any reply to the caller-supplied
-//!    `reply_tx`. The same logic services events from any number of sources; the
-//!    embedded [`crate::ai::ChatPanel`] implements `EventSink`, and so will the
-//!    future in-viewer MCP server.
+//!    `reply_tx`. The same logic services events from any number of sources:
+//!    the embedded [`crate::ai::ChatPanel`] implements `EventSink`, and the
+//!    in-viewer MCP server drives the same handler through a [`UiBridge`].
 //! 2. [`ViewportToken`] / [`ViewportGuard`] — structural single-driver enforcement.
 //!    A non-owning consumer gets `Err("viewport busy")` instead of interleaving.
 //!    The guard releases the viewport on EVERY exit path (success, error, timeout,
@@ -17,8 +16,8 @@
 //! 3. [`UiBridge`] — the thread-safe handle a second consumer holds to issue a
 //!    blocking [`UiBridge::request`] and receive the matching reply.
 //!
-//! The embedded chat agent's behavior is unchanged: it remains the transparent,
-//! sole driver in V1.0.
+//! When no second consumer exists, the embedded chat agent remains the
+//! transparent sole driver (no token claim on its path).
 
 use super::agent::{AgentEvent, AgentResponse, UiCommand};
 use super::PendingNavigation;

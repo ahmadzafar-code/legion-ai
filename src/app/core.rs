@@ -376,18 +376,16 @@ struct Context {
     #[serde(skip)]
     ai_region_selection: Option<Interval>,
 
-    /// V1.0 bridge: the single viewport-ownership token. The embedded chat agent
-    /// drives transparently (sole driver in V1.0); a second consumer claims it via
-    /// the `UiBridge` from [`Context::ui_bridge`]. Read only by `ui_bridge`, which
-    /// has no caller until V1.1 wires the in-viewer MCP server.
+    /// The single viewport-ownership token: the embedded chat agent and the
+    /// in-viewer MCP server each claim it per screenshot/navigation round-trip,
+    /// so at most one drives the view at a time.
     #[cfg(feature = "ai")]
     #[serde(skip)]
-    #[allow(dead_code)]
     viewport_token: crate::ai::bridge::ViewportToken,
 
-    /// Second event source (the future in-viewer MCP). Arc-wrapped so `Context`
+    /// Second event source (the in-viewer MCP server). Arc-wrapped so `Context`
     /// stays `Clone`; drained every frame alongside the embedded source, with
-    /// replies routed to `mcp_cmd_tx`. Empty/unused until a `UiBridge` is minted.
+    /// replies routed to `mcp_cmd_tx`. Empty until a `UiBridge` is minted.
     #[cfg(feature = "ai")]
     #[serde(skip)]
     mcp_event_rx:
@@ -427,17 +425,15 @@ struct Context {
 
 #[cfg(feature = "ai")]
 impl Context {
-    /// Mint a [`UiBridge`](crate::ai::bridge::UiBridge) for a second consumer (the
-    /// future in-viewer MCP server thread) bound to `consumer_id`. Creates the
-    /// second event/command channel pair, stores the UI-side ends so the per-frame
-    /// loop drains and replies on them, and hands the consumer-side ends + a clone
-    /// of the shared viewport token to the bridge. The embedded chat agent is
-    /// unaffected; the bridge's `request` is structurally locked out via the token
-    /// while another consumer owns the viewport.
-    ///
-    /// No caller until V1.1 (the in-viewer MCP server) — the per-frame drain and
-    /// channels it wires are already live, so V1.1 only needs to call this + spawn
-    /// the server thread.
+    /// Mint a [`UiBridge`](crate::ai::bridge::UiBridge) for a second consumer
+    /// (the in-viewer MCP server thread) bound to `consumer_id`. Creates the
+    /// second event/command channel pair, stores the UI-side ends so the
+    /// per-frame loop drains and replies on them, and hands the consumer-side
+    /// ends + a clone of the shared viewport token to the bridge. The embedded
+    /// chat agent is unaffected; the bridge's `request` is structurally locked
+    /// out via the token while another consumer owns the viewport.
+    // dead_code: unused in {ai}-without-viewer-mcp builds (the only caller is
+    // the server spawn, which is viewer-mcp-gated).
     #[allow(dead_code)]
     pub fn ui_bridge(&mut self, consumer_id: u64) -> crate::ai::bridge::UiBridge {
         let (event_tx, event_rx) = std::sync::mpsc::channel::<crate::ai::AgentEvent>();

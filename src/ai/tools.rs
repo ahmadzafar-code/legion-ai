@@ -126,7 +126,8 @@ fn walk_dir_tree(
 /// the `list_files` tool implementation.
 pub fn recursive_file_tree(code_root: &str) -> Result<String, String> {
     if code_root.is_empty() {
-        return Err("Code path not configured. Set it in the Settings panel.".into());
+        return Err("Code path not configured. Connect a code repo via the + menu, or \
+                    launch with --code <dir>.".into());
     }
 
     let root = Path::new(code_root);
@@ -150,7 +151,8 @@ pub fn recursive_file_tree(code_root: &str) -> Result<String, String> {
 /// If `path` is empty or `"."`, lists from the code root itself.
 pub fn execute_list_files(code_root: &str, path: &str) -> Result<String, String> {
     if code_root.is_empty() {
-        return Err("Code path not configured. Set it in the Settings panel.".into());
+        return Err("Code path not configured. Connect a code repo via the + menu, or \
+                    launch with --code <dir>.".into());
     }
 
     let target = if path.is_empty() || path == "." {
@@ -450,7 +452,10 @@ ORDER BY w.depth"
 /// The path must be relative and within `code_root` — path traversal (`..`) is rejected.
 pub fn execute_read_code(code_root: &str, path: &str) -> Result<String, String> {
     if code_root.is_empty() {
-        return Err("Code path not configured. Set it in the 🔧 Tools popover (or launch with --code).".into());
+        return Err(
+            "Code path not configured. Connect a code repo via the + menu, or launch with --code <dir>."
+                .into(),
+        );
     }
 
     if path.contains("..") || path.starts_with('/') || path.starts_with('\\') {
@@ -1288,7 +1293,10 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     // NEVER `running` (title = "Copy"). The old `running IS NOT NULL` filter +
     // `SUM(running.duration)` reported 0 copies / 0ms while the truth on bg4N2 is
     // 207 distinct copies / 53.3ms. Dedup by item_uid (235 raw chan rows -> 207
-    // distinct copies). Volume is intentionally omitted (see TODO below).
+    // distinct copies). Byte volume is intentionally omitted here: `size` is a
+    // unit-suffixed TEXT column, and summing it across hops double-counts
+    // multi-hop copies — the "Data-Size Evidence" section reports volume with
+    // the unit-aware, deduplicated query instead.
     let copies = execute_run_query_raw(
         duckdb_path,
         "SELECT COUNT(*) AS copy_count, \
@@ -1609,7 +1617,8 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     // ── Channel direction analysis ─────────────────────────────────────────
     // Per-channel comm activity. Copies use `lifetime` (not `running`); dedup by
     // item_uid, assigning each copy to its min(entry_slug) so the per-channel
-    // total matches the 53.3ms whole-run figure. Volume omitted (see TODO above).
+    // total matches the whole-run copy figure. Byte volume is reported by the
+    // "Data-Size Evidence" section instead (unit-aware, deduplicated).
     let chan_dir = execute_run_query_raw(
         duckdb_path,
         "SELECT entry_slug, COUNT(*) AS copy_count, \
@@ -2239,9 +2248,7 @@ pub fn tool_definitions(has_duckdb: bool, has_code: bool, has_wiki: bool) -> Vec
             "description":
                 "Read an application source file (path relative to the configured code root). \
                  Use to understand task logic, mapper policies, and application structure. \
-                 Use list_files first to discover available files. \
-                 Do NOT call read_code for a file that was already pre-loaded in the scan \
-                 message — check the 'Application Source Code (pre-loaded)' section above first.",
+                 Use list_files first to discover available files.",
             "input_schema": {
                 "type": "object",
                 "properties": {

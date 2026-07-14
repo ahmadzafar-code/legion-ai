@@ -1,8 +1,9 @@
-//! In-viewer HTTP MCP server (V1.1) — DATA tools only, served from the running
-//! viewer so Claude Code can connect to the live process via
+//! In-viewer HTTP MCP server — serves the data, source, wiki, and visual tools
+//! from the running viewer so an external agent (e.g. Claude Code) can drive the
+//! live process via
 //! `claude mcp add --transport http legion-viewer http://127.0.0.1:PORT/mcp`.
 //!
-//! Transport surface (empirically verified against claude-code 2.1.150, Step 0):
+//! Transport surface (empirically verified against claude-code 2.1.150+):
 //! a single `POST /mcp` per request with a `Content-Length` JSON body; the server
 //! replies with ONE plain `application/json` JSON-RPC message and `Connection:
 //! close`. The client advertises `Accept: …text/event-stream` and `Connection:
@@ -11,15 +12,17 @@
 //! no session-id, no keep-alive required.
 //!
 //! Protocol logic is the shared [`crate::ai::mcp_core`] dispatch core — this file
-//! is only the HTTP transport. Data tools only; NO visual tools, NO `UiBridge`,
-//! NO screenshots (that is V1.2). Every query still routes through the hardened
-//! `execute_run_query_raw` (no new DuckDB connection).
+//! is only the HTTP transport (plus the `/approve` route for the Claude Code
+//! backend's tool-approval bridge). The [`spawn`]ed server carries a `UiBridge`,
+//! so visual tools (screenshot/zoom/highlight/…) drive the live timeline. Every
+//! query still routes through the hardened `execute_run_query_raw` (no new
+//! DuckDB connection).
 //!
 //! SECURITY: binds 127.0.0.1 ONLY (never 0.0.0.0), rejects any request whose
 //! `Origin` header is present and not a loopback origin (DNS-rebinding / CSRF
-//! defense — a real rmcp CVE class, not theoretical), and — server hardening,
-//! Backend-B plan — requires `Authorization: Bearer <token>` on every `POST
-//! /mcp` when the [`ServerCtx`] carries a token ([`spawn`] always sets one).
+//! defense — a real CVE class in MCP servers, not theoretical), and requires
+//! `Authorization: Bearer <token>` on every `POST /mcp` when the [`ServerCtx`]
+//! carries a token ([`spawn`] always sets one).
 //! Without the token requirement, ANY local process could drive the tools: the
 //! Origin check passes when no Origin header is present. The token is random
 //! per session (override with `LEGION_VIEWER_MCP_TOKEN` for a stable external

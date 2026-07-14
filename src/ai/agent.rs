@@ -727,7 +727,7 @@ impl AgentSession {
                 self.messages.push(serde_json::json!({
                     "role": "user",
                     "content": "You've run enough queries. Please provide your final analysis \
-                                now, including the highlights JSON block."
+                                now, marking any timeline regions with the `highlight` tool."
                 }));
             }
 

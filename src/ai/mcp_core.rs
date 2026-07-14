@@ -382,7 +382,7 @@ fn tools_call_result(params: &Value, ctx: &ServerCtx) -> Value {
             }
             None => (
                 "list_files unavailable: no project folder configured (set it in the \
-                 viewer's ⚙ Settings, or start with --code / --code-root)."
+                 viewer's + menu, or start with --code / --code-root)."
                     .to_owned(),
                 true,
             ),
@@ -394,7 +394,7 @@ fn tools_call_result(params: &Value, ctx: &ServerCtx) -> Value {
             },
             None => (
                 "read_code unavailable: no project folder configured (set it in the \
-                 viewer's ⚙ Settings, or start with --code / --code-root)."
+                 viewer's + menu, or start with --code / --code-root)."
                     .to_owned(),
                 true,
             ),

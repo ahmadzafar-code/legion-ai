@@ -1,8 +1,11 @@
-//! Backend B ("your Claude Code" embedded chat) — shared constants. (P1)
+//! The Claude Code backend: spawns the user's own `claude` as a persistent
+//! stream-json subprocess wired to the in-viewer MCP server, with a per-call
+//! approval bridge for action tools (Bash/Edit/Write/Web).
 //!
-//! The subprocess driver itself lands in P2a/P2b (`IMPLEMENTATION-PLAN-cc-backend.md`);
-//! this module pins down the SECURITY-RELEVANT invocation surface that the P0 gate
-//! (`bin/cc_spike.rs`) proved live against `claude` 2.1.183/2.1.206:
+//! Contents: the invocation constants, the subprocess driver
+//! ([`SubprocessAgent`]), the approval broker ([`ApprovalBroker`]), and the
+//! stream-json → [`AgentEvent`] parser. The SECURITY-RELEVANT invocation
+//! surface was verified empirically against `claude` 2.1.183/2.1.206:
 //!
 //! - Persistent multi-turn `--input-format stream-json` over ONE stdin works.
 //! - `--allowedTools` alone auto-approves the listed MCP tools in a piped,
@@ -24,10 +27,9 @@ pub const MCP_SERVER_NAME: &str = "legion-viewer";
 /// advertise (data + source + wiki + visual + get_selection), EXCEPT
 /// `final_answer` — that is the eval grader's terminal tool and has no place in
 /// an interactive chat. An unlisted tool is not auto-approved; in `-p`
-/// non-interactive mode an unapproved call is EXPECTED to be denied with
-/// feedback rather than stall (per Claude Code print-mode semantics — the P0
-/// gate proved the approve side only; verify the deny side in the P2a
-/// integration test).
+/// non-interactive mode an unapproved call is denied with feedback rather than
+/// stalling (verified empirically — see the no-hook baseline note on
+/// [`build_hook_settings`]).
 ///
 /// Listing tools the server doesn't currently advertise (e.g. wiki tools with no
 /// wiki root) is harmless: the allow-list controls approval, not availability.
@@ -187,13 +189,14 @@ fn kill_child(child: &mut Child) {
 pub fn preflight_claude() -> Result<String, String> {
     let out = Command::new("claude").arg("--version").output().map_err(|_| {
         "Claude Code (`claude`) was not found on PATH. Install it and log in \
-         (`claude login`), or switch the backend to Native in ⚙ Settings."
+         (`claude login`), or set ANTHROPIC_API_KEY to use the built-in API \
+         engine instead."
             .to_owned()
     })?;
     if !out.status.success() {
         return Err(format!(
-            "`claude --version` failed (status {}). Reinstall Claude Code or switch \
-             the backend to Native.",
+            "`claude --version` failed (status {}). Reinstall Claude Code, or set \
+             ANTHROPIC_API_KEY to use the built-in API engine instead.",
             out.status
         ));
     }
@@ -359,7 +362,7 @@ impl SubprocessAgent {
             if let Some(s) = &settings_path { let _ = std::fs::remove_file(s); }
             format!(
                 "could not start `claude` ({e}). Install Claude Code and ensure it is on \
-                 PATH, or switch the backend to Native in ⚙ Settings."
+                 PATH, or set ANTHROPIC_API_KEY to use the built-in API engine instead."
             )
         })?;
 
