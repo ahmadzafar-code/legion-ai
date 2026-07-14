@@ -1429,7 +1429,14 @@ impl ChatPanel {
             .auto_shrink([false, false])
             .stick_to_bottom(true)
             .show(ui, |ui| {
-                ui.set_width(ui.available_width());
+                // Pin BOTH min and max width to the pane: children must wrap or
+                // truncate. Without the max cap, one unwrappable row (e.g. a
+                // CollapsingHeader header, which is button-like and EXTENDS)
+                // silently widens the scroll content, and every row after it
+                // lays out against the wider canvas and clips at the panel edge.
+                let pane_w = ui.available_width();
+                ui.set_width(pane_w);
+                ui.set_max_width(pane_w);
                 // Fixed chat text size (~16.5px body on the panel's 1.2 base) —
                 // the Claude-app-standard reading size; no user slider.
                 for font_id in ui.style_mut().text_styles.values_mut() {
@@ -2023,44 +2030,68 @@ fn render_message(
         ChatMessageKind::System => {
             if let Some(ref content) = msg.expandable_content {
                 let id = ui.make_persistent_id(ui.next_auto_id());
-                egui::CollapsingHeader::new(
-                    egui::RichText::new(&msg.text)
-                        .italics()
-                        .color(egui::Color32::from_rgb(120, 120, 120)),
-                )
-                .id_salt(id)
-                .default_open(false)
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        if ui.small_button("Copy result").clicked() {
-                            ui.output_mut(|o| o.copied_text = content.clone());
-                        }
+                // CollapsingHeader headers are button-like: they EXTEND instead
+                // of wrapping, which widens the whole scroll pane past the panel
+                // edge. Truncate the one-line summary to the pane instead.
+                ui.scope(|ui| {
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                    egui::CollapsingHeader::new(
+                        egui::RichText::new(&msg.text)
+                            .italics()
+                            .color(egui::Color32::from_rgb(120, 120, 120)),
+                    )
+                    .id_salt(id)
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            if ui.small_button("Copy result").clicked() {
+                                ui.output_mut(|o| o.copied_text = content.clone());
+                            }
+                        });
+                        // Explicit .wrap(): the body must WRAP (long JSON breaks
+                        // anywhere), overriding the scope's Truncate.
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(content)
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(60, 60, 60)),
+                            )
+                            .wrap(),
+                        );
                     });
-                    ui.label(
-                        egui::RichText::new(content)
-                            .monospace()
-                            .size(11.0)
-                            .color(egui::Color32::from_rgb(60, 60, 60)),
-                    );
                 });
             } else {
-                ui.label(
-                    egui::RichText::new(&msg.text)
-                        .italics()
-                        .color(egui::Color32::from_rgb(120, 120, 120)),
+                // Explicit .wrap() — plain labels in odd parent layouts must
+                // never extend past the pane.
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(&msg.text)
+                            .italics()
+                            .color(egui::Color32::from_rgb(120, 120, 120)),
+                    )
+                    .wrap(),
                 );
             }
         }
         ChatMessageKind::User => {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                // Claude-style bubble: at most ~85% of the pane, and the label
+                // must WRAP — in a right-to-left (horizontal) layout labels
+                // default to EXTEND, growing leftward past the panel edge.
+                let bubble_max = ui.available_width() * 0.85;
                 egui::Frame::none()
                     .fill(egui::Color32::from_rgb(228, 228, 228))
                     .rounding(8.0)
                     .inner_margin(egui::Margin::symmetric(10.0, 6.0))
                     .show(ui, |ui| {
-                        ui.label(
-                            egui::RichText::new(&msg.text)
-                                .color(egui::Color32::from_rgb(30, 30, 30)),
+                        ui.set_max_width(bubble_max);
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(&msg.text)
+                                    .color(egui::Color32::from_rgb(30, 30, 30)),
+                            )
+                            .wrap(),
                         );
                     });
             });
