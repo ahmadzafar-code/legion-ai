@@ -60,9 +60,7 @@ fn load_case(arg: &str) -> Result<Case, String> {
     } else if candidate.is_file() && candidate.file_name() == Some("case.toml".as_ref()) {
         candidate.parent().unwrap_or(Path::new(".")).to_path_buf()
     } else {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("eval_fixtures")
-            .join(arg)
+        fixtures_root().join(arg)
     };
     let toml_path = case_dir.join("case.toml");
     let content = std::fs::read_to_string(&toml_path)
@@ -943,9 +941,20 @@ fn run_eval(
 
 const USAGE: &str = "usage: eval run --case <DIR_or_ID> --harness <mcp|embedded> --seed <N> [--out <path.jsonl>] [--model <id>]\n       eval run-all --harness <mcp|embedded> [--seed <N>] [--out <path.jsonl>] [--model <id>]";
 
-/// List every fixture case id under eval_fixtures/, sorted for determinism.
+/// Fixture cases are NOT distributed with the repo (they sha-pin multi-GB
+/// profile databases): point `LEGION_EVAL_FIXTURES_DIR` at a directory of
+/// `<case-id>/case.toml` fixtures; the default is `eval_fixtures/` next to
+/// the crate for maintainers who keep one there.
+fn fixtures_root() -> std::path::PathBuf {
+    match std::env::var("LEGION_EVAL_FIXTURES_DIR") {
+        Ok(dir) if !dir.trim().is_empty() => std::path::PathBuf::from(dir.trim().to_owned()),
+        _ => Path::new(env!("CARGO_MANIFEST_DIR")).join("eval_fixtures"),
+    }
+}
+
+/// List every fixture case id under the fixtures root, sorted for determinism.
 fn list_fixture_ids() -> Result<Vec<String>, String> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("eval_fixtures");
+    let root = fixtures_root();
     let mut ids: Vec<String> = std::fs::read_dir(&root)
         .map_err(|e| format!("read {}: {e}", root.display()))?
         .flatten()
@@ -973,7 +982,10 @@ fn run_all(
 ) -> Result<i32, String> {
     let ids = list_fixture_ids()?;
     if ids.is_empty() {
-        return Err("no fixtures found under eval_fixtures/".into());
+        return Err(format!(
+            "no fixtures found under {} (set LEGION_EVAL_FIXTURES_DIR)",
+            fixtures_root().display()
+        ));
     }
     let (mut pass, mut fail, mut error, mut skip) = (0u32, 0u32, 0u32, 0u32);
     let n = ids.len();
@@ -1321,8 +1333,14 @@ mod tests {
             "L3-bound-in-range-001",
             "L3-busiest-proc-kind-002",
         ];
-        // All fixtures share bg4N2; check presence once via the first case.
-        let probe = load_case(CASES[0]).expect("load first case");
+        // Fixtures are not distributed; skip when absent (fresh clone).
+        let Ok(probe) = load_case(CASES[0]) else {
+            eprintln!(
+                "skipping oracle lock: fixtures absent under {}",
+                fixtures_root().display()
+            );
+            return;
+        };
         if !probe.duckdb_abs_path().exists() {
             eprintln!(
                 "skipping oracle lock: bg4N2 absent at {}",
