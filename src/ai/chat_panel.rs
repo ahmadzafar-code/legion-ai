@@ -591,6 +591,19 @@ impl ChatPanel {
         }
     }
 
+    /// Submit the composer buffer if allowed: needs non-empty trimmed input,
+    /// and either an idle agent or a pending `ask_user` question (answers are
+    /// accepted mid-turn). Clears the buffer, then dispatches via
+    /// [`Self::submit_input`]. Shared by the Enter key and the ↵ Send button.
+    fn try_submit(&mut self) {
+        let can_submit = !self.pending_request || self.pending_question.is_some();
+        if !self.input_buffer.trim().is_empty() && can_submit {
+            let text = self.input_buffer.trim().to_string();
+            self.input_buffer.clear();
+            self.submit_input(text);
+        }
+    }
+
     // ── Private helpers ──────────────────────────────────────────────────────
 
     /// Get the API key: UI field first, then ANTHROPIC_API_KEY env var.
@@ -861,14 +874,13 @@ impl ChatPanel {
         if let Some(b) = self.resolved_backend {
             return b;
         }
+        // Claude Code is "available" only when the backend can run at all
+        // (viewer-mcp builds) AND `claude` passes preflight.
         #[cfg(feature = "viewer-mcp")]
-        let b = if crate::ai::claude_code::preflight_claude().is_ok() {
-            ChatBackendKind::ClaudeCode
-        } else {
-            ChatBackendKind::Native
-        };
+        let claude_available = crate::ai::claude_code::preflight_claude().is_ok();
         #[cfg(not(feature = "viewer-mcp"))]
-        let b = ChatBackendKind::Native;
+        let claude_available = false;
+        let b = pick_backend(claude_available);
         self.resolved_backend = Some(b);
         b
     }
@@ -1580,104 +1592,12 @@ impl ChatPanel {
                     && ui.input(|i| i.key_pressed(egui::Key::Enter))
                     && !ui.input(|i| i.modifiers.shift);
                 if enter_pressed {
-                    // Normal submit (or answer a pending ask_user question)
-                    let can_submit = !self.pending_request || self.pending_question.is_some();
-                    if !self.input_buffer.trim().is_empty() && can_submit {
-                        let text = self.input_buffer.trim().to_string();
-                        self.input_buffer.clear();
-                        self.submit_input(text);
-                    }
+                    self.try_submit();
                 }
 
                 // Bottom row: + add-context | model pill | ⏎ Send
                 ui.horizontal(|ui| {
-                    // + menu (Claude-Desktop style): the ONE place to add context.
-                    // Folders/.duckdb configure tools; plain files attach as text.
-                    // Plain ASCII "+" (the fullwidth ＋ and the file-kind emojis are
-                    // not in egui's default fonts — they render as tofu boxes), and
-                    // the popup is forced to open UPWARD like Claude Desktop's
-                    // (menu_button drops down, straight out of a bottom bar).
-                    let plus_resp = ui
-                        .button(
-                            egui::RichText::new("+")
-                                .size(20.0)
-                                .strong()
-                                .color(egui::Color32::from_rgb(30, 30, 30)),
-                        )
-                        .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .on_hover_text("Connect the profile DB or code repo, or attach a file");
-                    let plus_menu_id = ui.make_persistent_id("plus_context_menu");
-                    if plus_resp.clicked() {
-                        ui.memory_mut(|m| m.toggle_popup(plus_menu_id));
-                    }
-                    egui::popup::popup_above_or_below_widget(
-                        ui,
-                        plus_menu_id,
-                        &plus_resp,
-                        egui::AboveOrBelow::Above,
-                        egui::PopupCloseBehavior::CloseOnClick,
-                        |ui| {
-                            ui.set_min_width(190.0);
-                            menu_row_visuals(ui);
-                            let item = |ui: &mut egui::Ui, label: &str| {
-                                ui.add(
-                                    egui::Button::new(
-                                        egui::RichText::new(label)
-                                            .size(14.5)
-                                            .color(egui::Color32::from_rgb(30, 30, 30)),
-                                    )
-                                    .rounding(6.0)
-                                    .min_size(egui::vec2(ui.available_width(), 28.0)),
-                                )
-                                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                                .clicked()
-                            };
-                            #[cfg(not(target_arch = "wasm32"))]
-                            {
-                                if item(ui, "Connect DuckDB…") {
-                                    if let Some(f) = rfd::FileDialog::new()
-                                        .set_title("Choose the profile DuckDB")
-                                        .add_filter("DuckDB", &["duckdb"])
-                                        .pick_file()
-                                    {
-                                        self.duckdb_path_buffer = f.to_string_lossy().into_owned();
-                                    }
-                                }
-                                if item(ui, "Connect code repo…") {
-                                    if let Some(d) = rfd::FileDialog::new()
-                                        .set_title(
-                                            "Choose the profiled application's source folder",
-                                        )
-                                        .pick_folder()
-                                    {
-                                        self.code_path_buffer = d.to_string_lossy().into_owned();
-                                    }
-                                }
-                                if item(ui, "Add file…") {
-                                    if let Some(f) = rfd::FileDialog::new()
-                                        .set_title("Attach a file as context")
-                                        .pick_file()
-                                    {
-                                        let path = f.to_string_lossy().into_owned();
-                                        // A .duckdb picked here is a DB, not a text
-                                        // attachment (binary would inject garbage).
-                                        if f.extension().is_some_and(|e| e == "duckdb") {
-                                            self.duckdb_path_buffer = path;
-                                        } else if !self.attachments.iter().any(|a| a.path == path) {
-                                            let display_name = f
-                                                .file_name()
-                                                .map(|n| n.to_string_lossy().into_owned())
-                                                .unwrap_or_else(|| path.clone());
-                                            self.attachments
-                                                .push(ContextAttachment { path, display_name });
-                                        }
-                                    }
-                                }
-                            }
-                            #[cfg(target_arch = "wasm32")]
-                            ui.label("File dialogs are unavailable in the browser");
-                        },
-                    );
+                    self.ui_plus_menu(ui);
 
                     // Right-aligned: Send
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1700,17 +1620,99 @@ impl ChatPanel {
                             .on_hover_cursor(egui::CursorIcon::PointingHand)
                             .clicked()
                         {
-                            let can_submit =
-                                !self.pending_request || self.pending_question.is_some();
-                            if !self.input_buffer.trim().is_empty() && can_submit {
-                                let text = self.input_buffer.trim().to_string();
-                                self.input_buffer.clear();
-                                self.submit_input(text);
-                            }
+                            self.try_submit();
                         }
                     });
                 });
             });
+    }
+
+    /// The ＋ context menu (Claude-Desktop style): the ONE place to add context.
+    /// Folders/.duckdb configure tools; plain files attach as text.
+    /// Plain ASCII "+" (the fullwidth ＋ and the file-kind emojis are
+    /// not in egui's default fonts — they render as tofu boxes), and
+    /// the popup is forced to open UPWARD like Claude Desktop's
+    /// (menu_button drops down, straight out of a bottom bar).
+    fn ui_plus_menu(&mut self, ui: &mut egui::Ui) {
+        let plus_resp = ui
+            .button(
+                egui::RichText::new("+")
+                    .size(20.0)
+                    .strong()
+                    .color(egui::Color32::from_rgb(30, 30, 30)),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("Connect the profile DB or code repo, or attach a file");
+        let plus_menu_id = ui.make_persistent_id("plus_context_menu");
+        if plus_resp.clicked() {
+            ui.memory_mut(|m| m.toggle_popup(plus_menu_id));
+        }
+        egui::popup::popup_above_or_below_widget(
+            ui,
+            plus_menu_id,
+            &plus_resp,
+            egui::AboveOrBelow::Above,
+            egui::PopupCloseBehavior::CloseOnClick,
+            |ui| {
+                ui.set_min_width(190.0);
+                menu_row_visuals(ui);
+                let item = |ui: &mut egui::Ui, label: &str| {
+                    ui.add(
+                        egui::Button::new(
+                            egui::RichText::new(label)
+                                .size(14.5)
+                                .color(egui::Color32::from_rgb(30, 30, 30)),
+                        )
+                        .rounding(6.0)
+                        .min_size(egui::vec2(ui.available_width(), 28.0)),
+                    )
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                };
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if item(ui, "Connect DuckDB…") {
+                        if let Some(f) = rfd::FileDialog::new()
+                            .set_title("Choose the profile DuckDB")
+                            .add_filter("DuckDB", &["duckdb"])
+                            .pick_file()
+                        {
+                            self.duckdb_path_buffer = f.to_string_lossy().into_owned();
+                        }
+                    }
+                    if item(ui, "Connect code repo…") {
+                        if let Some(d) = rfd::FileDialog::new()
+                            .set_title("Choose the profiled application's source folder")
+                            .pick_folder()
+                        {
+                            self.code_path_buffer = d.to_string_lossy().into_owned();
+                        }
+                    }
+                    if item(ui, "Add file…") {
+                        if let Some(f) = rfd::FileDialog::new()
+                            .set_title("Attach a file as context")
+                            .pick_file()
+                        {
+                            let path = f.to_string_lossy().into_owned();
+                            // A .duckdb picked here is a DB, not a text
+                            // attachment (binary would inject garbage).
+                            if f.extension().is_some_and(|e| e == "duckdb") {
+                                self.duckdb_path_buffer = path;
+                            } else if !self.attachments.iter().any(|a| a.path == path) {
+                                let display_name = f
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| path.clone());
+                                self.attachments
+                                    .push(ContextAttachment { path, display_name });
+                            }
+                        }
+                    }
+                }
+                #[cfg(target_arch = "wasm32")]
+                ui.label("File dialogs are unavailable in the browser");
+            },
+        );
     }
 
     /// Render the chat panel. Must be called BEFORE CentralPanel in the layout.
@@ -2054,6 +2056,18 @@ fn menu_row_visuals(ui: &mut egui::Ui) {
     v.widgets.active.bg_stroke = egui::Stroke::NONE;
 }
 
+/// The engine decision, pure: the user's own Claude Code when it is
+/// available, else the built-in API loop. Callers pass the preflight result;
+/// builds without `viewer-mcp` pass `false` (the Claude Code backend needs
+/// the in-viewer MCP server).
+fn pick_backend(claude_available: bool) -> ChatBackendKind {
+    if claude_available {
+        ChatBackendKind::ClaudeCode
+    } else {
+        ChatBackendKind::Native
+    }
+}
+
 /// The EFFECTIVE project root for a raw path-field value: trims, treats
 /// empty as unset, and normalizes a FILE path to its parent directory.
 /// Every consumer (chip, native agent, MCP handle, Claude Code `--add-dir`)
@@ -2333,5 +2347,100 @@ mod project_root_tests {
             None,
             "clearing the field must clear the handle"
         );
+    }
+}
+
+#[cfg(test)]
+mod channel_cleanup_tests {
+    use super::*;
+
+    /// No Claude Code child: channels are per-turn (Native), so end of turn
+    /// must DROP the receiver. This is also the unconditional behavior of
+    /// builds without `viewer-mcp`, so this one test covers both branches
+    /// of that cfg.
+    #[test]
+    fn end_of_turn_clears_receiver_without_child() {
+        let mut p = ChatPanel::new();
+        let (_tx, rx) = mpsc::channel::<AgentEvent>();
+        *p.event_rx.lock().unwrap() = Some(rx);
+        p.end_of_turn_channel_cleanup();
+        assert!(
+            p.event_rx.lock().unwrap().is_none(),
+            "per-turn (Native) receiver must be dropped at end of turn"
+        );
+    }
+
+    /// A LIVE Claude Code child: its once-at-spawn receiver must SURVIVE end
+    /// of turn — dropping it would orphan the persistent child's event stream
+    /// (turn 2 would never render). Drives a real child with `cat`, the same
+    /// lifecycle helper the claude_code tests use.
+    #[cfg(all(feature = "viewer-mcp", unix))]
+    #[test]
+    fn end_of_turn_retains_receiver_while_child_lives() {
+        use std::process::Command;
+        let cfg = std::env::temp_dir().join(format!("cc_cleanup_cfg_{}.json", std::process::id()));
+        std::fs::write(&cfg, "{}").unwrap();
+        let (event_tx, event_rx) = mpsc::channel::<AgentEvent>();
+        let agent = crate::ai::claude_code::ClaudeCodeAgent::spawn_with_command(
+            Command::new("cat"),
+            cfg.clone(),
+            None,
+            None,
+            event_tx,
+        )
+        .unwrap();
+
+        let mut p = ChatPanel::new();
+        *p.event_rx.lock().unwrap() = Some(event_rx);
+        *p.cc_agent.lock().unwrap() = Some(agent);
+        p.end_of_turn_channel_cleanup();
+        assert!(
+            p.event_rx.lock().unwrap().is_some(),
+            "the once-at-spawn receiver must be RETAINED while the child lives"
+        );
+
+        // Once the child is gone (Drop: EOF → kill → wait → join), the next
+        // end of turn clears like Native's.
+        *p.cc_agent.lock().unwrap() = None;
+        p.end_of_turn_channel_cleanup();
+        assert!(
+            p.event_rx.lock().unwrap().is_none(),
+            "with the child gone the receiver is dropped like Native's"
+        );
+    }
+}
+
+#[cfg(test)]
+mod backend_resolution_tests {
+    use super::*;
+
+    /// The pure decision: `claude` available → the Claude Code engine, else
+    /// the built-in API loop.
+    #[test]
+    fn pick_backend_maps_availability() {
+        assert_eq!(pick_backend(true), ChatBackendKind::ClaudeCode);
+        assert_eq!(pick_backend(false), ChatBackendKind::Native);
+    }
+
+    /// resolve_backend memoizes: while `resolved_backend` is Some it is
+    /// returned as-is with no re-probe — seeding BOTH kinds proves whichever
+    /// one differs from a fresh probe still comes back. Clearing the cache
+    /// (↺ New session) re-resolves and re-caches.
+    #[test]
+    fn resolve_backend_memoizes_until_cleared() {
+        let mut p = ChatPanel::new();
+        p.resolved_backend = Some(ChatBackendKind::Native);
+        assert_eq!(p.resolve_backend(), ChatBackendKind::Native);
+        p.resolved_backend = Some(ChatBackendKind::ClaudeCode);
+        assert_eq!(p.resolve_backend(), ChatBackendKind::ClaudeCode);
+
+        p.resolved_backend = None;
+        let fresh = p.resolve_backend();
+        assert_eq!(
+            p.resolved_backend,
+            Some(fresh),
+            "a fresh resolve re-populates the cache"
+        );
+        assert_eq!(p.resolve_backend(), fresh, "and later calls reuse it");
     }
 }

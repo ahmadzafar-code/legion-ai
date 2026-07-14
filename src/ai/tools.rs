@@ -909,12 +909,43 @@ pub fn wiki_search(
 /// Gather a pre-computed overview of the profiling database.
 ///
 /// Runs several SQL queries and combines results into a structured text summary
-/// (~4–8 KB) suitable for the agent's initial context message.
+/// (~4–8 KB) suitable for the agent's initial context message. Each section is
+/// appended by one `overview_*` helper below, in the order the agent reads them.
 #[cfg(feature = "duckdb")]
 pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     let mut out = String::with_capacity(8192);
+    overview_schema(&mut out);
+    overview_row_counts(duckdb_path, &mut out);
+    overview_processor_hierarchy(duckdb_path, &mut out);
+    overview_timeline_bounds(duckdb_path, &mut out);
+    overview_task_distribution(duckdb_path, &mut out);
+    overview_slots_by_kind(duckdb_path, &mut out);
+    overview_sample_item(duckdb_path, &mut out);
+    overview_profile_classification(duckdb_path, &mut out);
+    overview_tracing_status(duckdb_path, &mut out);
+    overview_per_kind_utilization(duckdb_path, &mut out);
+    overview_deferred_health(duckdb_path, &mut out);
+    overview_utility_breakdown(duckdb_path, &mut out);
+    overview_mapper_calls(duckdb_path, &mut out);
+    overview_task_granularity(duckdb_path, &mut out);
+    overview_channel_copies(duckdb_path, &mut out);
+    overview_data_size_evidence(duckdb_path, &mut out);
+    overview_delayed_distribution(duckdb_path, &mut out);
+    overview_triggering_latency(duckdb_path, &mut out);
+    overview_python_detection(duckdb_path, &mut out);
+    overview_gc_instance_activity(duckdb_path, &mut out);
+    overview_node_utility_balance(duckdb_path, &mut out);
+    overview_channel_direction(duckdb_path, &mut out);
+    overview_copy_compute_ratio(duckdb_path, &mut out);
+    overview_scheduling_overhead(duckdb_path, &mut out);
+    overview_processor_balance(duckdb_path, &mut out);
+    overview_navigation_anchors(duckdb_path, &mut out);
+    Ok(out)
+}
 
-    // ── Schema ────────────────────────────────────────────────────────────────
+/// Overview section: Schema.
+#[cfg(feature = "duckdb")]
+fn overview_schema(out: &mut String) {
     out.push_str("## Schema\n");
     out.push_str(
         "Table `entries`: entry_slug TEXT PK, short_name TEXT, long_name TEXT, \
@@ -931,8 +962,11 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
          All timestamps are NANOSECONDS. Access STRUCTs with dot notation: \
          running.start, critical_path.item_uid.\n\n",
     );
+}
 
-    // ── Row counts ────────────────────────────────────────────────────────────
+/// Overview section: Row counts.
+#[cfg(feature = "duckdb")]
+fn overview_row_counts(duckdb_path: &str, out: &mut String) {
     let entry_count = execute_run_query_raw(duckdb_path, "SELECT COUNT(*) AS cnt FROM entries")
         .unwrap_or_else(|_| "[{\"cnt\":\"?\"}]".into());
     let item_count = execute_run_query_raw(duckdb_path, "SELECT COUNT(*) AS cnt FROM items")
@@ -940,8 +974,11 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     out.push_str(&format!(
         "## Row Counts\nentries: {entry_count}  items: {item_count}\n\n"
     ));
+}
 
-    // ── Processor hierarchy ───────────────────────────────────────────────────
+/// Overview section: Processor hierarchy.
+#[cfg(feature = "duckdb")]
+fn overview_processor_hierarchy(duckdb_path: &str, out: &mut String) {
     let hier = execute_run_query_raw(
         duckdb_path,
         "SELECT parent_slug, type, COUNT(*) AS cnt, \
@@ -950,8 +987,11 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     )
     .unwrap_or_else(|e| format!("[{{\"error\": {:?}}}]", e));
     out.push_str(&format!("## Processor Hierarchy\n{hier}\n\n"));
+}
 
-    // ── Timeline bounds ───────────────────────────────────────────────────────
+/// Overview section: Timeline bounds.
+#[cfg(feature = "duckdb")]
+fn overview_timeline_bounds(duckdb_path: &str, out: &mut String) {
     let bounds = execute_run_query_raw(
         duckdb_path,
         "SELECT MIN(lifetime.start) AS earliest_ns, MAX(lifetime.stop) AS latest_ns, \
@@ -959,13 +999,17 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     )
     .unwrap_or_else(|e| format!("[{{\"error\": {:?}}}]", e));
     out.push_str(&format!("## Timeline Bounds\n{bounds}\n\n"));
+}
 
-    // ── Task distribution ─────────────────────────────────────────────────────
-    // Top-10 headline (was 15) — orientation, not an exhaustive distribution; the
-    // agent uses run_query for the full GROUP BY when it needs it. The LIMIT is
-    // wrapped in a subquery because execute_run_query_raw strips a TRAILING
-    // `LIMIT n` and re-applies its own 50-row cap — so an un-wrapped `LIMIT 10`
-    // would still return up to 50 task types (the pre-compaction behavior).
+/// Overview section: Task distribution.
+///
+/// Top-10 headline — orientation, not an exhaustive distribution; the
+/// agent uses run_query for the full GROUP BY when it needs it. The LIMIT is
+/// wrapped in a subquery because execute_run_query_raw strips a TRAILING
+/// `LIMIT n` and re-applies its own 50-row cap — so an un-wrapped `LIMIT 10`
+/// would still return up to 50 task types.
+#[cfg(feature = "duckdb")]
+fn overview_task_distribution(duckdb_path: &str, out: &mut String) {
     let dist = execute_run_query_raw(
         duckdb_path,
         "SELECT * FROM (\
@@ -978,8 +1022,11 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     )
     .unwrap_or_else(|e| format!("[{{\"error\": {:?}}}]", e));
     out.push_str(&format!("## Top Task Types (by count, top 10)\n{dist}\n\n"));
+}
 
-    // ── Slot counts by kind ───────────────────────────────────────────────────
+/// Overview section: Slot counts by kind.
+#[cfg(feature = "duckdb")]
+fn overview_slots_by_kind(duckdb_path: &str, out: &mut String) {
     let slots = execute_run_query_raw(
         duckdb_path,
         "SELECT parent_slug, COUNT(*) AS slot_cnt FROM entries WHERE type = 'slot' \
@@ -987,16 +1034,20 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     )
     .unwrap_or_else(|e| format!("[{{\"error\": {:?}}}]", e));
     out.push_str(&format!("## Slots by Kind\n{slots}\n\n"));
+}
 
-    // ── Sample item (compact) ─────────────────────────────────────────────────
-    // A `SELECT *` here dumps every lifecycle + cross-ref STRUCT — ~63 KB on
-    // bg4N2, enough to overflow the MCP tool-result budget on its own.
-    // The Schema section already lists the columns; a 4-column projection still
-    // shows the populated STRUCT SHAPE (a lifecycle struct + a cross-ref struct)
-    // without the dump. Full rows are one `run_query` away.
-    // The inner LIMIT 1 is wrapped in a subquery: execute_run_query_raw strips a
-    // TRAILING `LIMIT n` and re-applies its 50-row cap, so a bare `... LIMIT 1`
-    // would return 50 FULL rows (the ~63 KB dump).
+/// Overview section: Sample item (compact).
+///
+/// A `SELECT *` here dumps every lifecycle + cross-ref STRUCT — ~63 KB on
+/// bg4N2, enough to overflow the MCP tool-result budget on its own.
+/// The Schema section already lists the columns; a 4-column projection still
+/// shows the populated STRUCT SHAPE (a lifecycle struct + a cross-ref struct)
+/// without the dump. Full rows are one `run_query` away.
+/// The inner LIMIT 1 is wrapped in a subquery: execute_run_query_raw strips a
+/// TRAILING `LIMIT n` and re-applies its 50-row cap, so a bare `... LIMIT 1`
+/// would return 50 FULL rows (the ~63 KB dump).
+#[cfg(feature = "duckdb")]
+fn overview_sample_item(duckdb_path: &str, out: &mut String) {
     let sample = execute_run_query_raw(
         duckdb_path,
         "SELECT item_uid, title, running, critical_path FROM (\
@@ -1007,8 +1058,11 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     out.push_str(&format!(
         "## Sample Item Row (shape; SELECT * via run_query)\n{sample}\n\n"
     ));
+}
 
-    // ── Profile classification (human-readable) ──────────────────────────────
+/// Overview section: Profile classification (human-readable).
+#[cfg(feature = "duckdb")]
+fn overview_profile_classification(duckdb_path: &str, out: &mut String) {
     let classification = execute_run_query_raw(
         duckdb_path,
         "SELECT \
@@ -1050,8 +1104,11 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
         Err(e) => out.push_str(&format!("(error: {})\n", e)),
     }
     out.push('\n');
+}
 
-    // ── Tracing detection (human-readable) ────────────────────────────────────
+/// Overview section: Tracing detection (human-readable).
+#[cfg(feature = "duckdb")]
+fn overview_tracing_status(duckdb_path: &str, out: &mut String) {
     let tracing = execute_run_query_raw(
         duckdb_path,
         "SELECT \
@@ -1088,8 +1145,11 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
         Err(e) => out.push_str(&format!("(error: {})\n", e)),
     }
     out.push('\n');
+}
 
-    // ── Per-kind utilization (human-readable) ─────────────────────────────────
+/// Overview section: Per-kind utilization (human-readable).
+#[cfg(feature = "duckdb")]
+fn overview_per_kind_utilization(duckdb_path: &str, out: &mut String) {
     let utilization = execute_run_query_raw(
         duckdb_path,
         "WITH bounds AS ( \
@@ -1149,8 +1209,11 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
         Err(e) => out.push_str(&format!("(error: {})\n", e)),
     }
     out.push('\n');
+}
 
-    // ── Deferred health (human-readable) ──────────────────────────────────────
+/// Overview section: Deferred health (human-readable).
+#[cfg(feature = "duckdb")]
+fn overview_deferred_health(duckdb_path: &str, out: &mut String) {
     let deferred = execute_run_query_raw(
         duckdb_path,
         "SELECT \
@@ -1195,8 +1258,11 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
         Err(e) => out.push_str(&format!("(error: {})\n", e)),
     }
     out.push('\n');
+}
 
-    // ── Utility meta-task breakdown ────────────────────────────────────────
+/// Overview section: Utility meta-task breakdown.
+#[cfg(feature = "duckdb")]
+fn overview_utility_breakdown(duckdb_path: &str, out: &mut String) {
     let util_breakdown = execute_run_query_raw(
         duckdb_path,
         "WITH util_breakdown AS ( \
@@ -1255,8 +1321,11 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
         Err(e) => out.push_str(&format!("(error: {})\n", e)),
     }
     out.push('\n');
+}
 
-    // ── Mapper call analysis ───────────────────────────────────────────────
+/// Overview section: Mapper call analysis.
+#[cfg(feature = "duckdb")]
+fn overview_mapper_calls(duckdb_path: &str, out: &mut String) {
     let mapper_calls = execute_run_query_raw(
         duckdb_path,
         "SELECT COUNT(*) AS call_count, \
@@ -1300,8 +1369,11 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
         Err(e) => out.push_str(&format!("(error: {})\n", e)),
     }
     out.push('\n');
+}
 
-    // ── Task granularity ───────────────────────────────────────────────────
+/// Overview section: Task granularity.
+#[cfg(feature = "duckdb")]
+fn overview_task_granularity(duckdb_path: &str, out: &mut String) {
     let granularity = execute_run_query_raw(
         duckdb_path,
         "SELECT COUNT(*) AS app_task_count, \
@@ -1350,16 +1422,20 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
         Err(e) => out.push_str(&format!("(error: {})\n", e)),
     }
     out.push('\n');
+}
 
-    // ── Channel copy patterns ──────────────────────────────────────────────
-    // Copies live on %chan% slots and carry their cost in `lifetime` + `size`,
-    // NEVER `running` (title = "Copy") — filtering on `running` reports zero
-    // copies and zero comm time. Dedup by item_uid: a multi-hop copy appears
-    // on several chan slots but must be counted once (the regression test pins
-    // the numbers). Byte volume is intentionally omitted here: `size` is a
-    // unit-suffixed TEXT column, and summing it across hops double-counts
-    // multi-hop copies — the "Data-Size Evidence" section reports volume with
-    // the unit-aware, deduplicated query instead.
+/// Overview section: Channel copy patterns.
+///
+/// Copies live on %chan% slots and carry their cost in `lifetime` + `size`,
+/// NEVER `running` (title = "Copy") — filtering on `running` reports zero
+/// copies and zero comm time. Dedup by item_uid: a multi-hop copy appears
+/// on several chan slots but must be counted once (the regression test pins
+/// the numbers). Byte volume is intentionally omitted here: `size` is a
+/// unit-suffixed TEXT column, and summing it across hops double-counts
+/// multi-hop copies — the "Data-Size Evidence" section reports volume with
+/// the unit-aware, deduplicated query instead.
+#[cfg(feature = "duckdb")]
+fn overview_channel_copies(duckdb_path: &str, out: &mut String) {
     let copies = execute_run_query_raw(
         duckdb_path,
         "SELECT COUNT(*) AS copy_count, \
@@ -1383,7 +1459,7 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
                         "- {} copies | total comm time (lifetime): {:.1}ms\n",
                         count, ms
                     ));
-                    // Volume now lives in "Data-Size Evidence" below (unit-aware
+                    // Volume lives in "Data-Size Evidence" below (unit-aware
                     // parsing of the suffixed `size` strings — B/KiB/MiB/GiB).
                     if count == 0 {
                         out.push_str("- No channel copies (CPU-only or no data movement)\n");
@@ -1398,15 +1474,19 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
         Err(e) => out.push_str(&format!("(error: {})\n", e)),
     }
     out.push('\n');
+}
 
-    // ── Data-Size Evidence (MiniAero guardrail: verify sizing verdicts vs DATA) ──
-    // Root cause of the one recorded WRONG live verdict ("under-sized mesh, grow
-    // it" on MiniAero 160³): the agent had 167–176 MiB ghost-exchange copies in
-    // front of it — evidence that the mesh was already large — and never
-    // reconciled. This section makes that evidence one glance away and carries
-    // the reconcile instruction AT the evidence (result-level reminder, the
-    // proven redundancy lever). `size` is a unit-suffixed STRING ("76.000 KiB",
-    // "175.781 MiB"), so parsing is unit-aware; dedup by item_uid as always.
+/// Overview section: Data-Size Evidence (MiniAero guardrail: verify sizing verdicts vs DATA).
+///
+/// Root cause of the one recorded WRONG live verdict ("under-sized mesh, grow
+/// it" on MiniAero 160³): the agent had 167–176 MiB ghost-exchange copies in
+/// front of it — evidence that the mesh was already large — and never
+/// reconciled. This section makes that evidence one glance away and carries
+/// the reconcile instruction AT the evidence (result-level reminder, the
+/// proven redundancy lever). `size` is a unit-suffixed STRING ("76.000 KiB",
+/// "175.781 MiB"), so parsing is unit-aware; dedup by item_uid as always.
+#[cfg(feature = "duckdb")]
+fn overview_data_size_evidence(duckdb_path: &str, out: &mut String) {
     let evidence = execute_run_query_raw(duckdb_path, DATA_SIZE_EVIDENCE_SQL);
     let top_sizes = execute_run_query_raw(duckdb_path, DATA_SIZE_TOP_SQL);
     out.push_str("## Data-Size Evidence (sizing verdicts)\n");
@@ -1471,8 +1551,11 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
          contradict the hypothesis, say so instead of asserting it.\n",
     );
     out.push('\n');
+}
 
-    // ── Delayed distribution (Realm pickup latency) ────────────────────────
+/// Overview section: Delayed distribution (Realm pickup latency).
+#[cfg(feature = "duckdb")]
+fn overview_delayed_distribution(duckdb_path: &str, out: &mut String) {
     let delayed = execute_run_query_raw(
         duckdb_path,
         "SELECT ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY delayed.duration) / 1e6, 3) AS p50_ms, \
@@ -1508,8 +1591,11 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
         Err(e) => out.push_str(&format!("(error: {})\n", e)),
     }
     out.push('\n');
+}
 
-    // ── Triggering latency ─────────────────────────────────────────────────
+/// Overview section: Triggering latency.
+#[cfg(feature = "duckdb")]
+fn overview_triggering_latency(duckdb_path: &str, out: &mut String) {
     let trig_latency = execute_run_query_raw(
         duckdb_path,
         "SELECT ROUND(PERCENTILE_CONT(0.9) WITHIN GROUP \
@@ -1544,8 +1630,11 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
         Err(e) => out.push_str(&format!("(error: {})\n", e)),
     }
     out.push('\n');
+}
 
-    // ── Python/Legate detection ────────────────────────────────────────────
+/// Overview section: Python/Legate detection.
+#[cfg(feature = "duckdb")]
+fn overview_python_detection(duckdb_path: &str, out: &mut String) {
     let python = execute_run_query_raw(
         duckdb_path,
         "SELECT COUNT(*) AS py_proc_count \
@@ -1579,8 +1668,11 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
         Err(e) => out.push_str(&format!("(error: {})\n", e)),
     }
     out.push('\n');
+}
 
-    // ── GC and instance activity ───────────────────────────────────────────
+/// Overview section: GC and instance activity.
+#[cfg(feature = "duckdb")]
+fn overview_gc_instance_activity(duckdb_path: &str, out: &mut String) {
     let gc = execute_run_query_raw(
         duckdb_path,
         "SELECT \
@@ -1634,8 +1726,11 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
         }
     }
     out.push('\n');
+}
 
-    // ── Per-node utility balance ───────────────────────────────────────────
+/// Overview section: Per-node utility balance.
+#[cfg(feature = "duckdb")]
+fn overview_node_utility_balance(duckdb_path: &str, out: &mut String) {
     let node_util = execute_run_query_raw(
         duckdb_path,
         "SELECT \
@@ -1703,12 +1798,16 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
         }
     }
     out.push('\n');
+}
 
-    // ── Channel direction analysis ─────────────────────────────────────────
-    // Per-channel comm activity. Copies use `lifetime` (not `running`); dedup by
-    // item_uid, assigning each copy to its min(entry_slug) so the per-channel
-    // total matches the whole-run copy figure. Byte volume is reported by the
-    // "Data-Size Evidence" section instead (unit-aware, deduplicated).
+/// Overview section: Channel direction analysis.
+///
+/// Per-channel comm activity. Copies use `lifetime` (not `running`); dedup by
+/// item_uid, assigning each copy to its min(entry_slug) so the per-channel
+/// total matches the whole-run copy figure. Byte volume is reported by the
+/// "Data-Size Evidence" section instead (unit-aware, deduplicated).
+#[cfg(feature = "duckdb")]
+fn overview_channel_direction(duckdb_path: &str, out: &mut String) {
     let chan_dir = execute_run_query_raw(
         duckdb_path,
         "SELECT entry_slug, COUNT(*) AS copy_count, \
@@ -1776,15 +1875,19 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
         }
     }
     out.push('\n');
+}
 
-    // ── Copy-to-compute ratio ──────────────────────────────────────────────
-    // Copy time = SUM(lifetime.duration) on channels, dedup'd by item_uid: copies
-    // have no `running` (old `SUM(running)` on chan was always 0), and a copy's
-    // rows are the SAME transfer on 2 channel slugs sharing ONE lifetime — true
-    // duplication, so dedup is required. Compute time keeps the NAIVE
-    // `SUM(running.duration)` on cpu/gpu non-util (2263.1ms on bg4N2): compute
-    // items repeat as genuine RE-EXECUTIONS (distinct running slices), so the raw
-    // sum is correct and collapsing per item_uid would wrongly drop them.
+/// Overview section: Copy-to-compute ratio.
+///
+/// Copy time = SUM(lifetime.duration) on channels, dedup'd by item_uid: copies
+/// have no `running`, and a copy's rows are the SAME transfer on 2 channel
+/// slugs sharing ONE lifetime — true duplication, so dedup is required.
+/// Compute time keeps the NAIVE
+/// `SUM(running.duration)` on cpu/gpu non-util (2263.1ms on bg4N2): compute
+/// items repeat as genuine RE-EXECUTIONS (distinct running slices), so the raw
+/// sum is correct and collapsing per item_uid would wrongly drop them.
+#[cfg(feature = "duckdb")]
+fn overview_copy_compute_ratio(duckdb_path: &str, out: &mut String) {
     let copy_ratio = execute_run_query_raw(
         duckdb_path,
         "WITH copy_time AS ( \
@@ -1840,8 +1943,11 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
         }
     }
     out.push('\n');
+}
 
-    // ── Scheduling overhead ────────────────────────────────────────────────
+/// Overview section: Scheduling overhead.
+#[cfg(feature = "duckdb")]
+fn overview_scheduling_overhead(duckdb_path: &str, out: &mut String) {
     let sched_overhead = execute_run_query_raw(
         duckdb_path,
         "SELECT \
@@ -1890,8 +1996,11 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
         }
     }
     out.push('\n');
+}
 
-    // ── Application processor balance ──────────────────────────────────────
+/// Overview section: Application processor balance.
+#[cfg(feature = "duckdb")]
+fn overview_processor_balance(duckdb_path: &str, out: &mut String) {
     let proc_balance = execute_run_query_raw(
         duckdb_path,
         "WITH bounds AS ( \
@@ -1950,8 +2059,11 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
         }
     }
     out.push('\n');
+}
 
-    // ── Navigation anchors ─────────────────────────────────────────────────
+/// Overview section: Navigation anchors.
+#[cfg(feature = "duckdb")]
+fn overview_navigation_anchors(duckdb_path: &str, out: &mut String) {
     out.push_str("## Navigation Anchors\n");
 
     // Sub-query A: Steady-state midpoint (middle 20% of profile)
@@ -2075,8 +2187,6 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
 
     out.push_str("Use zoom_to or set_view with these nanosecond ranges to navigate directly.\n");
     out.push('\n');
-
-    Ok(out)
 }
 
 #[cfg(feature = "duckdb")]
