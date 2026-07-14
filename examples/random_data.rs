@@ -87,9 +87,7 @@ impl RandomDataSource {
     }
 
     fn interval(rng: &mut rand::rngs::ThreadRng) -> Interval {
-        // 10-20 seconds total duration (in nanoseconds)
-        // This allows for gaps > 100ms when items are skipped
-        Interval::new(Timestamp(0), Timestamp(rng.gen_range(10_000_000_000_i64..20_000_000_000_i64)))
+        Interval::new(Timestamp(0), Timestamp(rng.gen_range(1_000_000..2_000_000)))
     }
 
     fn generate_point(
@@ -161,16 +159,6 @@ impl RandomDataSource {
                 let mut row_item_metas = Vec::new();
                 const N: u64 = 1000;
                 for i in 0..N {
-                    // Introduce deliberate idle gaps for AI testing
-                    // With 10-20s total and 1000 items, each item is ~10-20ms
-                    // Skip 10 consecutive items every 100 items to create ~100-200ms gaps
-                    let gap_start = (i / 100) * 100 + 45; // Start gap at item 45, 145, 245, etc.
-                    let gap_end = gap_start + 10; // End gap at item 55, 155, 255, etc.
-                    let skip_for_gap = (i >= gap_start && i < gap_end) && (row % 2 == 0);
-                    if skip_for_gap {
-                        continue; // Creates a gap of ~10 items = 100-200ms
-                    }
-
                     let start = self.info.interval.lerp((i as f32 + 0.05) / (N as f32));
                     let stop = self.info.interval.lerp((i as f32 + 0.95) / (N as f32));
 

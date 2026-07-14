@@ -68,18 +68,6 @@ pub struct ItemLink {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 pub struct FieldID(usize);
 
-impl FieldID {
-    /// Get the inner usize value.
-    pub fn as_usize(self) -> usize {
-        self.0
-    }
-
-    /// Create a FieldID from a usize value.
-    pub fn from_usize(value: usize) -> Self {
-        Self(value)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 pub struct FieldSchema {
     // Field names that may potentially exist on a given item. They are not

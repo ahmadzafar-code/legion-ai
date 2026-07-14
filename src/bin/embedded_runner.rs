@@ -105,7 +105,6 @@ fn main() {
         duckdb,
         String::new(), // no code root (parallels the mcp harness's data-tool restriction)
         String::new(), // no wiki root
-        String::new(), // no app context
         event_tx,
         cmd_rx,
     );

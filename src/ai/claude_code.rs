@@ -539,29 +539,7 @@ impl SubprocessAgent {
                           exited — check the transcript for an error)".to_string())
     }
 
-    /// BEST-EFFORT turn interrupt (P5): a stream-json `control_request` with
-    /// subtype `interrupt` on the child's stdin — the shape Claude Code's own
-    /// SDK uses. Unproven across all CLI versions (the P0 gate exercised user
-    /// turns only): if the CLI ignores it, the turn simply continues, and
-    /// `hard_stop` / "↺ New session" remains the guaranteed cancel.
-    pub fn interrupt_turn(&self) -> Result<(), String> {
-        let line = json!({
-            "type": "control_request",
-            "request_id": format!("interrupt-{}", now_secs()),
-            "request": { "subtype": "interrupt" }
-        })
-        .to_string();
-        self.stdin_tx
-            .lock()
-            .unwrap()
-            .as_ref()
-            .ok_or("Claude Code backend is shutting down")?
-            .send(line)
-            .map_err(|_| "Claude Code subprocess is no longer accepting input".to_string())
-    }
-
-    /// HARD STOP: kill the child now (used by "New session" / backend switch).
-    /// Distinct from the best-effort `interrupt_turn` above and NEVER conflated
+    /// HARD STOP: kill the child now (used by "↺ New session"). NEVER conflated
     /// with Drop — Drop also reaps+joins.
     pub fn hard_stop(&self) {
         self.stopping.store(true, Ordering::Relaxed);

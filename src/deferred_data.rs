@@ -129,11 +129,6 @@ impl<T: DeferredDataSource> CountingDeferredDataSource<T> {
         self.outstanding_requests
     }
 
-    /// Get a mutable reference to the inner data source.
-    pub fn inner_mut(&mut self) -> &mut T {
-        &mut self.data_source
-    }
-
     fn start_request(&mut self) {
         self.outstanding_requests += 1;
     }
@@ -214,11 +209,6 @@ impl<T: DeferredDataSource> LruDeferredDataSource<T> {
             slot_tiles: Vec::new(),
             slot_meta_tiles: Vec::new(),
         }
-    }
-
-    /// Get a mutable reference to the inner data source.
-    pub fn inner_mut(&mut self) -> &mut T {
-        &mut self.data_source
     }
 }
 

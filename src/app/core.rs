@@ -287,6 +287,7 @@ impl ItemLinkNavigationMode {
 /// small plain-data mirror carries the values worth keeping. The API key is
 /// deliberately absent — eframe storage is plaintext on disk. Empty strings mean
 /// "unset" (`apply_persisted` skips them, so CLI flags / defaults survive).
+#[cfg(feature = "ai")]
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct PersistedAiSettings {
     #[serde(default)]
@@ -347,6 +348,7 @@ struct Context {
     /// serde-skip). Synced FROM the panel in `save()`, applied TO the panel in
     /// `ProfApp::new` (before CLI flags, which win). Plain data — never the API
     /// key (eframe storage is plaintext on disk).
+    #[cfg(feature = "ai")]
     #[serde(default)]
     ai_settings: PersistedAiSettings,
 
@@ -412,15 +414,6 @@ struct Context {
     #[serde(skip)]
     viewer_mcp_started: bool,
 
-    /// P1 (Backend B): the ACTUAL bound port of the in-viewer MCP server, stored
-    /// instead of discarded so the embedded Claude Code backend can build its
-    /// `--mcp-config` against the real port. `None` until the server starts (or if
-    /// the bind failed). The spawn site prefers the stable well-known port 8765
-    /// (external `claude mcp add` registrations keep working) and falls back to an
-    /// ephemeral port only if 8765 is taken.
-    #[cfg(feature = "viewer-mcp")]
-    #[serde(skip)]
-    viewer_mcp_port: Option<u16>,
 }
 
 #[cfg(feature = "ai")]
@@ -3526,7 +3519,6 @@ impl eframe::App for ProfApp {
                         }
                     }
                 }
-                cx.viewer_mcp_port = endpoint.as_ref().map(|(p, _)| *p);
                 cx.chat_panel.set_mcp_endpoint(endpoint);
                 cx.chat_panel.set_approval_broker(approval_broker);
                 cx.viewer_mcp_started = true;

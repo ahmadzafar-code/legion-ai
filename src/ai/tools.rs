@@ -122,9 +122,9 @@ fn walk_dir_tree(
 /// Build a recursive file tree listing for the given code root directory.
 ///
 /// Returns a formatted string showing directories and source files with sizes,
-/// capped at 6 levels deep and 500 files. Used both in scan messages and as
-/// the `list_files` tool implementation.
-pub fn recursive_file_tree(code_root: &str) -> Result<String, String> {
+/// capped at 6 levels deep and 500 files. Backs the `list_files` tool and the
+/// self-correction hint appended to `read_code` file-not-found errors.
+fn recursive_file_tree(code_root: &str) -> Result<String, String> {
     if code_root.is_empty() {
         return Err("Code path not configured. Connect a code repo via the + menu, or \
                     launch with --code <dir>.".into());
@@ -326,7 +326,7 @@ pub fn execute_run_query_raw(duckdb_path: &str, sql: &str) -> Result<String, Str
 /// body. On the live read-only connection it must be inlined as a CTE
 /// (`CREATE VIEW` is rejected read-only); the `CREATE VIEW` form is used only in
 /// a separate writable connection (e.g. the regression test).
-#[cfg(feature = "duckdb")]
+#[cfg(all(test, feature = "duckdb"))]
 pub fn dedup_select_sql() -> &'static str {
     "WITH slices AS (
     SELECT DISTINCT item_uid, entry_slug, title, lifetime, running, waiting
@@ -358,7 +358,8 @@ GROUP BY item_uid"
 /// growing `path`/`depth` keeps rows distinct — a depth cap alone would walk
 /// 100k+ rows. The depth cap (64) is a secondary backstop.
 ///
-/// The enrichment join reuses the SAME dedup grain as [`dedup_select_sql`]
+/// The enrichment join reuses the SAME dedup grain as `dedup_select_sql` (a
+/// test-only helper that pins this contract)
 /// (inner `DISTINCT (item_uid, entry_slug, lifetime, running, waiting)`, outer
 /// `GROUP BY item_uid`) so the slice-row inflation cannot re-enter.
 ///

@@ -21,6 +21,10 @@ type EventChannel = Arc<Mutex<Option<mpsc::Receiver<AgentEvent>>>>;
 // ── Public types ────────────────────────────────────────────────────────────
 
 /// The kind of chat message, controlling rendering style.
+/// Model the built-in API engine uses. The Claude Code backend deliberately
+/// passes no model (the user's own `claude` configuration decides).
+const NATIVE_MODEL: &str = "claude-sonnet-4-6";
+
 #[derive(Clone, Debug)]
 pub enum ChatMessageKind {
     /// Gray italic — system status messages
@@ -29,8 +33,6 @@ pub enum ChatMessageKind {
     User,
     /// Left-aligned with markdown rendering — analysis results
     Analysis,
-    /// Compact badge — selection context
-    Context,
 }
 
 /// Which backend serves the embedded chat (P1, Backend B plan —
@@ -165,7 +167,6 @@ pub struct ChatPanel {
     pub selection: Option<TimelineSelection>,
     /// Task (bar) selection surfaced to the agent as structured context.
     selected_items: Vec<SelectedItem>,
-    scroll_to_bottom: bool,
     /// The API-key entry popup (opened from the header warning or automatically
     /// when the API engine is selected without a key).
     api_key_popup_open: bool,
@@ -192,7 +193,6 @@ pub struct ChatPanel {
     /// API key (from UI field; falls back to ANTHROPIC_API_KEY env var).
     api_key_buffer: String,
     /// Model name: "claude-sonnet-4-6" or "claude-opus-4-8".
-    model_selection: String,
     /// Persistent agent session (holds conversation history for follow-ups).
     agent_session: Arc<Mutex<Option<AgentSession>>>,
     /// Whether an agent request is currently in flight.
@@ -218,9 +218,6 @@ pub struct ChatPanel {
     /// `AgentSession` so the embedded agent and the in-viewer MCP driver are
     /// mutually exclusive. `None` until `core.rs` wires it from the `Context`.
     viewport_token: Option<crate::ai::bridge::ViewportToken>,
-    /// Which backend serves the chat (P1, Backend B). In-memory per session,
-    /// like `model_selection`.
-    backend: ChatBackendKind,
     /// The in-viewer MCP server endpoint — (ACTUAL bound port, per-session bearer
     /// token) — wired by `core.rs` after spawn. `None` = server not running yet
     /// (Backend B unavailable). Backend B's `--mcp-config` needs BOTH: the real
@@ -265,7 +262,6 @@ impl Clone for ChatPanel {
             input_buffer: self.input_buffer.clone(),
             selection: self.selection.clone(),
             selected_items: self.selected_items.clone(),
-            scroll_to_bottom: self.scroll_to_bottom,
             api_key_popup_open: self.api_key_popup_open,
             resolved_backend: self.resolved_backend,
             attachments: self.attachments.clone(),
@@ -273,7 +269,6 @@ impl Clone for ChatPanel {
             code_path_buffer: self.code_path_buffer.clone(),
             wiki_path_buffer: self.wiki_path_buffer.clone(),
             api_key_buffer: self.api_key_buffer.clone(),
-            model_selection: self.model_selection.clone(),
             agent_session: Arc::clone(&self.agent_session),
             pending_request: self.pending_request,
             event_rx: Arc::clone(&self.event_rx),
@@ -284,7 +279,6 @@ impl Clone for ChatPanel {
             pending_clear_selection: self.pending_clear_selection,
             pending_highlight_actions: self.pending_highlight_actions.clone(),
             viewport_token: self.viewport_token.clone(),
-            backend: self.backend,
             #[cfg(feature = "viewer-mcp")]
             mcp_endpoint: self.mcp_endpoint.clone(),
             #[cfg(feature = "viewer-mcp")]
@@ -329,7 +323,6 @@ impl ChatPanel {
             input_buffer: String::new(),
             selection: None,
             selected_items: Vec::new(),
-            scroll_to_bottom: false,
             api_key_popup_open: false,
             resolved_backend: None,
             attachments: Vec::new(),
@@ -337,7 +330,6 @@ impl ChatPanel {
             code_path_buffer: String::new(),
             wiki_path_buffer: String::new(),
             api_key_buffer: String::new(),
-            model_selection: "claude-sonnet-4-6".into(),
             agent_session: Arc::new(Mutex::new(None)),
             pending_request: false,
             event_rx: Arc::new(Mutex::new(None)),
@@ -348,10 +340,6 @@ impl ChatPanel {
             pending_clear_selection: false,
             pending_highlight_actions: Vec::new(),
             viewport_token: None,
-            #[cfg(feature = "viewer-mcp")]
-            backend: ChatBackendKind::ClaudeCode,
-            #[cfg(not(feature = "viewer-mcp"))]
-            backend: ChatBackendKind::Native,
             #[cfg(feature = "viewer-mcp")]
             mcp_endpoint: None,
             #[cfg(feature = "viewer-mcp")]
@@ -414,7 +402,6 @@ impl ChatPanel {
             highlights: vec![],
             expandable_content: None,
         });
-        self.scroll_to_bottom = true;
     }
 
     /// Update the timeline (region) selection. Shown live in the composer pill.
@@ -866,7 +853,6 @@ impl ChatPanel {
         #[cfg(not(feature = "viewer-mcp"))]
         let b = ChatBackendKind::Native;
         self.resolved_backend = Some(b);
-        self.backend = b;
         b
     }
 
@@ -997,13 +983,10 @@ impl ChatPanel {
                 None => {}
             }
         }
+        // Without viewer-mcp, resolve_backend() always yields Native, so this
+        // path is unreachable in those builds.
         #[cfg(not(feature = "viewer-mcp"))]
-        self.add_message(
-            ChatMessageKind::System,
-            "⚠ The Claude Code backend requires a build with the `viewer-mcp` \
-             feature (it drives the in-viewer MCP server). Rebuild with \
-             `--features viewer-mcp`, or switch back to the Native backend.",
-        );
+        unreachable!("ClaudeCode backend dispatched without the viewer-mcp feature");
     }
 
     /// Backend A: the native in-process agent (`AgentSession` over raw HTTP).
@@ -1029,19 +1012,14 @@ impl ChatPanel {
         let context_section = self.build_attachment_context();
 
         self.add_message(ChatMessageKind::User, &user_query);
-        let time_hint = if self.model_selection.contains("opus") {
-            "Opus with extended thinking — allow 3–5 min"
-        } else {
-            "Sonnet — typically 30–90 s"
-        };
+        let time_hint = "typically 30–90 s";
         self.add_message(
             ChatMessageKind::System,
             format!("Working… ({time_hint})"),
         );
         self.pending_request = true;
 
-        let app_context = String::new();
-        let model = self.model_selection.clone();
+        let model = NATIVE_MODEL.to_owned();
         let session_arc = Arc::clone(&self.agent_session);
         let selection_preamble = self.build_selection_preamble();
         let query_clone = user_query;
@@ -1076,7 +1054,6 @@ impl ChatPanel {
                     duckdb_path,
                     code_path,
                     wiki_path,
-                    app_context,
                     event_tx.clone(),
                     cmd_rx,
                 ),
@@ -1218,19 +1195,17 @@ impl ChatPanel {
             ui.label(egui::RichText::new(vis_label).size(13.5).color(vis_color))
                 .on_hover_text("Screenshot + zoom always available");
 
-            // Model + API key status. The ClaudeCode backend needs no key, so the
-            // key warning only nags on Native.
+            // Engine + API key status. The Claude Code backend needs no key, so
+            // the key warning only nags on the API engine.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let model_short = if self.backend == ChatBackendKind::ClaudeCode {
-                    "Claude Code"
-                } else if self.model_selection.contains("opus") {
-                    "Opus"
-                } else {
-                    "Sonnet"
+                let engine = self.resolved_backend.unwrap_or(ChatBackendKind::Native);
+                let engine_label = match engine {
+                    ChatBackendKind::ClaudeCode => "Claude Code",
+                    ChatBackendKind::Native => "API",
                 };
-                if has_key || self.backend == ChatBackendKind::ClaudeCode {
+                if has_key || engine == ChatBackendKind::ClaudeCode {
                     ui.label(
-                        egui::RichText::new(model_short)
+                        egui::RichText::new(engine_label)
                             .small()
                             .color(egui::Color32::from_rgb(100, 100, 100)),
                     );
@@ -1401,7 +1376,6 @@ impl ChatPanel {
                                     ChatMessageKind::System => "[system]",
                                     ChatMessageKind::User => "[user]",
                                     ChatMessageKind::Analysis => "[analysis]",
-                                    ChatMessageKind::Context => "[context]",
                                 };
                                 let base = format!("{} {}", prefix, m.text);
                                 if let Some(ref content) = m.expandable_content {
@@ -2053,13 +2027,6 @@ fn render_message(
                 }
             }
         }
-        ChatMessageKind::Context => {
-            ui.label(
-                egui::RichText::new(&msg.text)
-                    .small()
-                    .color(egui::Color32::from_rgb(37, 99, 235)),
-            );
-        }
     }
 }
 
@@ -2127,7 +2094,6 @@ impl crate::ai::bridge::EventSink for ChatPanel {
             highlights: vec![],
             expandable_content: if has_content { Some(full_content) } else { None },
         });
-        self.scroll_to_bottom = true;
     }
 
     fn on_navigation(&mut self, nav: PendingNavigation, _reply_tx: &mpsc::Sender<UiCommand>) {
@@ -2194,7 +2160,6 @@ impl crate::ai::bridge::EventSink for ChatPanel {
                 expandable_content: None,
             });
         }
-        self.scroll_to_bottom = true;
 
         if response.queries_executed > 0 {
             self.add_message(

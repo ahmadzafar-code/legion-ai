@@ -198,8 +198,6 @@ pub struct AgentSession {
     pub code_path: String,
     /// Path to the Legion wiki root (used by wiki_index/wiki_read/wiki_search).
     pub wiki_path: String,
-    /// Free-text application context from the user (e.g. goals, configuration).
-    pub app_context: String,
     /// Maximum agent turns before forcing a summary response.
     pub max_turns: usize,
 
@@ -241,14 +239,12 @@ impl AgentSession {
     ///
     /// `event_tx` sends [`AgentEvent`]s to the UI thread (progressive status).
     /// `command_rx` receives [`UiCommand`]s from the UI thread (screenshot data).
-    #[allow(clippy::too_many_arguments)] // tool paths (duckdb/code/wiki) + channels
     pub fn new(
         api_key: String,
         model: String,
         duckdb_path: String,
         code_path: String,
         wiki_path: String,
-        app_context: String,
         event_tx: mpsc::Sender<AgentEvent>,
         command_rx: mpsc::Receiver<UiCommand>,
     ) -> Self {
@@ -266,7 +262,6 @@ impl AgentSession {
             duckdb_path,
             code_path,
             wiki_path,
-            app_context,
             max_turns: 25,
             system_prompt,
             tools,
@@ -301,12 +296,6 @@ impl AgentSession {
         span.record("queries_executed", response.queries_executed as u64);
         span.record("n_highlights", response.highlights.len() as u64);
         Ok(response)
-    }
-
-    /// Clear conversation history (start fresh).
-    pub fn reset(&mut self) {
-        self.messages.clear();
-        self.findings.clear();
     }
 
     /// Record a finding (or replace all findings when `replace`). Multi-line
@@ -1626,7 +1615,6 @@ Found issues.
             String::new(),
             String::new(),
             String::new(),
-            String::new(),
             event_tx,
             command_rx,
         )
@@ -1707,7 +1695,6 @@ Found issues.
             "key".into(),
             "model".into(),
             db.to_str().unwrap().to_owned(),
-            String::new(),
             String::new(),
             String::new(),
             event_tx,

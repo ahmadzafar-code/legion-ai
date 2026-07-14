@@ -1,7 +1,7 @@
 #![warn(clippy::all, rust_2018_idioms)]
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "ai"))]
 use std::path::Path;
 
 use legion_prof_viewer::deferred_data::DeferredDataSource;
@@ -18,14 +18,14 @@ fn http_ds(url: Url) -> Box<dyn DeferredDataSource> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn file_ds(path: impl AsRef<Path>) -> Box<dyn DeferredDataSource> {
+fn file_ds(path: impl AsRef<std::path::Path>) -> Box<dyn DeferredDataSource> {
     Box::new(ParallelDeferredDataSource::new(FileDataSource::new(path)))
 }
 
 /// Look for a DuckDB database next to an opened profile/archive path.
 /// Convention: `<base>_archive` → `<base>_db`; otherwise scan the same
 /// directory for any `*_db` or `*.duckdb` file.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "ai"))]
 fn detect_sibling_duckdb(path: &str) -> Option<String> {
     let p = Path::new(path);
     if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
@@ -53,12 +53,40 @@ fn detect_sibling_duckdb(path: &str) -> Option<String> {
     None
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+/// Without the `ai` feature this is upstream's entry point, byte-for-byte
+/// behavior: every argument is a URL or a file path (non-UTF-8 paths included).
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "ai")))]
 fn main() {
-    let args: Vec<String> = std::env::args_os()
+    let ds: Vec<_> = std::env::args_os()
         .skip(1)
-        .filter_map(|a| a.into_string().ok())
+        .map(|arg| {
+            arg.into_string()
+                .map(|s| {
+                    Url::parse(&s).map(http_ds).unwrap_or_else(|_| {
+                        println!(
+                            "The argument '{}' does not appear to be a valid URL. Attempting to open it as a local file...",
+                            &s
+                        );
+                        file_ds(&s)
+                    })
+                })
+                .unwrap_or_else(file_ds)
+        })
         .collect();
+
+    legion_prof_viewer::app::start(ds);
+}
+
+/// With the `ai` feature, the AI Co-Pilot adds three flags on top of upstream's
+/// URL/path arguments:
+///   --duckdb <path.duckdb>   profile database for the data tools
+///   --code <dir>             profiled application's source (read_code root)
+///   --wiki <dir>             Legion knowledge wiki root
+/// A missing --duckdb is auto-detected next to an opened profile; a missing
+/// --wiki auto-detects `wiki-legion/wiki` relative to the launch directory.
+#[cfg(all(not(target_arch = "wasm32"), feature = "ai"))]
+fn main() {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
 
     let mut ds: Vec<Box<dyn DeferredDataSource>> = Vec::new();
     let mut file_paths: Vec<String> = Vec::new();
@@ -66,22 +94,26 @@ fn main() {
     let mut code_path: Option<String> = None;
     let mut wiki_path: Option<String> = None;
 
+    let flag_value = |args: &[std::ffi::OsString], i: usize| -> Option<String> {
+        args.get(i + 1).map(|v| v.to_string_lossy().into_owned())
+    };
+
     let mut i = 0;
     while i < args.len() {
-        match args[i].as_str() {
-            "--duckdb" => {
-                duckdb_path = args.get(i + 1).cloned();
+        match args[i].to_str() {
+            Some("--duckdb") => {
+                duckdb_path = flag_value(&args, i);
                 i += 2;
             }
-            "--code" => {
-                code_path = args.get(i + 1).cloned();
+            Some("--code") => {
+                code_path = flag_value(&args, i);
                 i += 2;
             }
-            "--wiki" => {
-                wiki_path = args.get(i + 1).cloned();
+            Some("--wiki") => {
+                wiki_path = flag_value(&args, i);
                 i += 2;
             }
-            s => {
+            Some(s) => {
                 match Url::parse(s) {
                     Ok(url) => ds.push(http_ds(url)),
                     Err(_) => {
@@ -90,6 +122,11 @@ fn main() {
                         file_paths.push(s.to_owned());
                     }
                 }
+                i += 1;
+            }
+            // Non-UTF-8 argument: same as upstream — open it as a file path.
+            None => {
+                ds.push(file_ds(&args[i]));
                 i += 1;
             }
         }
@@ -103,9 +140,9 @@ fn main() {
         println!("Legion AI Co-Pilot DuckDB: {db}");
     }
 
-    // The code root is explicit-only: set solely by the `--code` flag (no autodetect,
-    // no cwd default). Launch with `--code code_examples` to enable the source
-    // briefing (MCP instructions + overview line) and read_code/list_files.
+    // The code root is explicit-only: set solely by the `--code` flag (no
+    // autodetect, no cwd default) — guessing an application source tree wrong
+    // is worse than leaving read_code off until the user connects one.
     if let Some(ref code) = code_path {
         println!("Legion AI Co-Pilot code root: {code}");
     }
