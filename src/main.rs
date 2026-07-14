@@ -94,23 +94,37 @@ fn main() {
     let mut code_path: Option<String> = None;
     let mut wiki_path: Option<String> = None;
 
-    let flag_value = |args: &[std::ffi::OsString], i: usize| -> Option<String> {
-        args.get(i + 1).map(|v| v.to_string_lossy().into_owned())
+    // A flag's value must exist and must not itself be a flag — catching the
+    // classic `--duckdb --wiki` (empty shell variable) mistake at launch with a
+    // clear error instead of a viewer misconfigured with the literal "--wiki".
+    let flag_value = |args: &[std::ffi::OsString], i: usize| -> String {
+        let flag = args[i].to_string_lossy();
+        match args.get(i + 1).map(|v| v.to_string_lossy().into_owned()) {
+            Some(v) if !v.starts_with("--") => v,
+            _ => {
+                eprintln!(
+                    "error: {flag} requires a path value\n\
+                     usage: legion_prof_viewer [<profile-path-or-URL>...] \
+                     [--duckdb <path.duckdb>] [--code <dir>] [--wiki <dir>]"
+                );
+                std::process::exit(2);
+            }
+        }
     };
 
     let mut i = 0;
     while i < args.len() {
         match args[i].to_str() {
             Some("--duckdb") => {
-                duckdb_path = flag_value(&args, i);
+                duckdb_path = Some(flag_value(&args, i));
                 i += 2;
             }
             Some("--code") => {
-                code_path = flag_value(&args, i);
+                code_path = Some(flag_value(&args, i));
                 i += 2;
             }
             Some("--wiki") => {
-                wiki_path = flag_value(&args, i);
+                wiki_path = Some(flag_value(&args, i));
                 i += 2;
             }
             Some(s) => {
@@ -130,6 +144,13 @@ fn main() {
                 i += 1;
             }
         }
+    }
+
+    if ds.is_empty() {
+        println!(
+            "No profile opened — pass a profile archive path or URL \
+             (the viewer starts empty otherwise)."
+        );
     }
 
     // Auto-detect a sibling DuckDB next to the opened profile when not given.
