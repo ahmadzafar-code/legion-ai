@@ -50,6 +50,10 @@ pub struct AgentResponse {
     pub highlights: Vec<Highlight>,
     pub queries_executed: usize,
     pub turns_used: usize,
+    /// Compact token/cost line from the backend's terminal usage report (the
+    /// Claude Code `result` event). The embedded loop leaves it `None`.
+    /// Display-only — the panel appends it to the "Done." line.
+    pub usage_note: Option<String>,
 }
 
 // ── Internal API types (serde for Claude wire format) ────────────────────────
@@ -588,6 +592,7 @@ impl AgentSession {
                     highlights,
                     queries_executed,
                     turns_used: turns,
+                    usage_note: None,
                 });
             }
 
@@ -609,6 +614,7 @@ impl AgentSession {
                     highlights,
                     queries_executed,
                     turns_used: turns,
+                    usage_note: None,
                 });
             }
             Span::current().record("n_tool_calls", tool_use_blocks.len() as u64);

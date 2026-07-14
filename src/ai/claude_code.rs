@@ -881,6 +881,102 @@ fn input_preview(input: &Value) -> String {
     p
 }
 
+/// `Some((media_type, base64_len))` when `b` is an image content block — the
+/// Claude API shape (`source.data` / `source.media_type`) or, defensively, the
+/// MCP shape (`data` / `mimeType`) in case a future claude echoes it unconverted.
+fn image_data_len(b: &Value) -> Option<(String, usize)> {
+    if b.get("type").and_then(Value::as_str) != Some("image") {
+        return None;
+    }
+    let media = b
+        .pointer("/source/media_type")
+        .or_else(|| b.get("mimeType"))
+        .and_then(Value::as_str)
+        .unwrap_or("image")
+        .to_owned();
+    let len = b
+        .pointer("/source/data")
+        .or_else(|| b.get("data"))
+        .and_then(Value::as_str)
+        .map(str::len)
+        .unwrap_or(0);
+    Some((media, len))
+}
+
+/// Render a `tool_result` content value for the transcript. Byte-identical to
+/// `Value::to_string()` UNLESS the content array carries image blocks — a
+/// screenshot's ~400 KB of base64 would otherwise sit in panel memory forever,
+/// fill the expanded row, and dump into "Copy transcript". Each image block is
+/// replaced by a short note (media type + decoded size). Display-only: this
+/// line is claude's stdout ECHO of the conversation; the model already received
+/// the real image block as vision input.
+fn content_display(c: &Value) -> String {
+    let Some(blocks) = c.as_array() else {
+        return c.to_string();
+    };
+    if !blocks.iter().any(|b| image_data_len(b).is_some()) {
+        return c.to_string();
+    }
+    let shown: Vec<Value> = blocks
+        .iter()
+        .map(|b| match image_data_len(b) {
+            Some((media, b64_len)) => {
+                let kb = (b64_len as f64 * 3.0 / 4.0 / 1024.0).round() as u64;
+                serde_json::json!({
+                    "type": "image",
+                    "note": format!(
+                        "[{media} ~{kb} KB - sent to the model as vision input; \
+                         base64 omitted from transcript]"
+                    ),
+                })
+            }
+            None => b.clone(),
+        })
+        .collect();
+    Value::Array(shown).to_string()
+}
+
+/// `1234` -> `"1.2K"`, `987` -> `"987"`, `2_400_000` -> `"2.4M"`.
+fn fmt_tok(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1e6)
+    } else if n >= 1_000 {
+        format!("{:.1}K", n as f64 / 1e3)
+    } else {
+        n.to_string()
+    }
+}
+
+/// Compact token/cost note from a `result` event's `usage` / `total_cost_usd`
+/// fields, e.g. `tokens: in 1.2K + 22.0K cache-read, out 1.9K, $0.042`.
+/// Reports whatever claude attributed to this run — indicative, not billing.
+/// `None` when the event carries no usage numbers.
+fn usage_note(v: &Value) -> Option<String> {
+    let u = v.get("usage")?;
+    let t = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
+    let input = t("input_tokens");
+    let cache_read = t("cache_read_input_tokens");
+    let cache_write = t("cache_creation_input_tokens");
+    let output = t("output_tokens");
+    if input + cache_read + cache_write + output == 0 {
+        return None;
+    }
+    let mut s = format!("tokens: in {}", fmt_tok(input));
+    if cache_read > 0 {
+        s.push_str(&format!(" + {} cache-read", fmt_tok(cache_read)));
+    }
+    if cache_write > 0 {
+        s.push_str(&format!(" + {} cache-write", fmt_tok(cache_write)));
+    }
+    s.push_str(&format!(", out {}", fmt_tok(output)));
+    if let Some(c) = v.get("total_cost_usd").and_then(Value::as_f64) {
+        if c > 0.0 {
+            s.push_str(&format!(", ${c:.3}"));
+        }
+    }
+    Some(s)
+}
+
 /// Parser state threaded across stdout lines (one per child): `names`
 /// correlates `tool_use` ids to names so the matching `tool_result` can be
 /// labeled; `last_text` deduplicates the final `result` text against the last
@@ -940,7 +1036,7 @@ fn map_line(line: &str, st: &mut MapState) -> Vec<AgentEvent> {
                     if b.get("type").and_then(Value::as_str) == Some("tool_result") {
                         let id = b.get("tool_use_id").and_then(Value::as_str).unwrap_or("");
                         let name = st.names.remove(id).unwrap_or_else(|| "tool".into());
-                        let full = b.get("content").map(|c| c.to_string()).unwrap_or_default();
+                        let full = b.get("content").map(content_display).unwrap_or_default();
                         let mut summary: String = full.chars().take(100).collect();
                         if full.chars().count() > 100 {
                             summary.push('…');
@@ -988,6 +1084,7 @@ fn map_line(line: &str, st: &mut MapState) -> Vec<AgentEvent> {
                     highlights: Vec::new(), // this backend's highlights land LIVE via the MCP bridge
                     queries_executed: 0,
                     turns_used: v.get("num_turns").and_then(Value::as_u64).unwrap_or(0) as usize,
+                    usage_note: usage_note(&v),
                 }));
                 st.last_text = None; // fresh turn, fresh dedup state
             }
@@ -1269,6 +1366,67 @@ mod tests {
         assert!(names.names.is_empty(), "consumed the id→name entry");
     }
 
+    /// A tool_result echoing a screenshot (Claude-API image block + metadata
+    /// text block) must store a short placeholder, NOT the base64 — otherwise
+    /// the ~400 KB wall sits in panel memory, fills the expanded row, and dumps
+    /// into "Copy transcript". The metadata text block survives verbatim.
+    #[test]
+    fn map_tool_result_replaces_image_base64_with_placeholder() {
+        let mut names = MapState::default();
+        names
+            .names
+            .insert("toolu_01A".to_string(), "set_view".to_string());
+        let b64 = "/9j/4AAQ".repeat(1500); // 12,000 b64 chars ≈ 9,000 bytes decoded
+        let line = format!(
+            r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_01A","content":[{{"type":"image","source":{{"type":"base64","media_type":"image/jpeg","data":"{b64}"}}}},{{"type":"text","text":"Visible: 821.8ms-2523.7ms; rows: n0_utility_u0"}}]}}]}},"session_id":"s"}}"#
+        );
+        let evs = map_line(&line, &mut names);
+        match &evs[0] {
+            AgentEvent::ToolResult {
+                summary,
+                full_content,
+                ..
+            } => {
+                assert!(!full_content.contains("4AAQ"), "base64 must not be stored");
+                assert!(full_content.contains("base64 omitted"));
+                assert!(full_content.contains("image/jpeg"));
+                assert!(full_content.contains("~9 KB"));
+                assert!(
+                    full_content.contains("Visible: 821.8ms-2523.7ms; rows: n0_utility_u0"),
+                    "metadata text block must survive verbatim"
+                );
+                assert!(
+                    summary.contains("image"),
+                    "collapsed preview is informative, not base64: {summary}"
+                );
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    /// Defensive: an UNCONVERTED MCP-shape image block (`data` + `mimeType`)
+    /// is also replaced, in case a future claude echoes it as-is.
+    #[test]
+    fn map_tool_result_replaces_mcp_shape_image_too() {
+        let mut names = MapState::default();
+        names
+            .names
+            .insert("toolu_01A".to_string(), "screenshot".to_string());
+        let b64 = "iVBORw0K".repeat(1000);
+        let line = format!(
+            r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_01A","content":[{{"type":"image","data":"{b64}","mimeType":"image/png"}}]}}]}},"session_id":"s"}}"#
+        );
+        let evs = map_line(&line, &mut names);
+        match &evs[0] {
+            AgentEvent::ToolResult { full_content, .. } => {
+                assert!(!full_content.contains("iVBORw0K"));
+                assert!(full_content.contains("image/png"));
+                assert!(full_content.contains("base64 omitted"));
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
     #[test]
     fn map_result_success_is_complete_with_turns() {
         let mut names = MapState::default();
@@ -1280,6 +1438,27 @@ mod tests {
                 assert_eq!(r.text, "DONE");
                 assert_eq!(r.turns_used, 3);
                 assert!(r.highlights.is_empty());
+                assert!(r.usage_note.is_none(), "no usage object -> no note");
+            }
+            other => panic!("expected Complete, got {other:?}"),
+        }
+    }
+
+    /// `result.usage` + `total_cost_usd` surface as a compact note on Complete;
+    /// zero components are omitted.
+    #[test]
+    fn map_result_usage_becomes_done_note() {
+        let mut names = MapState::default();
+        let line = r#"{"type":"result","subtype":"success","is_error":false,"num_turns":3,"result":"DONE","total_cost_usd":0.0421,"usage":{"input_tokens":1234,"cache_read_input_tokens":22000,"cache_creation_input_tokens":0,"output_tokens":1900},"session_id":"s"}"#;
+        let evs = map_line(line, &mut names);
+        match &evs[0] {
+            AgentEvent::Complete(r) => {
+                let note = r.usage_note.as_deref().expect("usage present -> note");
+                assert!(note.contains("in 1.2K"), "{note}");
+                assert!(note.contains("22.0K cache-read"), "{note}");
+                assert!(!note.contains("cache-write"), "zero component omitted: {note}");
+                assert!(note.contains("out 1.9K"), "{note}");
+                assert!(note.contains("$0.042"), "{note}");
             }
             other => panic!("expected Complete, got {other:?}"),
         }

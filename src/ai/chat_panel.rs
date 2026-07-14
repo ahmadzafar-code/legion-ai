@@ -2204,7 +2204,12 @@ impl crate::ai::bridge::EventSink for ChatPanel {
             );
         } else {
             // Claude Code backend: queries run inside the MCP server, uncounted here.
-            self.add_message(ChatMessageKind::System, "Done.");
+            match response.usage_note {
+                Some(note) => {
+                    self.add_message(ChatMessageKind::System, format!("Done. ({note})"));
+                }
+                None => self.add_message(ChatMessageKind::System, "Done."),
+            }
         }
         self.pending_request = false;
         self.end_of_turn_channel_cleanup();
