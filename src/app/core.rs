@@ -3716,7 +3716,7 @@ impl eframe::App for ProfApp {
                                     1.0,
                                     egui::Color32::from_rgb(190, 195, 205),
                                 ))
-                                .rounding(6.0)
+                                .rounding(0.0)
                                 .min_size(egui::vec2(0.0, 28.0)),
                         )
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
