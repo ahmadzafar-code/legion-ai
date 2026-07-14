@@ -19,8 +19,8 @@
 //! When no second consumer exists, the embedded chat agent remains the
 //! transparent sole driver (no token claim on its path).
 
-use super::agent::{AgentEvent, AgentResponse, UiCommand};
 use super::PendingNavigation;
+use super::agent::{AgentEvent, AgentResponse, UiCommand};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -85,24 +85,55 @@ pub trait EventSink {
 /// Dispatch one [`AgentEvent`] to `sink`, routing any reply to `reply_tx`. This is
 /// the single source of truth for AgentEvent → UI handling, shared across every
 /// event source.
-pub fn apply_agent_event<S: EventSink>(sink: &mut S, event: AgentEvent, reply_tx: &Sender<UiCommand>) {
+pub fn apply_agent_event<S: EventSink>(
+    sink: &mut S,
+    event: AgentEvent,
+    reply_tx: &Sender<UiCommand>,
+) {
     match event {
         AgentEvent::ToolCall { name, purpose } => sink.on_tool_call(name, purpose),
-        AgentEvent::ToolResult { name, summary, full_content } => {
-            sink.on_tool_result(name, summary, full_content)
-        }
+        AgentEvent::ToolResult {
+            name,
+            summary,
+            full_content,
+        } => sink.on_tool_result(name, summary, full_content),
         AgentEvent::ScreenshotRequest { request_id } => {
             sink.on_navigation(PendingNavigation::Screenshot { request_id }, reply_tx)
         }
-        AgentEvent::ZoomRequest { request_id, start_ns, stop_ns } => {
-            sink.on_navigation(PendingNavigation::Zoom { request_id, start_ns, stop_ns }, reply_tx)
-        }
-        AgentEvent::PanRequest { request_id, direction, percent } => {
-            sink.on_navigation(PendingNavigation::Pan { request_id, direction, percent }, reply_tx)
-        }
-        AgentEvent::ScrollToRequest { request_id, entry_slug } => {
-            sink.on_navigation(PendingNavigation::ScrollTo { request_id, entry_slug }, reply_tx)
-        }
+        AgentEvent::ZoomRequest {
+            request_id,
+            start_ns,
+            stop_ns,
+        } => sink.on_navigation(
+            PendingNavigation::Zoom {
+                request_id,
+                start_ns,
+                stop_ns,
+            },
+            reply_tx,
+        ),
+        AgentEvent::PanRequest {
+            request_id,
+            direction,
+            percent,
+        } => sink.on_navigation(
+            PendingNavigation::Pan {
+                request_id,
+                direction,
+                percent,
+            },
+            reply_tx,
+        ),
+        AgentEvent::ScrollToRequest {
+            request_id,
+            entry_slug,
+        } => sink.on_navigation(
+            PendingNavigation::ScrollTo {
+                request_id,
+                entry_slug,
+            },
+            reply_tx,
+        ),
         AgentEvent::SetViewRequest {
             request_id,
             start_ns,
@@ -131,9 +162,11 @@ pub fn apply_agent_event<S: EventSink>(sink: &mut S, event: AgentEvent, reply_tx
         AgentEvent::ResetViewRequest { request_id } => {
             sink.on_navigation(PendingNavigation::ResetView { request_id }, reply_tx)
         }
-        AgentEvent::QuestionForUser { request_id, question, options } => {
-            sink.on_question(request_id, question, options, reply_tx)
-        }
+        AgentEvent::QuestionForUser {
+            request_id,
+            question,
+            options,
+        } => sink.on_question(request_id, question, options, reply_tx),
         AgentEvent::ClearHighlights => sink.on_clear_highlights(),
         AgentEvent::HighlightRequest {
             request_id,
@@ -323,7 +356,10 @@ impl UiBridge {
         timeout: Duration,
     ) -> Result<UiCommand, String> {
         // RAII: held for the whole request; dropped (released) on any return below.
-        let _guard = self.token.try_claim(self.consumer_id).map_err(String::from)?;
+        let _guard = self
+            .token
+            .try_claim(self.consumer_id)
+            .map_err(String::from)?;
         self.send_and_await(make_event, match_reply, timeout)
     }
 
@@ -414,8 +450,14 @@ mod tests {
         let (ctx2, crx2) = channel::<UiCommand>();
 
         // Source 1 issues a Zoom; source 2 issues a plain Screenshot.
-        etx1.send(AgentEvent::ZoomRequest { request_id: 7, start_ns: 1, stop_ns: 2 }).unwrap();
-        etx2.send(AgentEvent::ScreenshotRequest { request_id: 9 }).unwrap();
+        etx1.send(AgentEvent::ZoomRequest {
+            request_id: 7,
+            start_ns: 1,
+            stop_ns: 2,
+        })
+        .unwrap();
+        etx2.send(AgentEvent::ScreenshotRequest { request_id: 9 })
+            .unwrap();
 
         let mut sink = FakeSink::default();
         let d1 = drain_source(&erx1, &ctx1, &mut sink);
@@ -424,14 +466,32 @@ mod tests {
 
         // Both serviced (order: source1 then source2).
         assert_eq!(sink.navs.len(), 2);
-        assert!(matches!(sink.navs[0], PendingNavigation::Zoom { request_id: 7, .. }));
-        assert!(matches!(sink.navs[1], PendingNavigation::Screenshot { request_id: 9 }));
+        assert!(matches!(
+            sink.navs[0],
+            PendingNavigation::Zoom { request_id: 7, .. }
+        ));
+        assert!(matches!(
+            sink.navs[1],
+            PendingNavigation::Screenshot { request_id: 9 }
+        ));
 
         // Each reply landed on its OWN channel — exactly one each, none crossed.
-        assert!(matches!(crx1.try_recv(), Ok(UiCommand::ScreenshotData { .. })));
-        assert!(crx1.try_recv().is_err(), "channel 1 must not receive channel 2's reply");
-        assert!(matches!(crx2.try_recv(), Ok(UiCommand::ScreenshotData { .. })));
-        assert!(crx2.try_recv().is_err(), "channel 2 must not receive channel 1's reply");
+        assert!(matches!(
+            crx1.try_recv(),
+            Ok(UiCommand::ScreenshotData { .. })
+        ));
+        assert!(
+            crx1.try_recv().is_err(),
+            "channel 1 must not receive channel 2's reply"
+        );
+        assert!(matches!(
+            crx2.try_recv(),
+            Ok(UiCommand::ScreenshotData { .. })
+        ));
+        assert!(
+            crx2.try_recv().is_err(),
+            "channel 2 must not receive channel 1's reply"
+        );
     }
 
     #[test]
@@ -441,8 +501,14 @@ mod tests {
         etx.send(AgentEvent::ClearHighlights).unwrap();
         drop(etx); // sender gone
         let mut sink = FakeSink::default();
-        assert!(drain_source(&erx, &ctx, &mut sink), "must report disconnect");
-        assert_eq!(sink.clears, 1, "the queued event is still processed before disconnect");
+        assert!(
+            drain_source(&erx, &ctx, &mut sink),
+            "must report disconnect"
+        );
+        assert_eq!(
+            sink.clears, 1,
+            "the queued event is still processed before disconnect"
+        );
     }
 
     /// Consumer A owns the viewport -> consumer B is cleanly locked out; after A
@@ -459,10 +525,16 @@ mod tests {
         // A is re-entrant, but the re-entrant guard is NON-OWNING: dropping it must
         // NOT release A's claim (pins the premature-release fix).
         {
-            let _reentrant = token.try_claim(1).expect("re-entrant claim by the same consumer");
+            let _reentrant = token
+                .try_claim(1)
+                .expect("re-entrant claim by the same consumer");
             assert_eq!(token.current_owner(), Some(1));
         }
-        assert_eq!(token.current_owner(), Some(1), "re-entrant drop must not release A");
+        assert_eq!(
+            token.current_owner(),
+            Some(1),
+            "re-entrant drop must not release A"
+        );
 
         drop(guard_a);
         assert_eq!(token.current_owner(), None, "owning guard releases on drop");
@@ -481,8 +553,15 @@ mod tests {
             assert_eq!(token.current_owner(), Some(1));
             // No explicit release — the consumer "dies" and `_dead` drops at scope end.
         }
-        assert_eq!(token.current_owner(), None, "guard freed the token on drop, not on success");
-        assert!(token.try_claim(2).is_ok(), "a different consumer can now claim");
+        assert_eq!(
+            token.current_owner(),
+            None,
+            "guard freed the token on drop, not on success"
+        );
+        assert!(
+            token.try_claim(2).is_ok(),
+            "a different consumer can now claim"
+        );
     }
 
     /// UiBridge end-to-end with a stub UI thread: claim -> send -> matching reply,
@@ -517,7 +596,10 @@ mod tests {
                 Duration::from_secs(5),
             )
             .expect("request should round-trip");
-        assert!(matches!(reply, UiCommand::ScreenshotData { request_id: 0, .. }));
+        assert!(matches!(
+            reply,
+            UiCommand::ScreenshotData { request_id: 0, .. }
+        ));
         // Viewport released after the request returned (guard dropped).
         assert_eq!(token.current_owner(), None);
         ui.join().unwrap();
@@ -606,7 +688,11 @@ mod tests {
 
         // Wait until A actually holds the token, then prove B is locked out.
         claimed_rx.recv().expect("A claimed");
-        assert_eq!(token.current_owner(), Some(1), "A holds the viewport in flight");
+        assert_eq!(
+            token.current_owner(),
+            Some(1),
+            "A holds the viewport in flight"
+        );
         let busy = bridge_b
             .request(
                 |rid| AgentEvent::ScreenshotRequest { request_id: rid },
@@ -614,13 +700,22 @@ mod tests {
                 Duration::from_secs(1),
             )
             .unwrap_err();
-        assert_eq!(busy, "viewport busy", "B is locked out while A's round-trip is in flight");
+        assert_eq!(
+            busy, "viewport busy",
+            "B is locked out while A's round-trip is in flight"
+        );
 
         // Let A's reply through; A completes and releases.
         release_tx.send(()).unwrap();
         let a_reply = a.join().unwrap().expect("A round-trips");
-        assert!(matches!(a_reply, UiCommand::ScreenshotData { png_bytes, .. } if png_bytes == vec![0xA]));
-        assert_eq!(token.current_owner(), None, "A released after its round-trip");
+        assert!(
+            matches!(a_reply, UiCommand::ScreenshotData { png_bytes, .. } if png_bytes == vec![0xA])
+        );
+        assert_eq!(
+            token.current_owner(),
+            None,
+            "A released after its round-trip"
+        );
 
         // Now B succeeds.
         let b_reply = bridge_b
@@ -630,7 +725,9 @@ mod tests {
                 Duration::from_secs(5),
             )
             .expect("B succeeds after A releases");
-        assert!(matches!(b_reply, UiCommand::ScreenshotData { png_bytes, .. } if png_bytes == vec![0xB]));
+        assert!(
+            matches!(b_reply, UiCommand::ScreenshotData { png_bytes, .. } if png_bytes == vec![0xB])
+        );
         ui.join().unwrap();
     }
 
@@ -658,7 +755,11 @@ mod tests {
         let reader = UiBridge::new(event_tx, cmd_rx, token.clone(), 2);
         let ui = std::thread::spawn(move || {
             if let Ok(AgentEvent::GetSelection { request_id }) = event_rx.recv() {
-                let _ = cmd_tx.send(UiCommand::SelectionData { request_id, items: vec![], range: None });
+                let _ = cmd_tx.send(UiCommand::SelectionData {
+                    request_id,
+                    items: vec![],
+                    range: None,
+                });
             }
         });
 
@@ -683,6 +784,9 @@ mod tests {
                 Duration::from_millis(50),
             )
             .unwrap_err();
-        assert_eq!(err, "viewport busy", "driving must still be locked out by the token");
+        assert_eq!(
+            err, "viewport busy",
+            "driving must still be locked out by the token"
+        );
     }
 }

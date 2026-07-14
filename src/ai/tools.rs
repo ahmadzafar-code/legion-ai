@@ -13,8 +13,8 @@ use std::path::Path;
 
 /// Source extensions included in file listings and tree views.
 const SOURCE_EXTS: &[&str] = &[
-    "cc", "cpp", "c", "h", "hpp", "cu", "cuh", "py", "rs", "rg",
-    "mk", "cmake", "toml", "json", "yaml", "yml", "txt", "md",
+    "cc", "cpp", "c", "h", "hpp", "cu", "cuh", "py", "rs", "rg", "mk", "cmake", "toml", "json",
+    "yaml", "yml", "txt", "md",
 ];
 
 /// Directories to skip when walking the source tree.
@@ -79,7 +79,9 @@ fn walk_dir_tree(
 
     for entry in entries {
         if *file_count >= max_files {
-            output.push_str(&format!("{indent}  ... (truncated at {max_files} entries)\n"));
+            output.push_str(&format!(
+                "{indent}  ... (truncated at {max_files} entries)\n"
+            ));
             return;
         }
 
@@ -102,18 +104,12 @@ fn walk_dir_tree(
             );
         } else {
             // Only list files with recognised source extensions
-            let ext = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("");
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             if !SOURCE_EXTS.contains(&ext) {
                 continue;
             }
             let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-            output.push_str(&format!(
-                "{indent}{prefix}{name} ({})\n",
-                format_size(size)
-            ));
+            output.push_str(&format!("{indent}{prefix}{name} ({})\n", format_size(size)));
             *file_count += 1;
         }
     }
@@ -126,8 +122,11 @@ fn walk_dir_tree(
 /// self-correction hint appended to `read_code` file-not-found errors.
 fn recursive_file_tree(code_root: &str) -> Result<String, String> {
     if code_root.is_empty() {
-        return Err("Code path not configured. Connect a code repo via the + menu, or \
-                    launch with --code <dir>.".into());
+        return Err(
+            "Code path not configured. Connect a code repo via the + menu, or \
+                    launch with --code <dir>."
+                .into(),
+        );
     }
 
     let root = Path::new(code_root);
@@ -151,8 +150,11 @@ fn recursive_file_tree(code_root: &str) -> Result<String, String> {
 /// If `path` is empty or `"."`, lists from the code root itself.
 pub fn execute_list_files(code_root: &str, path: &str) -> Result<String, String> {
     if code_root.is_empty() {
-        return Err("Code path not configured. Connect a code repo via the + menu, or \
-                    launch with --code <dir>.".into());
+        return Err(
+            "Code path not configured. Connect a code repo via the + menu, or \
+                    launch with --code <dir>."
+                .into(),
+        );
     }
 
     let target = if path.is_empty() || path == "." {
@@ -283,13 +285,14 @@ pub fn execute_run_query_raw(duckdb_path: &str, sql: &str) -> Result<String, Str
                      Access STRUCT fields with dot notation: running.start, running.duration, \
                      critical_path.item_uid. \
                      The `entries` table columns are: entry_slug, short_name, long_name, \
-                     parent_slug, type."
+                     parent_slug, type.",
                 );
-            } else if err_str.contains("Conversion Error") || err_str.contains("Could not convert") {
+            } else if err_str.contains("Conversion Error") || err_str.contains("Could not convert")
+            {
                 msg.push_str(
                     "\nHINT: All timestamp fields are BIGINT nanoseconds. \
                      Use arithmetic: running.duration / 1e6 for milliseconds. \
-                     Use CAST() for explicit type conversions."
+                     Use CAST() for explicit type conversions.",
                 );
             } else if err_str.contains("Binder Error") || err_str.contains("No function matches") {
                 msg.push_str(
@@ -685,7 +688,9 @@ fn collect_wiki_pages(root: &Path, dir: &Path, out: &mut Vec<WikiPage>) {
             let title = title
                 .filter(|t| !t.is_empty())
                 .unwrap_or_else(|| filename_to_title(&name));
-            let summary = summary.filter(|s| !s.is_empty()).unwrap_or_else(|| title.clone());
+            let summary = summary
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| title.clone());
             let tldr_lc = extract_section(&content, "TL;DR")
                 .unwrap_or_default()
                 .to_lowercase();
@@ -720,7 +725,10 @@ fn wiki_corpus(wiki_root: &str) -> Result<Arc<Vec<WikiPage>>, String> {
     let mut pages = Vec::new();
     collect_wiki_pages(root, root, &mut pages);
     if pages.is_empty() {
-        return Err(format!("No .md pages found under wiki root '{}'.", wiki_root));
+        return Err(format!(
+            "No .md pages found under wiki root '{}'.",
+            wiki_root
+        ));
     }
     pages.sort_by(|a, b| a.path.cmp(&b.path));
     let arc = Arc::new(pages);
@@ -876,7 +884,9 @@ pub fn wiki_search(
     scored.truncate(limit.max(1));
 
     if scored.is_empty() {
-        let scope = section.map(|s| format!(" in section '{s}'")).unwrap_or_default();
+        let scope = section
+            .map(|s| format!(" in section '{s}'"))
+            .unwrap_or_default();
         return Ok(format!(
             "No wiki pages matched query '{query}'{scope}. Try wiki_index to browse, or broader terms."
         ));
@@ -994,7 +1004,9 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
          ) s",
     )
     .unwrap_or_else(|e| format!("[{{\"error\": {:?}}}]", e));
-    out.push_str(&format!("## Sample Item Row (shape; SELECT * via run_query)\n{sample}\n\n"));
+    out.push_str(&format!(
+        "## Sample Item Row (shape; SELECT * via run_query)\n{sample}\n\n"
+    ));
 
     // ── Profile classification (human-readable) ──────────────────────────────
     let classification = execute_run_query_raw(
@@ -1011,12 +1023,19 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
         Ok(json_str) => {
             if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
                 if let Some(row) = parsed.first() {
-                    let gpu = row.get("gpu_device_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let gpu = row
+                        .get("gpu_device_count")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
                     let cpu = row.get("cpu_count").and_then(|v| v.as_u64()).unwrap_or(0);
                     let util = row.get("util_count").and_then(|v| v.as_u64()).unwrap_or(0);
                     let nodes = row.get("node_count").and_then(|v| v.as_u64()).unwrap_or(1);
                     let profile_type = if gpu > 0 { "GPU-present" } else { "CPU-only" };
-                    let node_str = if nodes <= 1 { "single-node".to_string() } else { format!("{}-node", nodes) };
+                    let node_str = if nodes <= 1 {
+                        "single-node".to_string()
+                    } else {
+                        format!("{}-node", nodes)
+                    };
                     out.push_str(&format!(
                         "- Type: {} {}\n- GPUs: {} | CPUs: {} | Utility procs: {}\n",
                         profile_type, node_str, gpu, cpu, util
@@ -1046,8 +1065,14 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
         Ok(json_str) => {
             if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
                 if let Some(row) = parsed.first() {
-                    let rpt = row.get("replay_trace_count").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let mapper = row.get("mapper_call_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let rpt = row
+                        .get("replay_trace_count")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let mapper = row
+                        .get("mapper_call_count")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
                     out.push_str(&format!(
                         "- Replay Physical Trace tasks: {}\n\
                          - Mapper calls: {}\n",
@@ -1101,8 +1126,14 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
                 for row in &parsed {
                     let kind = row.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
                     let count = row.get("proc_count").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let avg = row.get("avg_util_pct").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let max = row.get("max_util_pct").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let avg = row
+                        .get("avg_util_pct")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    let max = row
+                        .get("max_util_pct")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
                     out.push_str(&format!(
                         "- {}: {} proc(s), avg {:.1}% util, max {:.1}%\n",
                         kind, count, avg, max
@@ -1134,10 +1165,22 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
         Ok(json_str) => {
             if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
                 if let Some(row) = parsed.first() {
-                    let avg = row.get("avg_deferred_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let p10 = row.get("p10_deferred_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let p50 = row.get("p50_deferred_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let under_100us = row.get("items_under_100us").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let avg = row
+                        .get("avg_deferred_ms")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    let p10 = row
+                        .get("p10_deferred_ms")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    let p50 = row
+                        .get("p50_deferred_ms")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    let under_100us = row
+                        .get("items_under_100us")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
                     out.push_str(&format!(
                         "- Avg: {:.2}ms | P10: {:.2}ms | P50: {:.2}ms | Items <100us: {}\n",
                         avg, p10, p50, under_100us
@@ -1243,7 +1286,9 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
                         );
                     }
                     if count == 0 {
-                        out.push_str("- No mapper calls found (tracing may be handling all mapping)\n");
+                        out.push_str(
+                            "- No mapper calls found (tracing may be handling all mapping)\n",
+                        );
                     }
                 } else {
                     out.push_str("(no data)\n");
@@ -1275,10 +1320,22 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
         Ok(json_str) => {
             if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
                 if let Some(row) = parsed.first() {
-                    let count = row.get("app_task_count").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let avg = row.get("avg_run_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let min = row.get("min_run_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let median = row.get("median_run_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let count = row
+                        .get("app_task_count")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let avg = row
+                        .get("avg_run_ms")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    let min = row
+                        .get("min_run_ms")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    let median = row
+                        .get("median_run_ms")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
                     out.push_str(&format!(
                         "- {} app tasks | median: {:.3}ms | avg: {:.3}ms | min: {:.3}ms\n",
                         count, median, avg, min
@@ -1318,7 +1375,10 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
             if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
                 if let Some(row) = parsed.first() {
                     let count = row.get("copy_count").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let ms = row.get("total_copy_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let ms = row
+                        .get("total_copy_ms")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
                     out.push_str(&format!(
                         "- {} copies | total comm time (lifetime): {:.1}ms\n",
                         count, ms
@@ -1354,7 +1414,10 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
         Ok(json_str) => {
             if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
                 if let Some(row) = parsed.first() {
-                    let n = row.get("sized_copies").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let n = row
+                        .get("sized_copies")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
                     if n == 0 {
                         out.push_str("- no sized channel copies in this profile\n");
                     } else {
@@ -1427,7 +1490,10 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
                     let p50 = row.get("p50_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
                     let p90 = row.get("p90_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
                     let max = row.get("max_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let over_1ms = row.get("items_over_1ms").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let over_1ms = row
+                        .get("items_over_1ms")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
                     out.push_str(&format!(
                         "- P50: {:.3}ms | P90: {:.3}ms | max: {:.2}ms | items >1ms: {}\n",
                         p50, p90, max, over_1ms
@@ -1460,7 +1526,10 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
                 if let Some(row) = parsed.first() {
                     let p90 = row.get("p90_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
                     let max = row.get("max_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let over_1ms = row.get("items_over_1ms").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let over_1ms = row
+                        .get("items_over_1ms")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
                     out.push_str(&format!(
                         "- P90: {:.3}ms | max: {:.2}ms | items >1ms: {}\n",
                         p90, max, over_1ms
@@ -1488,7 +1557,10 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
         Ok(json_str) => {
             if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
                 if let Some(row) = parsed.first() {
-                    let count = row.get("py_proc_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let count = row
+                        .get("py_proc_count")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
                     if count > 0 {
                         out.push_str(&format!(
                             "- Python processors: {} (Legate/cuNumeric)\n",
@@ -1529,8 +1601,14 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
             if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
                 if let Some(row) = parsed.first() {
                     let gc_count = row.get("gc_count").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let gc_ms = row.get("gc_total_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let inst = row.get("instance_items").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let gc_ms = row
+                        .get("gc_total_ms")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    let inst = row
+                        .get("instance_items")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
                     if gc_count > 0 {
                         out.push_str(&format!(
                             "- GC activity detected: {} events, {:.1}ms — check for memory pressure\n",
@@ -1576,7 +1654,10 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
                     out.push_str("- Single-node profile — balanced by definition\n");
                     for row in &parsed {
                         let node = row.get("node").and_then(|v| v.as_str()).unwrap_or("?");
-                        let ms = row.get("total_busy_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let ms = row
+                            .get("total_busy_ms")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0);
                         out.push_str(&format!("- {}: {:.1}ms utility busy\n", node, ms));
                     }
                 } else {
@@ -1586,7 +1667,10 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
                     let mut max_node = "?".to_string();
                     for row in &parsed {
                         let node = row.get("node").and_then(|v| v.as_str()).unwrap_or("?");
-                        let ms = row.get("total_busy_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let ms = row
+                            .get("total_busy_ms")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0);
                         out.push_str(&format!("- {}: {:.1}ms utility busy\n", node, ms));
                         if ms < min_ms {
                             min_ms = ms;
@@ -1647,7 +1731,10 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
                     out.push_str("- No channel copy activity\n");
                 } else {
                     for row in parsed.iter().take(5) {
-                        let slug = row.get("entry_slug").and_then(|v| v.as_str()).unwrap_or("?");
+                        let slug = row
+                            .get("entry_slug")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?");
                         let copies = row.get("copy_count").and_then(|v| v.as_u64()).unwrap_or(0);
                         let ms = row.get("total_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
 
@@ -1724,8 +1811,14 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
         Ok(json_str) => {
             if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
                 if let Some(row) = parsed.first() {
-                    let copy_ms = row.get("copy_total_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let compute_ms = row.get("compute_total_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let copy_ms = row
+                        .get("copy_total_ms")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    let compute_ms = row
+                        .get("compute_total_ms")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
                     let pct = row.get("copy_pct").and_then(|v| v.as_f64()).unwrap_or(0.0);
                     out.push_str(&format!(
                         "- Copy: {:.1}ms | Compute: {:.1}ms | Copy fraction: {:.1}%\n",
@@ -1765,9 +1858,18 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
         Ok(json_str) => {
             if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
                 if let Some(row) = parsed.first() {
-                    let p90 = row.get("p90_overhead_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let avg = row.get("avg_overhead_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let count = row.get("items_with_overhead").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let p90 = row
+                        .get("p90_overhead_ms")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    let avg = row
+                        .get("avg_overhead_ms")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    let count = row
+                        .get("items_with_overhead")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
                     out.push_str(&format!(
                         "- P90: {:.2}ms | Avg: {:.2}ms ({} items)\n",
                         p90, avg, count
@@ -1864,7 +1966,10 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
         Ok(json_str) => {
             if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
                 if let Some(row) = parsed.first() {
-                    let start = row.get("steady_start").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let start = row
+                        .get("steady_start")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
                     let end = row.get("steady_end").and_then(|v| v.as_i64()).unwrap_or(0);
                     if start > 0 && end > start {
                         out.push_str(&format!(
@@ -1895,8 +2000,14 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
         Ok(json_str) => {
             if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
                 if let Some(row) = parsed.first() {
-                    let slug = row.get("entry_slug").and_then(|v| v.as_str()).unwrap_or("?");
-                    let ms = row.get("duration_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let slug = row
+                        .get("entry_slug")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?");
+                    let ms = row
+                        .get("duration_ms")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
                     let start = row.get("start_ns").and_then(|v| v.as_i64()).unwrap_or(0);
                     let stop = row.get("stop_ns").and_then(|v| v.as_i64()).unwrap_or(0);
                     if ms > 0.0 {
@@ -1936,9 +2047,15 @@ pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
         Ok(json_str) => {
             if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
                 if let Some(row) = parsed.first() {
-                    let slug = row.get("entry_slug").and_then(|v| v.as_str()).unwrap_or("?");
+                    let slug = row
+                        .get("entry_slug")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?");
                     let ms = row.get("gap_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let start = row.get("gap_start_ns").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let start = row
+                        .get("gap_start_ns")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
                     let end = row.get("gap_end_ns").and_then(|v| v.as_i64()).unwrap_or(0);
                     if ms > 0.0 {
                         out.push_str(&format!(
@@ -2023,10 +2140,7 @@ fn json_array_to_markdown_table(json_str: &str) -> Option<String> {
 /// - Otherwise → "local"
 fn classify_channel_slug(slug: &str) -> &'static str {
     // Extract the part after "chan_" (e.g. "n0s0_n1s0" or "fn0s0")
-    let chan_part = slug
-        .find("chan_")
-        .map(|i| &slug[i + 4..])
-        .unwrap_or(slug);
+    let chan_part = slug.find("chan_").map(|i| &slug[i + 4..]).unwrap_or(slug);
 
     // Check for inter-node: look for different node numbers
     let node_numbers: Vec<&str> = chan_part
@@ -2070,7 +2184,9 @@ pub fn slug_exists(duckdb_path: &str, slug: &str) -> bool {
             // Normally a nested JSON array; tolerate a JSON-encoded string too.
             let arr = match cell {
                 serde_json::Value::Array(a) => a.clone(),
-                serde_json::Value::String(s) => serde_json::from_str::<Vec<serde_json::Value>>(s).ok()?,
+                serde_json::Value::String(s) => {
+                    serde_json::from_str::<Vec<serde_json::Value>>(s).ok()?
+                }
                 _ => return None,
             };
             Some(arr.iter().any(|x| x.as_str() == Some(slug)))
@@ -2083,7 +2199,11 @@ pub fn slug_exists(duckdb_path: &str, slug: &str) -> bool {
 /// - `has_duckdb`: include `run_query` tool (only if duckdb feature AND path is set)
 /// - `has_code`: include `read_code` tool (only if code path is configured)
 /// - `has_wiki`: include `wiki_index`/`wiki_read`/`wiki_search` (only if a wiki root is configured)
-pub fn tool_definitions(has_duckdb: bool, has_code: bool, has_wiki: bool) -> Vec<serde_json::Value> {
+pub fn tool_definitions(
+    has_duckdb: bool,
+    has_code: bool,
+    has_wiki: bool,
+) -> Vec<serde_json::Value> {
     let mut tools = Vec::new();
 
     if has_duckdb {
@@ -2712,17 +2832,29 @@ mod tests {
         assert_eq!(mark_truncation_if_over("not json".into()), "not json");
 
         // Exactly 50 -> unchanged (boundary).
-        let fifty =
-            serde_json::to_string(&(0..50).map(|i| serde_json::json!({ "a": i })).collect::<Vec<_>>()).unwrap();
+        let fifty = serde_json::to_string(
+            &(0..50)
+                .map(|i| serde_json::json!({ "a": i }))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
         assert_eq!(mark_truncation_if_over(fifty.clone()), fifty);
 
         // 51 -> first 50 kept + ONE marker appended (51 elements total).
-        let over =
-            serde_json::to_string(&(0..51).map(|i| serde_json::json!({ "a": i })).collect::<Vec<_>>()).unwrap();
+        let over = serde_json::to_string(
+            &(0..51)
+                .map(|i| serde_json::json!({ "a": i }))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
         let marked: Vec<serde_json::Value> =
             serde_json::from_str(&mark_truncation_if_over(over)).unwrap();
         assert_eq!(marked.len(), 51, "50 data + 1 marker");
-        assert_eq!(marked[49]["a"], serde_json::json!(49), "last real row preserved");
+        assert_eq!(
+            marked[49]["a"],
+            serde_json::json!(49),
+            "last real row preserved"
+        );
         assert_eq!(marked[50]["_truncated"], serde_json::json!(true));
         assert_eq!(marked[50]["_shown"], serde_json::json!(50));
     }
@@ -2742,13 +2874,20 @@ mod tests {
         let out = execute_run_query_raw(db, "SELECT entry_slug FROM entries").expect("query");
         let arr: Vec<serde_json::Value> = serde_json::from_str(&out).expect("JSON array");
         assert_eq!(arr.len(), 51, "50 rows + 1 marker, got {}", arr.len());
-        assert!(arr[..50].iter().all(|r| r.get("entry_slug").is_some() && r.get("_truncated").is_none()));
+        assert!(
+            arr[..50]
+                .iter()
+                .all(|r| r.get("entry_slug").is_some() && r.get("_truncated").is_none())
+        );
         assert_eq!(arr[50]["_truncated"], serde_json::json!(true));
         assert_eq!(arr[50]["_shown"], serde_json::json!(50));
 
         // A small aggregate is returned UNCHANGED (no marker).
         let small = execute_run_query_raw(db, "SELECT COUNT(*) AS n FROM items").expect("query");
-        assert!(!small.contains("_truncated"), "small result must NOT be marked: {small}");
+        assert!(
+            !small.contains("_truncated"),
+            "small result must NOT be marked: {small}"
+        );
         let sa: Vec<serde_json::Value> = serde_json::from_str(&small).unwrap();
         assert_eq!(sa.len(), 1);
     }
@@ -2804,7 +2943,10 @@ mod tests {
             "## Tracing Status",
             "## Deferred Health",
         ] {
-            assert!(out.contains(header), "kept signal section missing: {header}");
+            assert!(
+                out.contains(header),
+                "kept signal section missing: {header}"
+            );
         }
         // The trimmed sample is compact (the old 50-row `SELECT *` dump was ~63 KB).
         let sample = section_body(&out, "## Sample Item Row");
@@ -2817,7 +2959,12 @@ mod tests {
         // not `"item_uid"` occurrences, since the critical_path struct nests its own.)
         let rows: Vec<serde_json::Value> =
             serde_json::from_str(sample.trim()).expect("sample is a JSON array");
-        assert_eq!(rows.len(), 1, "sample must be exactly one row, got {}", rows.len());
+        assert_eq!(
+            rows.len(),
+            1,
+            "sample must be exactly one row, got {}",
+            rows.len()
+        );
     }
 
     /// Return the text of `## <name>` up to the next `## ` header (test helper).
@@ -2849,8 +2996,14 @@ mod tests {
         // Benign query still works through the hardened connection.
         let ok = execute_run_query_raw(db, "SELECT COUNT(*) AS cnt FROM items")
             .expect("benign SELECT should succeed through hardened connection");
-        assert!(ok.starts_with('['), "benign query should return a JSON array, got: {ok}");
-        assert!(ok.contains("cnt"), "benign query JSON missing alias, got: {ok}");
+        assert!(
+            ok.starts_with('['),
+            "benign query should return a JSON array, got: {ok}"
+        );
+        assert!(
+            ok.contains("cnt"),
+            "benign query JSON missing alias, got: {ok}"
+        );
 
         // Exfil probe (table function in a FROM clause) must be blocked at the engine,
         // exercised through the real wrapped path the agent uses.
@@ -2871,7 +3024,9 @@ mod tests {
         // CLI positive control that read /etc/hosts before the fix.
         let unhardened = duckdb::Connection::open_in_memory().expect("open in-memory");
         let leaked: Result<String, _> =
-            unhardened.query_row("SELECT content FROM read_text('/etc/hosts')", [], |r| r.get(0));
+            unhardened.query_row("SELECT content FROM read_text('/etc/hosts')", [], |r| {
+                r.get(0)
+            });
         assert!(
             leaked.is_ok(),
             "positive control: an unhardened connection should read the file, got {leaked:?}"
@@ -2921,13 +3076,22 @@ mod tests {
             .expect("query the naive inflation");
 
         let close = |a: f64, b: f64| (a - b).abs() < 1e-3;
-        assert!(close(lifetime_ms, 1546.0172), "lifetime_ms = {lifetime_ms}, want 1546.0172");
-        assert!(close(running_ms, 432.7334), "running_ms = {running_ms}, want 432.7334");
+        assert!(
+            close(lifetime_ms, 1546.0172),
+            "lifetime_ms = {lifetime_ms}, want 1546.0172"
+        );
+        assert!(
+            close(running_ms, 432.7334),
+            "running_ms = {running_ms}, want 432.7334"
+        );
         assert!(
             close(longest_ms, 13.1611),
             "longest_running_slice_ms = {longest_ms}, want 13.1611"
         );
-        assert!(close(naive_ms, 808566.9726), "naive_ms = {naive_ms}, want 808566.9726");
+        assert!(
+            close(naive_ms, 808566.9726),
+            "naive_ms = {naive_ms}, want 808566.9726"
+        );
         // The dedup removes a ~523x inflation in the naive wall-clock estimate.
         assert!(
             (naive_ms / lifetime_ms - 523.0).abs() < 1.0,
@@ -2947,7 +3111,10 @@ mod tests {
     fn test_find_blockers_cycle_guard() {
         let src = test_db_path();
         if !src.exists() {
-            eprintln!("skipping find_blockers: test DB absent at {}", src.display());
+            eprintln!(
+                "skipping find_blockers: test DB absent at {}",
+                src.display()
+            );
             return;
         }
         let tmp = std::env::temp_dir().join("legion_p1_find_blockers.duckdb");
@@ -2979,7 +3146,10 @@ mod tests {
         // Guarded walk from uid 2220 stops at the 2220<->1481 2-cycle: 2 rows.
         let (rows2, max_depth2): (i64, i32) = conn
             .query_row(
-                &format!("SELECT count(*), max(depth) FROM ({}) s", find_blockers_sql(2220)),
+                &format!(
+                    "SELECT count(*), max(depth) FROM ({}) s",
+                    find_blockers_sql(2220)
+                ),
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
@@ -3003,7 +3173,10 @@ mod tests {
     fn test_find_blockers_unguarded_runaway() {
         let src = test_db_path();
         if !src.exists() {
-            eprintln!("skipping unguarded runaway: test DB absent at {}", src.display());
+            eprintln!(
+                "skipping unguarded runaway: test DB absent at {}",
+                src.display()
+            );
             return;
         }
         let tmp = std::env::temp_dir().join("legion_p1_find_blockers_unguarded.duckdb");
@@ -3028,8 +3201,14 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .expect("unguarded runaway");
-        assert_eq!(urows, 100001, "unguarded walk should run away to 100001 rows");
-        assert_eq!(umax, 100000, "unguarded walk should hit the 100000 depth cap");
+        assert_eq!(
+            urows, 100001,
+            "unguarded walk should run away to 100001 rows"
+        );
+        assert_eq!(
+            umax, 100000,
+            "unguarded walk should hit the 100000 depth cap"
+        );
 
         let _ = std::fs::remove_file(&tmp);
     }
@@ -3043,7 +3222,10 @@ mod tests {
     fn test_channel_copy_lifetime_fix() {
         let src = test_db_path();
         if !src.exists() {
-            eprintln!("skipping channel-copy fix: test DB absent at {}", src.display());
+            eprintln!(
+                "skipping channel-copy fix: test DB absent at {}",
+                src.display()
+            );
             return;
         }
         let tmp = std::env::temp_dir().join("legion_p1a_channel_copy.duckdb");
@@ -3065,7 +3247,10 @@ mod tests {
                     |r| r.get(0),
                 )
                 .expect("old buggy copy count");
-            assert_eq!(old_count, 0, "documents the bug: running-on-chan finds 0 copies");
+            assert_eq!(
+                old_count, 0,
+                "documents the bug: running-on-chan finds 0 copies"
+            );
 
             // GREEN: corrected copies via lifetime, dedup'd by item_uid.
             let (count, comm_ms): (i64, f64) = conn
@@ -3080,13 +3265,22 @@ mod tests {
                 )
                 .expect("corrected copy count + comm time");
             assert_eq!(count, 207, "corrected distinct copy count");
-            assert!((comm_ms - 53.3).abs() < 0.1, "corrected comm time, got {comm_ms}");
+            assert!(
+                (comm_ms - 53.3).abs() < 0.1,
+                "corrected comm time, got {comm_ms}"
+            );
         }
 
         // Tool path: the real gather_overview output must now surface the copies.
         let overview = gather_overview(db).expect("gather_overview");
-        assert!(overview.contains("207 copies"), "overview should report 207 copies");
-        assert!(overview.contains("53.3"), "overview should report 53.3ms comm time");
+        assert!(
+            overview.contains("207 copies"),
+            "overview should report 207 copies"
+        );
+        assert!(
+            overview.contains("53.3"),
+            "overview should report 53.3ms comm time"
+        );
         assert!(
             !overview.contains("No channel copies"),
             "overview must no longer claim there are no copies"
@@ -3154,7 +3348,10 @@ mod tests {
         };
         assert_eq!(oracle_app, 48, "app-scope longest in [1.0s,1.5s]");
         assert_eq!(oracle_all, 1, "all-items longest in [1.0s,1.5s]");
-        assert_ne!(oracle_app, oracle_all, "scope matters: app-scope != all-items");
+        assert_ne!(
+            oracle_app, oracle_all,
+            "scope matters: app-scope != all-items"
+        );
 
         // Tool path: same questions through execute_run_query_raw must agree.
         let tool_app = argmax_uid_by_dur(&execute_run_query_raw(db, app_sql).expect("tool app"));
@@ -3202,12 +3399,22 @@ mod tests {
         // Oracle: direct connection.
         let (oracle_compute, oracle_comm): (f64, f64) = {
             let conn = duckdb::Connection::open(&tmp).expect("open temp");
-            let c = conn.query_row(compute_sql, [], |r| r.get(0)).expect("oracle compute");
-            let m = conn.query_row(comm_sql, [], |r| r.get(0)).expect("oracle comm");
+            let c = conn
+                .query_row(compute_sql, [], |r| r.get(0))
+                .expect("oracle compute");
+            let m = conn
+                .query_row(comm_sql, [], |r| r.get(0))
+                .expect("oracle comm");
             (c, m)
         };
-        assert!((oracle_compute - 478.7).abs() < 0.1, "oracle compute, got {oracle_compute}");
-        assert!((oracle_comm - 49.8).abs() < 0.1, "oracle comm, got {oracle_comm}");
+        assert!(
+            (oracle_compute - 478.7).abs() < 0.1,
+            "oracle compute, got {oracle_compute}"
+        );
+        assert!(
+            (oracle_comm - 49.8).abs() < 0.1,
+            "oracle comm, got {oracle_comm}"
+        );
         assert!(
             oracle_compute > oracle_comm,
             "verdict computation-bound: {oracle_compute} > {oracle_comm}"
@@ -3215,13 +3422,19 @@ mod tests {
 
         // Tool path: the comm query (lifetime-based) through execute_run_query_raw
         // must equal the oracle — proving the agent's copy path handles copies.
-        let tool_comm = first_f64(&execute_run_query_raw(db, comm_sql).expect("tool comm"), "ms")
-            .expect("parse tool comm");
+        let tool_comm = first_f64(
+            &execute_run_query_raw(db, comm_sql).expect("tool comm"),
+            "ms",
+        )
+        .expect("parse tool comm");
         assert!(
             (tool_comm - oracle_comm).abs() < 0.1,
             "tool-path comm parity: {tool_comm} vs oracle {oracle_comm}"
         );
-        assert!((tool_comm - 49.8).abs() < 0.1, "tool-path comm == 49.8, got {tool_comm}");
+        assert!(
+            (tool_comm - 49.8).abs() < 0.1,
+            "tool-path comm == 49.8, got {tool_comm}"
+        );
 
         let _ = std::fs::remove_file(&tmp);
     }
@@ -3269,16 +3482,26 @@ mod wiki_tests {
 
         // Sections present as grouped headers.
         for sec in ["concepts", "pitfalls", "workflows", "glossary"] {
-            assert!(idx.contains(&format!("## {sec} (")), "index missing section {sec}");
+            assert!(
+                idx.contains(&format!("## {sec} (")),
+                "index missing section {sec}"
+            );
         }
         // Known page paths appear as rows.
         assert!(idx.contains("concepts/"), "no concept rows");
         assert!(idx.contains("pitfalls/"), "no pitfall rows");
         // Every row carries a tier + a non-empty one-liner after the em dash.
         let rows: Vec<&str> = idx.lines().filter(|l| l.starts_with("- `")).collect();
-        assert!(rows.len() >= 100, "expected >=100 pages, got {}", rows.len());
+        assert!(
+            rows.len() >= 100,
+            "expected >=100 pages, got {}",
+            rows.len()
+        );
         for r in &rows {
-            assert!(r.contains("[core]") || r.contains("[optional]"), "row lacks tier: {r}");
+            assert!(
+                r.contains("[core]") || r.contains("[optional]"),
+                "row lacks tier: {r}"
+            );
             let oneliner = r.split(" — ").nth(1).unwrap_or("").trim();
             assert!(!oneliner.is_empty(), "row lacks a one-liner: {r}");
         }
@@ -3305,10 +3528,16 @@ mod wiki_tests {
         let idx = wiki_index(&root, Some("pitfalls")).unwrap();
         assert!(idx.contains("## pitfalls ("), "pitfalls header missing");
         // No other section headers leak in.
-        assert!(!idx.contains("## concepts ("), "concepts leaked into pitfalls scope");
+        assert!(
+            !idx.contains("## concepts ("),
+            "concepts leaked into pitfalls scope"
+        );
         // Every listed row is under pitfalls/.
         for r in idx.lines().filter(|l| l.starts_with("- `")) {
-            assert!(r.contains("`pitfalls/"), "non-pitfall row in scoped index: {r}");
+            assert!(
+                r.contains("`pitfalls/"),
+                "non-pitfall row in scoped index: {r}"
+            );
         }
         // An unknown section is a clear error.
         assert!(wiki_index(&root, Some("nope")).is_err());
@@ -3325,9 +3554,15 @@ mod wiki_tests {
             return;
         };
         let content = wiki_read(&root, &page, None, None).unwrap();
-        assert!(content.contains("## TL;DR"), "page read lacks TL;DR: {page}");
+        assert!(
+            content.contains("## TL;DR"),
+            "page read lacks TL;DR: {page}"
+        );
         // Related links are preserved verbatim (no synthesis).
-        assert!(content.contains("## Related"), "Related section stripped: {page}");
+        assert!(
+            content.contains("## Related"),
+            "Related section stripped: {page}"
+        );
     }
 
     #[test]
@@ -3341,10 +3576,19 @@ mod wiki_tests {
             return;
         };
         let block = wiki_read(&root, &page, Some("Debug signals"), None).unwrap();
-        assert!(block.starts_with("## Debug signals"), "block not headed correctly: {block:.40}");
+        assert!(
+            block.starts_with("## Debug signals"),
+            "block not headed correctly: {block:.40}"
+        );
         // Only that block — other level-2 headers must not bleed in.
-        assert!(!block.contains("## TL;DR"), "TL;DR leaked into Debug-signals block");
-        assert!(!block.contains("## Related"), "Related leaked into Debug-signals block");
+        assert!(
+            !block.contains("## TL;DR"),
+            "TL;DR leaked into Debug-signals block"
+        );
+        assert!(
+            !block.contains("## Related"),
+            "Related leaked into Debug-signals block"
+        );
         // A missing section is an explicit error.
         assert!(wiki_read(&root, &page, Some("No Such Header"), None).is_err());
     }
@@ -3372,12 +3616,21 @@ Trailing prose after the fence.
 ";
         let block = extract_section(page, "Typical combinations").unwrap();
         // The fenced comment lines and everything up to the NEXT real heading are kept.
-        assert!(block.contains("# In a separate shell:"), "fenced comment truncated the section");
+        assert!(
+            block.contains("# In a separate shell:"),
+            "fenced comment truncated the section"
+        );
         assert!(block.contains("gdb -p <PID>"), "second fenced comment lost");
-        assert!(block.contains("Trailing prose after the fence."), "post-fence prose lost");
+        assert!(
+            block.contains("Trailing prose after the fence."),
+            "post-fence prose lost"
+        );
         // The genuine next heading still bounds the block.
         assert!(!block.contains("## Invariants"), "next section leaked in");
-        assert!(!block.contains("next section, must NOT appear"), "next section body leaked in");
+        assert!(
+            !block.contains("next section, must NOT appear"),
+            "next section body leaked in"
+        );
 
         // Case-insensitive header match still works.
         assert!(extract_section(page, "typical COMBINATIONS").is_some());
@@ -3397,11 +3650,17 @@ Trailing prose after the fence.
             return;
         };
         let tiny = wiki_read(&root, &page, None, Some(100)).unwrap();
-        assert!(tiny.contains("[TRUNCATED]"), "tiny read missing truncation marker");
+        assert!(
+            tiny.contains("[TRUNCATED]"),
+            "tiny read missing truncation marker"
+        );
         assert!(tiny.contains("next_offset="), "marker missing next_offset");
         // A generous cap leaves the page whole (no marker).
         let whole = wiki_read(&root, &page, None, Some(usize::MAX)).unwrap();
-        assert!(!whole.contains("[TRUNCATED]"), "whole read wrongly marked truncated");
+        assert!(
+            !whole.contains("[TRUNCATED]"),
+            "whole read wrongly marked truncated"
+        );
     }
 
     #[test]
@@ -3412,7 +3671,10 @@ Trailing prose after the fence.
         };
         // "mapper" appears in titles/summaries of multiple mapper pages.
         let res = wiki_search(&root, "mapper", None, None, 5).unwrap();
-        assert!(res.contains("mapper"), "search for 'mapper' returned nothing relevant");
+        assert!(
+            res.contains("mapper"),
+            "search for 'mapper' returned nothing relevant"
+        );
         // Result is a JSON array of {path, tldr, section, score} — paths, not prose.
         let parsed: serde_json::Value = serde_json::from_str(&res).unwrap();
         let arr = parsed.as_array().expect("search result is a JSON array");
@@ -3424,7 +3686,8 @@ Trailing prose after the fence.
         }
         // Section scoping works.
         let scoped = wiki_search(&root, "mapper", Some("pitfalls"), None, 5).unwrap();
-        if let Ok(serde_json::Value::Array(a)) = serde_json::from_str::<serde_json::Value>(&scoped) {
+        if let Ok(serde_json::Value::Array(a)) = serde_json::from_str::<serde_json::Value>(&scoped)
+        {
             for hit in a {
                 assert_eq!(hit["section"], "pitfalls", "section scope leaked");
             }
@@ -3465,13 +3728,22 @@ mod tool_description_tests {
     #[test]
     fn test_run_query_range_trigger_precedes_filter_example() {
         let d = desc("run_query");
-        assert!(d.contains("in the range"), "run_query missing the range-trigger phrase");
-        assert!(d.contains("LEAST") && d.contains("GREATEST"), "run_query missing the CLIP formula");
+        assert!(
+            d.contains("in the range"),
+            "run_query missing the range-trigger phrase"
+        );
+        assert!(
+            d.contains("LEAST") && d.contains("GREATEST"),
+            "run_query missing the CLIP formula"
+        );
         // The trigger must come BEFORE the plain-filter example #2, or the agent reads
         // the wrong pattern first.
         let trig = d.find("in the range").expect("range trigger present");
         let ex2 = d.find("Tasks in a time range").expect("example #2 present");
-        assert!(trig < ex2, "range trigger must precede example #2 (trig={trig}, ex2={ex2})");
+        assert!(
+            trig < ex2,
+            "range trigger must precede example #2 (trig={trig}, ex2={ex2})"
+        );
     }
 
     #[test]
@@ -3487,8 +3759,13 @@ mod tool_description_tests {
     #[test]
     fn test_wiki_search_has_keyword_cues() {
         let d = desc("wiki_search");
-        assert!(d.contains("bound"), "wiki_search missing the 'bound' keyword cue");
-        assert!(d.contains("mapper"), "wiki_search missing the 'mapper' keyword cue");
+        assert!(
+            d.contains("bound"),
+            "wiki_search missing the 'bound' keyword cue"
+        );
+        assert!(
+            d.contains("mapper"),
+            "wiki_search missing the 'mapper' keyword cue"
+        );
     }
 }
-

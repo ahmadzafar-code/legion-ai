@@ -28,8 +28,8 @@
 //! per session (override with `LEGION_VIEWER_MCP_TOKEN` for a stable external
 //! registration) and is printed in the `claude mcp add` line at startup.
 
-use crate::ai::mcp_core::{handle_request, ServerCtx};
-use serde_json::{json, Value};
+use crate::ai::mcp_core::{ServerCtx, handle_request};
+use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
@@ -76,10 +76,13 @@ pub fn handle_http_request(raw: &[u8], ctx: &ServerCtx) -> Vec<u8> {
     // check above only rejects PRESENT non-loopback origins; plain local processes
     // send no Origin at all).
     if let Some(expected) = ctx.auth_token.as_deref() {
-        let presented = header_value(&req, "authorization")
-            .and_then(|v| strip_bearer(v.trim()));
+        let presented = header_value(&req, "authorization").and_then(|v| strip_bearer(v.trim()));
         if presented.is_none_or(|t| !token_eq(expected, t)) {
-            return http_response(401, "text/plain", b"unauthorized: missing or bad bearer token");
+            return http_response(
+                401,
+                "text/plain",
+                b"unauthorized: missing or bad bearer token",
+            );
         }
     }
 
@@ -178,11 +181,17 @@ fn is_localhost_origin(origin: &str) -> bool {
     let authority = after_scheme.split(['/', '?', '#']).next().unwrap_or("");
     // Drop userinfo: take the part AFTER the last '@' so a spoofed
     // `loopback@real-host` resolves to the real host, not the userinfo.
-    let hostport = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    let hostport = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
     let host = if let Some(rest) = hostport.strip_prefix('[') {
         rest.split(']').next().unwrap_or("") // IPv6: [addr]:port -> addr
     } else {
-        hostport.rsplit_once(':').map(|(h, _)| h).unwrap_or(hostport)
+        hostport
+            .rsplit_once(':')
+            .map(|(h, _)| h)
+            .unwrap_or(hostport)
     };
     host == "localhost"
         || host
@@ -266,7 +275,7 @@ pub fn handle_approve_request(
     expected_token: &str,
     broker: &crate::ai::claude_code::ApprovalBroker,
 ) -> Vec<u8> {
-    use crate::ai::claude_code::{hook_decision_json, APPROVAL_DEADLINE};
+    use crate::ai::claude_code::{APPROVAL_DEADLINE, hook_decision_json};
 
     let mut headers = [httparse::EMPTY_HEADER; 32];
     let mut req = httparse::Request::new(&mut headers);
@@ -281,7 +290,11 @@ pub fn handle_approve_request(
     }
     let presented = header_value(&req, "authorization").and_then(|v| strip_bearer(v.trim()));
     if presented.is_none_or(|t| !token_eq(expected_token, t)) {
-        return http_response(401, "text/plain", b"unauthorized: missing or bad bearer token");
+        return http_response(
+            401,
+            "text/plain",
+            b"unauthorized: missing or bad bearer token",
+        );
     }
 
     let content_length = header_value(&req, "content-length")
@@ -291,9 +304,14 @@ pub fn handle_approve_request(
     let body = &raw[header_len.min(raw.len())..body_end];
     let event: Value = match serde_json::from_slice(body) {
         Ok(v) => v,
-        Err(e) => return http_response(400, "text/plain", format!("bad hook JSON: {e}").as_bytes()),
+        Err(e) => {
+            return http_response(400, "text/plain", format!("bad hook JSON: {e}").as_bytes());
+        }
     };
-    let tool_name = event.get("tool_name").and_then(Value::as_str).unwrap_or("?");
+    let tool_name = event
+        .get("tool_name")
+        .and_then(Value::as_str)
+        .unwrap_or("?");
     let tool_input = event.get("tool_input").cloned().unwrap_or(Value::Null);
 
     let decision = broker.decide(tool_name, &tool_input, APPROVAL_DEADLINE);
@@ -320,7 +338,11 @@ pub fn spawn(
     bridge: crate::ai::bridge::UiBridge,
     wiki_root: Option<String>,
     code_root: crate::ai::mcp_core::SharedCodeRoot,
-) -> std::io::Result<(u16, String, std::sync::Arc<crate::ai::claude_code::ApprovalBroker>)> {
+) -> std::io::Result<(
+    u16,
+    String,
+    std::sync::Arc<crate::ai::claude_code::ApprovalBroker>,
+)> {
     let listener = TcpListener::bind(("127.0.0.1", port))?;
     let bound = listener.local_addr()?.port();
     // Server hardening: every POST /mcp must present this bearer token. Random
@@ -329,7 +351,9 @@ pub fn spawn(
     // The approval broker behind POST /approve (the PreToolUse hook bridge).
     // Returned so core.rs can hand it to the chat panel (which renders the dialog).
     let broker = std::sync::Arc::new(crate::ai::claude_code::ApprovalBroker::new());
-    eprintln!("[legion-viewer] in-viewer MCP (data + visual tools) on http://127.0.0.1:{bound}/mcp");
+    eprintln!(
+        "[legion-viewer] in-viewer MCP (data + visual tools) on http://127.0.0.1:{bound}/mcp"
+    );
     eprintln!(
         "[legion-viewer] register: claude mcp add --transport http legion-viewer \
          http://127.0.0.1:{bound}/mcp --header \"Authorization: Bearer {token}\""
@@ -349,7 +373,9 @@ pub fn spawn(
                 .with_ui_bridge(bridge)
                 .with_auth_token(Some(ctx_token.clone()));
             for mut stream in listener.incoming().flatten() {
-                let Ok(buf) = read_request(&mut stream) else { continue };
+                let Ok(buf) = read_request(&mut stream) else {
+                    continue;
+                };
                 if is_approve_request(&buf) {
                     // An approval blocks for MINUTES on a human verdict — hand it to
                     // a detached thread so the serial /mcp loop (the viewport-
@@ -385,7 +411,9 @@ mod tests {
 
     /// Build a raw `POST /mcp` request with an optional Origin header.
     fn post(body: &str, origin: Option<&str>) -> Vec<u8> {
-        let origin_line = origin.map(|o| format!("Origin: {o}\r\n")).unwrap_or_default();
+        let origin_line = origin
+            .map(|o| format!("Origin: {o}\r\n"))
+            .unwrap_or_default();
         format!(
             "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:9\r\nContent-Type: application/json\r\n{origin_line}Content-Length: {}\r\n\r\n{body}",
             body.len()
@@ -413,7 +441,7 @@ mod tests {
     /// A ctx with a UiBridge attached (the LIVE-wired server). The UI-side
     /// channels dangle — fine for `tools/list`, which never drives the bridge.
     fn ctx_with_bridge() -> ServerCtx {
-        use crate::ai::bridge::{UiBridge, ViewportToken, MCP_CONSUMER_ID};
+        use crate::ai::bridge::{MCP_CONSUMER_ID, UiBridge, ViewportToken};
         let (event_tx, _erx) = std::sync::mpsc::channel();
         let (_ctx_tx, cmd_rx) = std::sync::mpsc::channel();
         let bridge = UiBridge::new(event_tx, cmd_rx, ViewportToken::new(), MCP_CONSUMER_ID);
@@ -455,14 +483,18 @@ mod tests {
     #[test]
     fn test_auth_correct_token_is_200_and_scheme_case_insensitive() {
         let ctx = ctx().with_auth_token(Some("sekrit-123".into()));
-        let (status, body) =
-            split_response(&handle_http_request(&post_auth(INIT, "Bearer sekrit-123"), &ctx));
+        let (status, body) = split_response(&handle_http_request(
+            &post_auth(INIT, "Bearer sekrit-123"),
+            &ctx,
+        ));
         assert_eq!(status, 200);
         let v: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["result"]["protocolVersion"], "2025-03-26");
         // RFC 7235: the auth scheme is case-insensitive.
-        let (status2, _) =
-            split_response(&handle_http_request(&post_auth(INIT, "bearer sekrit-123"), &ctx));
+        let (status2, _) = split_response(&handle_http_request(
+            &post_auth(INIT, "bearer sekrit-123"),
+            &ctx,
+        ));
         assert_eq!(status2, 200);
     }
 
@@ -516,13 +548,27 @@ mod tests {
         let (status, body) = split_response(&handle_http_request(&req, &ctx_with_bridge()));
         assert_eq!(status, 200);
         let v: Value = serde_json::from_str(&body).unwrap();
-        let names: Vec<&str> =
-            v["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        let names: Vec<&str> = v["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
         for t in [
-            "screenshot", "zoom_to", "pan", "scroll_to", "set_view", "search", "reset_view",
-            "highlight", "clear_highlights",
+            "screenshot",
+            "zoom_to",
+            "pan",
+            "scroll_to",
+            "set_view",
+            "search",
+            "reset_view",
+            "highlight",
+            "clear_highlights",
         ] {
-            assert!(names.contains(&t), "live-wired tools/list must advertise visual tool {t}");
+            assert!(
+                names.contains(&t),
+                "live-wired tools/list must advertise visual tool {t}"
+            );
         }
         for t in ["run_query", "overview", "final_answer"] {
             assert!(names.contains(&t), "data tool {t} still present");
@@ -537,16 +583,27 @@ mod tests {
 
     #[test]
     fn test_http_initialize() {
-        let req = post(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#, None);
+        let req = post(
+            r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#,
+            None,
+        );
         let (status, body) = split_response(&handle_http_request(&req, &ctx()));
         assert_eq!(status, 200);
         let v: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["result"]["protocolVersion"], "2025-03-26");
         assert_eq!(v["result"]["serverInfo"]["name"], "legion-prof");
         // The briefing channel is populated even with no roots (always-framing).
-        let instr = v["result"]["instructions"].as_str().expect("instructions over HTTP");
-        assert!(instr.contains("Legion Profiler Co-Pilot"), "framing must reach the client");
-        assert!(!instr.contains("Application source root"), "no source clause without a code root");
+        let instr = v["result"]["instructions"]
+            .as_str()
+            .expect("instructions over HTTP");
+        assert!(
+            instr.contains("Legion Profiler Co-Pilot"),
+            "framing must reach the client"
+        );
+        assert!(
+            !instr.contains("Application source root"),
+            "no source clause without a code root"
+        );
     }
 
     /// Regression: a code root configured on the in-viewer server (as `spawn` now
@@ -557,24 +614,43 @@ mod tests {
         let ctx = ServerCtx::new("unused".to_owned(), Some("/app/src".to_owned()))
             .with_protocol(HTTP_PROTOCOL_VERSION);
 
-        let init = post(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#, None);
+        let init = post(
+            r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#,
+            None,
+        );
         let (_s, body) = split_response(&handle_http_request(&init, &ctx));
         let v: Value = serde_json::from_str(&body).unwrap();
         let instr = v["result"]["instructions"].as_str().unwrap();
-        assert!(instr.contains("Application source root: `/app/src`"), "source clause must reach the agent");
+        assert!(
+            instr.contains("Application source root: `/app/src`"),
+            "source clause must reach the agent"
+        );
 
         let list = post(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#, None);
         let (_s2, body2) = split_response(&handle_http_request(&list, &ctx));
         let v2: Value = serde_json::from_str(&body2).unwrap();
-        let names: Vec<&str> =
-            v2["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert!(names.contains(&"read_code"), "read_code advertised with a code root");
-        assert!(names.contains(&"list_files"), "list_files advertised with a code root");
+        let names: Vec<&str> = v2["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert!(
+            names.contains(&"read_code"),
+            "read_code advertised with a code root"
+        );
+        assert!(
+            names.contains(&"list_files"),
+            "list_files advertised with a code root"
+        );
     }
 
     #[test]
     fn test_http_notification_is_202_no_body() {
-        let req = post(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#, None);
+        let req = post(
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            None,
+        );
         let (status, body) = split_response(&handle_http_request(&req, &ctx()));
         assert_eq!(status, 202);
         assert!(body.is_empty(), "notification reply must have no body");
@@ -593,12 +669,23 @@ mod tests {
         }
         // NO visual tools advertised.
         for forbidden in ["screenshot", "zoom_to", "set_view", "highlight", "ask_user"] {
-            assert!(!names.contains(&forbidden), "must not advertise visual tool {forbidden}");
+            assert!(
+                !names.contains(&forbidden),
+                "must not advertise visual tool {forbidden}"
+            );
         }
         // camelCase inputSchema; no snake_case leak.
         for t in tools {
-            assert!(t.get("inputSchema").is_some(), "tool {} missing inputSchema", t["name"]);
-            assert!(t.get("input_schema").is_none(), "tool {} leaked input_schema", t["name"]);
+            assert!(
+                t.get("inputSchema").is_some(),
+                "tool {} missing inputSchema",
+                t["name"]
+            );
+            assert!(
+                t.get("input_schema").is_none(),
+                "tool {} leaked input_schema",
+                t["name"]
+            );
         }
     }
 
@@ -613,8 +700,15 @@ mod tests {
         assert_eq!(status, 403, "non-local Origin must be rejected");
 
         // A loopback Origin is allowed.
-        for ok_origin in ["http://localhost:8743", "http://127.0.0.1:8743", "http://[::1]:8743"] {
-            let req = post(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#, Some(ok_origin));
+        for ok_origin in [
+            "http://localhost:8743",
+            "http://127.0.0.1:8743",
+            "http://[::1]:8743",
+        ] {
+            let req = post(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+                Some(ok_origin),
+            );
             let (status, _b) = split_response(&handle_http_request(&req, &ctx()));
             assert_eq!(status, 200, "loopback Origin {ok_origin} must be allowed");
         }
@@ -634,16 +728,28 @@ mod tests {
             "http://evil.com/@127.0.0.1",
             "http://evil.com?@127.0.0.1",
         ] {
-            let req = post(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#, Some(bad));
+            let req = post(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+                Some(bad),
+            );
             let (status, _b) = split_response(&handle_http_request(&req, &ctx()));
             assert_eq!(status, 403, "look-alike Origin {bad} must be rejected");
         }
 
         // Legitimate userinfo with a real loopback host is still allowed.
-        for ok in ["http://user@localhost:8743", "http://user@127.0.0.1:8765/mcp"] {
-            let req = post(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#, Some(ok));
+        for ok in [
+            "http://user@localhost:8743",
+            "http://user@127.0.0.1:8765/mcp",
+        ] {
+            let req = post(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+                Some(ok),
+            );
             let (status, _b) = split_response(&handle_http_request(&req, &ctx()));
-            assert_eq!(status, 200, "loopback Origin with userinfo {ok} must be allowed");
+            assert_eq!(
+                status, 200,
+                "loopback Origin with userinfo {ok} must be allowed"
+            );
         }
     }
 
@@ -683,14 +789,19 @@ mod tests {
         let v: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["result"]["isError"], true, "exfil must be a tool error");
         let text = v["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(!text.contains("localhost"), "must not leak /etc/hosts: {text}");
+        assert!(
+            !text.contains("localhost"),
+            "must not leak /etc/hosts: {text}"
+        );
     }
 
     // ── /approve (PreToolUse hook bridge) ───────────────────────────────────
 
     /// Build a raw `POST /approve` request carrying a hook event body.
     fn post_approve(body: &str, auth: Option<&str>) -> Vec<u8> {
-        let auth_line = auth.map(|a| format!("Authorization: {a}\r\n")).unwrap_or_default();
+        let auth_line = auth
+            .map(|a| format!("Authorization: {a}\r\n"))
+            .unwrap_or_default();
         format!(
             "POST /approve HTTP/1.1\r\nHost: 127.0.0.1:9\r\nContent-Type: application/json\r\n{auth_line}Content-Length: {}\r\n\r\n{body}",
             body.len()
@@ -709,7 +820,10 @@ mod tests {
         let raw2 = post_approve(HOOK_EVENT, Some("Bearer wrong"));
         let (status2, _) = split_response(&handle_approve_request(&raw2, "tok-1", &broker));
         assert_eq!(status2, 401);
-        assert!(!broker.has_pending(), "unauthorized requests must never queue");
+        assert!(
+            !broker.has_pending(),
+            "unauthorized requests must never queue"
+        );
     }
 
     /// A pre-seeded session rule auto-allows without any pending dialog, and the
@@ -776,8 +890,13 @@ mod tests {
         assert_eq!(status, 200);
         let v: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
-        let reason = v["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap();
-        assert!(reason.contains("denied"), "deny must carry an actionable reason");
+        let reason = v["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap();
+        assert!(
+            reason.contains("denied"),
+            "deny must carry an actionable reason"
+        );
     }
 
     #[test]

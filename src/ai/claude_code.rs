@@ -73,8 +73,14 @@ pub const READONLY_BUILTINS: &[&str] = &["Read", "Glob", "Grep", "BashOutput", "
 /// ([`build_hook_settings`]) — a tool available here but unmatched by the hook
 /// would be denied-with-feedback by default mode (verified): safe, but a
 /// confusing UX.
-pub const HOOK_GATED_BUILTINS: &[&str] =
-    &["Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"];
+pub const HOOK_GATED_BUILTINS: &[&str] = &[
+    "Bash",
+    "Edit",
+    "Write",
+    "NotebookEdit",
+    "WebFetch",
+    "WebSearch",
+];
 
 /// The `--tools` availability KEEP-list (structurally stronger than a denylist
 /// like `--disallowedTools`: anything not named is simply not advertised, so
@@ -119,14 +125,14 @@ pub const SYSTEM_PROMPT_NUDGE: &str = "You are the Legion Profiler Co-Pilot, emb
 // ── Subprocess lifecycle ─────────────────────────────────────────────────────
 
 use crate::ai::agent::{AgentEvent, AgentResponse};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Cap on a single stdout line (a `tool_result` echoing a screenshot can carry
@@ -142,7 +148,10 @@ const WATCHDOG_TICK: Duration = Duration::from_millis(500);
 const STDERR_TAIL_LINES: usize = 40;
 
 fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 // Unix process-group signal: the child is spawned as its own group leader
@@ -175,7 +184,9 @@ fn kill_child(child: &mut Child) {
         // The child leads its own group (pgid == pid via process_group(0) at spawn),
         // so killpg(pid) signals claude AND every descendant it started.
         let pid = child.id() as i32;
-        unsafe { killpg(pid, SIGKILL); }
+        unsafe {
+            killpg(pid, SIGKILL);
+        }
         let _ = child.kill(); // belt & braces on the leader itself
     }
     #[cfg(not(any(unix, windows)))]
@@ -189,12 +200,15 @@ fn kill_child(child: &mut Child) {
 /// (that would cost a model call) — a missing login surfaces on the first turn
 /// as the actionable 401 message from the parser.
 pub fn preflight_claude() -> Result<String, String> {
-    let out = Command::new("claude").arg("--version").output().map_err(|_| {
-        "Claude Code (`claude`) was not found on PATH. Install it and log in \
+    let out = Command::new("claude")
+        .arg("--version")
+        .output()
+        .map_err(|_| {
+            "Claude Code (`claude`) was not found on PATH. Install it and log in \
          (`claude login`), or set ANTHROPIC_API_KEY to use the built-in API \
          engine instead."
-            .to_owned()
-    })?;
+                .to_owned()
+        })?;
     if !out.status.success() {
         return Err(format!(
             "`claude --version` failed (status {}). Reinstall Claude Code, or set \
@@ -314,22 +328,32 @@ impl ClaudeCodeAgent {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&settings_path, std::fs::Permissions::from_mode(0o600));
+            let _ =
+                std::fs::set_permissions(&settings_path, std::fs::Permissions::from_mode(0o600));
         }
 
         let mut cmd = Command::new("claude");
         cmd.arg("-p")
-            .arg("--input-format").arg("stream-json")
-            .arg("--output-format").arg("stream-json")
+            .arg("--input-format")
+            .arg("stream-json")
+            .arg("--output-format")
+            .arg("stream-json")
             .arg("--verbose")
-            .arg("--mcp-config").arg(&cfg_path)
-            .arg("--strict-mcp-config")          // ignore the user's other MCP servers
-            .arg("--setting-sources").arg("")    // isolate: load NO filesystem settings
-            .arg("--settings").arg(&settings_path) // ...except OUR hook settings
-            .arg("--permission-mode").arg("default")
-            .arg("--tools").arg(tools_arg())     // availability keep-list
-            .arg("--allowedTools").arg(&allowed)
-            .arg("--append-system-prompt").arg(SYSTEM_PROMPT_NUDGE)
+            .arg("--mcp-config")
+            .arg(&cfg_path)
+            .arg("--strict-mcp-config") // ignore the user's other MCP servers
+            .arg("--setting-sources")
+            .arg("") // isolate: load NO filesystem settings
+            .arg("--settings")
+            .arg(&settings_path) // ...except OUR hook settings
+            .arg("--permission-mode")
+            .arg("default")
+            .arg("--tools")
+            .arg(tools_arg()) // availability keep-list
+            .arg("--allowedTools")
+            .arg(&allowed)
+            .arg("--append-system-prompt")
+            .arg(SYSTEM_PROMPT_NUDGE)
             .current_dir(&cwd_dir);
         // Empty model = inherit the user's own Claude Code default (the panel no
         // longer picks; their install, their choice). Tests still pin one.
@@ -353,7 +377,9 @@ impl ClaudeCodeAgent {
         settings_path: Option<PathBuf>,
         event_tx: Sender<AgentEvent>,
     ) -> Result<Arc<Self>, String> {
-        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         // The child leads its own process group so `kill_child` can killpg the
         // whole tree (Bash grandchildren included). Set before spawn.
         #[cfg(unix)]
@@ -363,8 +389,12 @@ impl ClaudeCodeAgent {
         }
         let mut child = cmd.spawn().map_err(|e| {
             let _ = std::fs::remove_file(&cfg_path);
-            if let Some(d) = &cwd_dir { let _ = std::fs::remove_dir_all(d); }
-            if let Some(s) = &settings_path { let _ = std::fs::remove_file(s); }
+            if let Some(d) = &cwd_dir {
+                let _ = std::fs::remove_dir_all(d);
+            }
+            if let Some(s) = &settings_path {
+                let _ = std::fs::remove_file(s);
+            }
             format!(
                 "could not start `claude` ({e}). Install Claude Code and ensure it is on \
                  PATH, or set ANTHROPIC_API_KEY to use the built-in API engine instead."
@@ -389,7 +419,10 @@ impl ClaudeCodeAgent {
             .name("cc-backend-stdin".into())
             .spawn(move || {
                 for line in stdin_rx {
-                    if writeln!(stdin, "{line}").and_then(|_| stdin.flush()).is_err() {
+                    if writeln!(stdin, "{line}")
+                        .and_then(|_| stdin.flush())
+                        .is_err()
+                    {
                         break; // broken pipe: child died; reader surfaces the error
                     }
                 }
@@ -476,7 +509,13 @@ impl ClaudeCodeAgent {
                 }
                 // EOF: if a turn was awaiting its result, the child died on us.
                 if tif.swap(false, Ordering::Relaxed) {
-                    let tail = tail2.lock().unwrap().iter().cloned().collect::<Vec<_>>().join("\n");
+                    let tail = tail2
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("\n");
                     let _ = event_tx.send(AgentEvent::Error(format!(
                         "claude exited unexpectedly mid-turn. stderr tail:\n{tail}"
                     )));
@@ -501,20 +540,23 @@ impl ClaudeCodeAgent {
         let weak = Arc::downgrade(&agent);
         let wd = std::thread::Builder::new()
             .name("cc-backend-watchdog".into())
-            .spawn(move || loop {
-                std::thread::sleep(WATCHDOG_TICK);
-                let Some(agent) = weak.upgrade() else { return };
-                if agent.stopping.load(Ordering::Relaxed) {
-                    return;
-                }
-                if agent.turn_in_flight.load(Ordering::Relaxed) {
-                    let idle = now_secs().saturating_sub(agent.last_activity.load(Ordering::Relaxed));
-                    if Duration::from_secs(idle) > WATCHDOG_SILENCE {
-                        // Kill; the stdout reader sees EOF and emits the error.
-                        if let Some(child) = agent.child.lock().unwrap().as_mut() {
-                            kill_child(child);
-                        }
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(WATCHDOG_TICK);
+                    let Some(agent) = weak.upgrade() else { return };
+                    if agent.stopping.load(Ordering::Relaxed) {
                         return;
+                    }
+                    if agent.turn_in_flight.load(Ordering::Relaxed) {
+                        let idle =
+                            now_secs().saturating_sub(agent.last_activity.load(Ordering::Relaxed));
+                        if Duration::from_secs(idle) > WATCHDOG_SILENCE {
+                            // Kill; the stdout reader sees EOF and emits the error.
+                            if let Some(child) = agent.child.lock().unwrap().as_mut() {
+                                kill_child(child);
+                            }
+                            return;
+                        }
                     }
                 }
             })
@@ -541,8 +583,11 @@ impl ClaudeCodeAgent {
             .as_ref()
             .ok_or("Claude Code backend is shutting down")?
             .send(line)
-            .map_err(|_| "Claude Code subprocess is no longer accepting input (it may have \
-                          exited — check the transcript for an error)".to_string())
+            .map_err(|_| {
+                "Claude Code subprocess is no longer accepting input (it may have \
+                          exited — check the transcript for an error)"
+                    .to_string()
+            })
     }
 
     /// HARD STOP: kill the child now (used by "↺ New session"). NEVER conflated
@@ -640,7 +685,9 @@ pub enum AllowRule {
 /// creating) a prefix rule: chaining, substitution, and redirection would let an
 /// injected suffix ride an approved prefix.
 fn has_shell_metachars(cmd: &str) -> bool {
-    cmd.chars().any(|c| matches!(c, ';' | '&' | '|' | '`' | '>' | '<' | '\n')) || cmd.contains("$(")
+    cmd.chars()
+        .any(|c| matches!(c, ';' | '&' | '|' | '`' | '>' | '<' | '\n'))
+        || cmd.contains("$(")
 }
 
 /// The Bash prefix (first whitespace token) an "Always allow" click would create
@@ -694,7 +741,12 @@ impl ApprovalBroker {
     /// BLOCKING: called from the `/approve` handler thread. Auto-allows on a
     /// matching session rule; otherwise queues the request for the panel and
     /// waits for the verdict (deny on `deadline` expiry — fail closed).
-    pub fn decide(&self, tool_name: &str, tool_input: &Value, deadline: Duration) -> ApprovalDecision {
+    pub fn decide(
+        &self,
+        tool_name: &str,
+        tool_input: &Value,
+        deadline: Duration,
+    ) -> ApprovalDecision {
         if self.rule_allows(tool_name, tool_input) {
             return ApprovalDecision::Allow;
         }
@@ -790,7 +842,10 @@ impl ApprovalBroker {
 /// both branches verified live against `claude` 2.1.x).
 pub fn hook_decision_json(decision: ApprovalDecision) -> Value {
     let (verdict, reason) = match decision {
-        ApprovalDecision::Allow => ("allow", "approved by the user in the Legion viewer".to_owned()),
+        ApprovalDecision::Allow => (
+            "allow",
+            "approved by the user in the Legion viewer".to_owned(),
+        ),
         ApprovalDecision::Deny => (
             "deny",
             "The user denied this tool call in the Legion profiler viewer. Do not retry the \
@@ -811,7 +866,9 @@ pub fn hook_decision_json(decision: ApprovalDecision) -> Value {
 
 /// Strip the MCP prefix for display: `mcp__legion-viewer__overview` → `overview`.
 fn display_tool_name(raw: &str) -> String {
-    raw.strip_prefix(&format!("mcp__{MCP_SERVER_NAME}__")).unwrap_or(raw).to_string()
+    raw.strip_prefix(&format!("mcp__{MCP_SERVER_NAME}__"))
+        .unwrap_or(raw)
+        .to_string()
 }
 
 /// Compact single-line preview of a tool input for the transcript.
@@ -883,15 +940,16 @@ fn map_line(line: &str, st: &mut MapState) -> Vec<AgentEvent> {
                     if b.get("type").and_then(Value::as_str) == Some("tool_result") {
                         let id = b.get("tool_use_id").and_then(Value::as_str).unwrap_or("");
                         let name = st.names.remove(id).unwrap_or_else(|| "tool".into());
-                        let full = b
-                            .get("content")
-                            .map(|c| c.to_string())
-                            .unwrap_or_default();
+                        let full = b.get("content").map(|c| c.to_string()).unwrap_or_default();
                         let mut summary: String = full.chars().take(100).collect();
                         if full.chars().count() > 100 {
                             summary.push('…');
                         }
-                        out.push(AgentEvent::ToolResult { name, summary, full_content: full });
+                        out.push(AgentEvent::ToolResult {
+                            name,
+                            summary,
+                            full_content: full,
+                        });
                     }
                 }
             }
@@ -899,7 +957,11 @@ fn map_line(line: &str, st: &mut MapState) -> Vec<AgentEvent> {
         Some("result") => {
             let is_error = v.get("is_error").and_then(Value::as_bool).unwrap_or(false);
             let api_status = v.get("api_error_status").and_then(Value::as_u64);
-            let text = v.get("result").and_then(Value::as_str).unwrap_or("").to_string();
+            let text = v
+                .get("result")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
             if api_status == Some(401) {
                 out.push(AgentEvent::Error(
                     "Claude Code could not authenticate (401). Run `claude login` in a \
@@ -967,8 +1029,14 @@ mod tests {
     fn tool_tiers_are_disjoint_gated_and_never_tools_stay_out() {
         let never = ["Task", "Skill", "SlashCommand", "KillShell"];
         for n in never {
-            assert!(!READONLY_BUILTINS.contains(&n), "{n} must not be advertised");
-            assert!(!HOOK_GATED_BUILTINS.contains(&n), "{n} must not be advertised");
+            assert!(
+                !READONLY_BUILTINS.contains(&n),
+                "{n} must not be advertised"
+            );
+            assert!(
+                !HOOK_GATED_BUILTINS.contains(&n),
+                "{n} must not be advertised"
+            );
         }
         for t in READONLY_BUILTINS {
             assert!(
@@ -1055,7 +1123,11 @@ mod tests {
     #[test]
     fn broker_deadline_denies_and_clears() {
         let broker = ApprovalBroker::new();
-        let got = broker.decide("Write", &json!({"file_path": "/x"}), Duration::from_millis(50));
+        let got = broker.decide(
+            "Write",
+            &json!({"file_path": "/x"}),
+            Duration::from_millis(50),
+        );
         assert_eq!(got, ApprovalDecision::Deny);
         assert!(!broker.has_pending(), "expired request must not linger");
     }
@@ -1074,13 +1146,20 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(10));
             }
         });
-        let first = broker.decide("Bash", &json!({"command": "cargo check"}), Duration::from_secs(5));
+        let first = broker.decide(
+            "Bash",
+            &json!({"command": "cargo check"}),
+            Duration::from_secs(5),
+        );
         resolver.join().unwrap();
         assert_eq!(first, ApprovalDecision::Allow);
         assert_eq!(broker.rule_summaries(), vec!["Bash: cargo …".to_owned()]);
         // Second `cargo …` call auto-allows with NO pending dialog.
-        let second =
-            broker.decide("Bash", &json!({"command": "cargo build -p x"}), Duration::from_millis(50));
+        let second = broker.decide(
+            "Bash",
+            &json!({"command": "cargo build -p x"}),
+            Duration::from_millis(50),
+        );
         assert_eq!(second, ApprovalDecision::Allow);
         // A metachar-laden command must NOT ride the rule (falls to deadline-deny).
         let sneaky = broker.decide(
@@ -1100,14 +1179,26 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(10));
             }
         });
-        let w1 = broker.decide("WebFetch", &json!({"url": "https://a"}), Duration::from_secs(5));
+        let w1 = broker.decide(
+            "WebFetch",
+            &json!({"url": "https://a"}),
+            Duration::from_secs(5),
+        );
         resolver2.join().unwrap();
         assert_eq!(w1, ApprovalDecision::Allow);
-        let w2 = broker.decide("WebFetch", &json!({"url": "https://b"}), Duration::from_millis(50));
+        let w2 = broker.decide(
+            "WebFetch",
+            &json!({"url": "https://b"}),
+            Duration::from_millis(50),
+        );
         assert_eq!(w2, ApprovalDecision::Allow, "per-tool rule auto-allows");
         // reset() clears rules: the next WebFetch must NOT auto-allow.
         broker.reset();
-        let w3 = broker.decide("WebFetch", &json!({"url": "https://c"}), Duration::from_millis(50));
+        let w3 = broker.decide(
+            "WebFetch",
+            &json!({"url": "https://c"}),
+            Duration::from_millis(50),
+        );
         assert_eq!(w3, ApprovalDecision::Deny);
     }
 
@@ -1135,18 +1226,27 @@ mod tests {
             AgentEvent::ToolCall { name, .. } => assert_eq!(name, "overview"),
             other => panic!("expected ToolCall, got {other:?}"),
         }
-        assert_eq!(names.names.get("toolu_01A").map(String::as_str), Some("overview"));
+        assert_eq!(
+            names.names.get("toolu_01A").map(String::as_str),
+            Some("overview")
+        );
     }
 
     #[test]
     fn map_tool_result_correlates_name_and_summarizes() {
         let mut names = MapState::default();
-        names.names.insert("toolu_01A".to_string(), "overview".to_string());
+        names
+            .names
+            .insert("toolu_01A".to_string(), "overview".to_string());
         let line = r####"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01A","content":[{"type":"text","text":"## Schema\nentries: 42"}]}]},"session_id":"s"}"####;
         let evs = map_line(line, &mut names);
         assert_eq!(evs.len(), 1);
         match &evs[0] {
-            AgentEvent::ToolResult { name, summary, full_content } => {
+            AgentEvent::ToolResult {
+                name,
+                summary,
+                full_content,
+            } => {
                 assert_eq!(name, "overview");
                 assert!(full_content.contains("Schema"));
                 assert!(summary.chars().count() <= 101);
@@ -1194,7 +1294,10 @@ mod tests {
             "not json at all",
             "", // truncated-by-cap lines parse to nothing
         ] {
-            assert!(map_line(line, &mut names).is_empty(), "line should be silent: {line}");
+            assert!(
+                map_line(line, &mut names).is_empty(),
+                "line should be silent: {line}"
+            );
         }
     }
 
@@ -1218,7 +1321,9 @@ mod tests {
         let result = r#"{"type":"result","subtype":"success","is_error":false,"num_turns":2,"result":"The run is communication-bound.","session_id":"s"}"#;
         let evs = map_line(result, &mut st);
         match &evs[0] {
-            AgentEvent::Complete(r) => assert!(r.text.is_empty(), "duplicate final text must be emptied"),
+            AgentEvent::Complete(r) => {
+                assert!(r.text.is_empty(), "duplicate final text must be emptied")
+            }
             other => panic!("expected Complete, got {other:?}"),
         }
 
@@ -1238,7 +1343,7 @@ mod tests {
     #[test]
     #[ignore = "needs an authenticated `claude` on PATH + the bg4N2 fixture DB"]
     fn live_claude_code_roundtrip() {
-        use crate::ai::bridge::{UiBridge, ViewportToken, MCP_CONSUMER_ID};
+        use crate::ai::bridge::{MCP_CONSUMER_ID, UiBridge, ViewportToken};
         let db = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../multinoderuns/bg4N2/profcbN2g4b.duckdb");
         if !db.exists() {
@@ -1257,8 +1362,8 @@ mod tests {
         )
         .expect("server");
         let (tx, rx) = mpsc::channel::<AgentEvent>();
-        let agent =
-            ClaudeCodeAgent::spawn(port, &token, "claude-sonnet-4-6", None, tx).expect("spawn claude");
+        let agent = ClaudeCodeAgent::spawn(port, &token, "claude-sonnet-4-6", None, tx)
+            .expect("spawn claude");
         agent
             .send_turn("Call the overview tool exactly once, then reply with exactly: DONE")
             .expect("send");
@@ -1303,7 +1408,7 @@ mod tests {
     #[test]
     #[ignore = "needs an authenticated `claude` on PATH + the bg4N2 fixture DB"]
     fn live_claude_code_bash_approval() {
-        use crate::ai::bridge::{UiBridge, ViewportToken, MCP_CONSUMER_ID};
+        use crate::ai::bridge::{MCP_CONSUMER_ID, UiBridge, ViewportToken};
         let db = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../multinoderuns/bg4N2/profcbN2g4b.duckdb");
         if !db.exists() {
@@ -1353,8 +1458,8 @@ mod tests {
         let canary = std::env::temp_dir().join(format!("cc_live_approval_{}", std::process::id()));
         let _ = std::fs::remove_file(&canary);
         let (tx, rx) = mpsc::channel::<AgentEvent>();
-        let agent =
-            ClaudeCodeAgent::spawn(port, &token, "claude-sonnet-4-6", None, tx).expect("spawn claude");
+        let agent = ClaudeCodeAgent::spawn(port, &token, "claude-sonnet-4-6", None, tx)
+            .expect("spawn claude");
         agent
             .send_turn(&format!(
                 "Use the Bash tool to run exactly this command: touch {} — then reply with \

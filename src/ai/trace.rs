@@ -42,8 +42,7 @@ pub fn init_subscriber(out_dir: &Path) -> Result<(), String> {
         .open(&log_path)
         .map_err(|e| format!("Failed to open {}: {e}", log_path.display()))?;
 
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("agent=info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("agent=info"));
 
     let layer = fmt::layer()
         .json()
@@ -86,10 +85,7 @@ pub fn new_session_id() -> String {
 /// Record token-usage fields from a Claude API `usage` JSON object onto the
 /// current span. Missing fields default to 0.
 pub fn record_usage(span: &tracing::Span, usage: &serde_json::Value) {
-    span.record(
-        "tokens_input",
-        usage["input_tokens"].as_u64().unwrap_or(0),
-    );
+    span.record("tokens_input", usage["input_tokens"].as_u64().unwrap_or(0));
     span.record(
         "tokens_output",
         usage["output_tokens"].as_u64().unwrap_or(0),

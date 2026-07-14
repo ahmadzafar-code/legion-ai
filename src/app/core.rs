@@ -1,6 +1,6 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
 #[cfg(feature = "ai")]
 use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::num::NonZeroUsize;
 use std::time::Duration;
@@ -156,7 +156,8 @@ struct SearchState {
     entry_tree: BTreeMap<u64, BTreeMap<u64, BTreeSet<u64>>>,
 }
 
-type DataSourceStack = CountingDeferredDataSource<LruDeferredDataSource<Box<dyn DeferredDataSource>>>;
+type DataSourceStack =
+    CountingDeferredDataSource<LruDeferredDataSource<Box<dyn DeferredDataSource>>>;
 
 struct Config {
     field_schema: FieldSchema,
@@ -405,15 +406,17 @@ struct Context {
     /// timed out, so the dropped reply channel is harmless).
     #[cfg(feature = "ai")]
     #[serde(skip)]
-    mcp_awaiting_screenshot:
-        Option<(u64, std::sync::mpsc::Sender<crate::ai::UiCommand>, std::time::Instant)>,
+    mcp_awaiting_screenshot: Option<(
+        u64,
+        std::sync::mpsc::Sender<crate::ai::UiCommand>,
+        std::time::Instant,
+    )>,
 
     /// Whether the in-viewer HTTP MCP server has been started.
     /// One spawn attempt is made once a DuckDB path is configured.
     #[cfg(feature = "viewer-mcp")]
     #[serde(skip)]
     viewer_mcp_started: bool,
-
 }
 
 #[cfg(feature = "ai")]
@@ -953,8 +956,7 @@ impl Slot {
                 ui.input(|i| {
                     if i.pointer.any_click() && i.pointer.primary_released() && i.modifiers.shift {
                         if let Some(pos) = i.pointer.hover_pos() {
-                            let norm_x =
-                                ((pos.x - rect.min.x) / rect.width()).clamp(0.0, 1.0);
+                            let norm_x = ((pos.x - rect.min.x) / rect.width()).clamp(0.0, 1.0);
                             let click_time = cx.view_interval.lerp(norm_x);
 
                             // Find the gap containing this timestamp using row 0 items
@@ -1023,10 +1025,8 @@ impl Slot {
         #[cfg(feature = "ai")]
         if let Some((ref sel_entry_id, ref sel_interval, _)) = config.ai_timeline_selection {
             if sel_entry_id == &self.entry_id {
-                let norm_start =
-                    cx.view_interval.unlerp(sel_interval.start).clamp(0.0, 1.0);
-                let norm_stop =
-                    cx.view_interval.unlerp(sel_interval.stop).clamp(0.0, 1.0);
+                let norm_start = cx.view_interval.unlerp(sel_interval.start).clamp(0.0, 1.0);
+                let norm_stop = cx.view_interval.unlerp(sel_interval.stop).clamp(0.0, 1.0);
                 if norm_stop > 0.0 && norm_start < 1.0 {
                     let min = rect.lerp_inside(Vec2::new(norm_start, 0.0));
                     let max = rect.lerp_inside(Vec2::new(norm_stop, 1.0));
@@ -1036,10 +1036,7 @@ impl Slot {
                     ui.painter().rect_stroke(
                         sel_rect,
                         0.0,
-                        Stroke::new(
-                            1.5,
-                            Color32::from_rgba_unmultiplied(80, 140, 255, 150),
-                        ),
+                        Stroke::new(1.5, Color32::from_rgba_unmultiplied(80, 140, 255, 150)),
                     );
                 }
             }
@@ -1071,7 +1068,8 @@ impl Slot {
                     // Tooltip on hover
                     if let Some(h) = hover_pos {
                         if h.x >= min.x && h.x <= max.x && hl_rect.contains(h) {
-                            let tooltip_id = ("ai_highlight", tile_id.0.start.0, hl.interval.start.0);
+                            let tooltip_id =
+                                ("ai_highlight", tile_id.0.start.0, hl.interval.start.0);
                             ui.show_tooltip_ui(tooltip_id, &hl_rect, |ui| {
                                 ui.label(RichText::new(&hl.label).strong());
                                 ui.label(format!("Interval: {}", hl.interval));
@@ -1745,13 +1743,11 @@ fn build_slug_map(window: &Window) -> HashMap<String, EntryID> {
         map.insert(node_slug.clone(), node_panel.entry_id.clone());
 
         for kind_panel in &node_panel.slots {
-            let kind_slug =
-                format!("{}_{}", node_slug, slug_part(&kind_panel.short_name));
+            let kind_slug = format!("{}_{}", node_slug, slug_part(&kind_panel.short_name));
             map.insert(kind_slug.clone(), kind_panel.entry_id.clone());
 
             for slot in &kind_panel.slots {
-                let slot_slug =
-                    format!("{}_{}", kind_slug, slug_part(&slot.short_name));
+                let slot_slug = format!("{}_{}", kind_slug, slug_part(&slot.short_name));
                 map.insert(slot_slug.clone(), slot.entry_id.clone());
             }
         }
@@ -1821,11 +1817,15 @@ fn apply_navigation(cx: &mut Context, windows: &mut [Window], nav: &crate::ai::P
         PendingNavigation::Screenshot { .. } => {
             // Plain screenshot — no navigation changes needed.
         }
-        PendingNavigation::Zoom { start_ns, stop_ns, .. } => {
+        PendingNavigation::Zoom {
+            start_ns, stop_ns, ..
+        } => {
             let interval = Interval::new(Timestamp(*start_ns), Timestamp(*stop_ns));
             ProfApp::zoom(cx, interval);
         }
-        PendingNavigation::Pan { direction, percent, .. } => {
+        PendingNavigation::Pan {
+            direction, percent, ..
+        } => {
             let pct = (percent.round() as i64).clamp(1, 200);
             let dir = if direction.as_str() == "left" {
                 PanDirection::Left
@@ -1924,7 +1924,11 @@ fn format_selection_banner(
     const SHOWN: usize = 2;
     let mut parts: Vec<String> = Vec::new();
     if let Some((label, start, stop)) = range {
-        parts.push(format!("{}–{} ({label})", Timestamp(*start), Timestamp(*stop)));
+        parts.push(format!(
+            "{}–{} ({label})",
+            Timestamp(*start),
+            Timestamp(*stop)
+        ));
     }
     for it in items.iter().take(SHOWN) {
         let title = if it.title.is_empty() {
@@ -1973,7 +1977,11 @@ fn apply_one_highlight(windows: &mut [Window], hl: &crate::ai::Highlight) -> Opt
         if let Some(entry_id) = slug_map.get(&hl.entry_slug) {
             window.expand_slot(entry_id);
             let ai_hl = highlight_to_ai(hl);
-            let entry = window.config.ai_highlights.entry(entry_id.clone()).or_default();
+            let entry = window
+                .config
+                .ai_highlights
+                .entry(entry_id.clone())
+                .or_default();
             let dup = entry.iter().any(|h| {
                 h.interval.start.0 == ai_hl.interval.start.0
                     && h.interval.stop.0 == ai_hl.interval.stop.0
@@ -2011,8 +2019,10 @@ fn clear_all_highlights(windows: &mut [Window]) -> usize {
 fn flatten_highlights_sorted(
     map: &mut HashMap<EntryID, Vec<AiHighlight>>,
 ) -> Vec<(EntryID, &mut AiHighlight)> {
-    let mut rows: Vec<(EntryID, &mut AiHighlight)> =
-        map.iter_mut().flat_map(|(eid, v)| v.iter_mut().map(move |h| (eid.clone(), h))).collect();
+    let mut rows: Vec<(EntryID, &mut AiHighlight)> = map
+        .iter_mut()
+        .flat_map(|(eid, v)| v.iter_mut().map(move |h| (eid.clone(), h)))
+        .collect();
     rows.sort_by_key(|(_, h)| h.id);
     rows
 }
@@ -2041,10 +2051,16 @@ fn highlight_union(map: &HashMap<EntryID, Vec<AiHighlight>>) -> Option<Interval>
 #[cfg(feature = "ai")]
 #[derive(Default)]
 struct McpDrainSink {
-    pending: Option<(crate::ai::PendingNavigation, std::sync::mpsc::Sender<crate::ai::UiCommand>)>,
+    pending: Option<(
+        crate::ai::PendingNavigation,
+        std::sync::mpsc::Sender<crate::ai::UiCommand>,
+    )>,
     /// (highlight, request_id, reply channel) — applied to the live state + ACKed.
-    pending_highlight:
-        Option<(crate::ai::Highlight, u64, std::sync::mpsc::Sender<crate::ai::UiCommand>)>,
+    pending_highlight: Option<(
+        crate::ai::Highlight,
+        u64,
+        std::sync::mpsc::Sender<crate::ai::UiCommand>,
+    )>,
     /// (request_id, reply channel) for a clear-highlights request.
     pending_clear: Option<(u64, std::sync::mpsc::Sender<crate::ai::UiCommand>)>,
     /// (request_id, reply channel) for a get_selection READ (non-driving).
@@ -2072,7 +2088,13 @@ impl crate::ai::bridge::EventSink for McpDrainSink {
         reply_tx: &std::sync::mpsc::Sender<crate::ai::UiCommand>,
     ) {
         self.pending_highlight = Some((
-            crate::ai::Highlight { entry_slug, start_ns, stop_ns, severity, label },
+            crate::ai::Highlight {
+                entry_slug,
+                start_ns,
+                stop_ns,
+                severity,
+                label,
+            },
             request_id,
             reply_tx.clone(),
         ));
@@ -2128,12 +2150,10 @@ fn build_screenshot_metadata(cx: &Context, windows: &[Window]) -> String {
                 if !kind_panel.expanded {
                     continue;
                 }
-                let kind_slug =
-                    format!("{}_{}", node_slug, slug_part(&kind_panel.short_name));
+                let kind_slug = format!("{}_{}", node_slug, slug_part(&kind_panel.short_name));
 
                 for slot in &kind_panel.slots {
-                    let slot_slug =
-                        format!("{}_{}", kind_slug, slug_part(&slot.short_name));
+                    let slot_slug = format!("{}_{}", kind_slug, slug_part(&slot.short_name));
                     entry_slugs.push(slot_slug);
                 }
             }
@@ -2199,7 +2219,7 @@ impl Config {
             #[cfg(feature = "ai")]
             ai_highlights: HashMap::new(),
             #[cfg(feature = "ai")]
-            ai_highlights_enabled: true,  // Show highlights when found
+            ai_highlights_enabled: true, // Show highlights when found
             #[cfg(feature = "ai")]
             ai_timeline_selection: None,
         }
@@ -2224,7 +2244,6 @@ impl Config {
                 loc: item_loc,
             });
     }
-
 }
 
 impl Window {
@@ -2719,13 +2738,25 @@ impl Window {
 
         // Globals row: toggle all overlays · clear all · zoom to the enabled union.
         ui.horizontal(|ui| {
-            if ui.button("Toggle all").on_hover_text("Show or hide all overlays").clicked() {
+            if ui
+                .button("Toggle all")
+                .on_hover_text("Show or hide all overlays")
+                .clicked()
+            {
                 self.config.ai_highlights_enabled = !self.config.ai_highlights_enabled;
             }
-            if ui.button("Clear all").on_hover_text("Remove all highlights").clicked() {
+            if ui
+                .button("Clear all")
+                .on_hover_text("Remove all highlights")
+                .clicked()
+            {
                 self.config.ai_highlights.clear();
             }
-            if ui.button("Zoom to all").on_hover_text("Frame the union of enabled highlights").clicked() {
+            if ui
+                .button("Zoom to all")
+                .on_hover_text("Frame the union of enabled highlights")
+                .clicked()
+            {
                 if let Some(u) = highlight_union(&self.config.ai_highlights) {
                     ProfApp::zoom(cx, u);
                 }
@@ -2761,7 +2792,11 @@ impl Window {
             ProfApp::zoom(cx, interval.grow(interval.duration_ns() / 20));
             self.expand_slot(&eid);
             if let Some(uid) = item_uid {
-                self.config.scroll_to_item(ItemLocator { entry_id: eid, irow: None, item_uid: uid });
+                self.config.scroll_to_item(ItemLocator {
+                    entry_id: eid,
+                    irow: None,
+                    item_uid: uid,
+                });
             }
         }
     }
@@ -2813,10 +2848,11 @@ impl ProfApp {
             let saved = result.cx.ai_settings.clone();
             result.cx.chat_panel.apply_persisted(&saved);
             // Pre-fill the assistant's tool paths from CLI flags / auto-detection.
-            result
-                .cx
-                .chat_panel
-                .set_tool_paths(opts.ai_duckdb_path, opts.ai_code_path, opts.ai_wiki_path);
+            result.cx.chat_panel.set_tool_paths(
+                opts.ai_duckdb_path,
+                opts.ai_code_path,
+                opts.ai_wiki_path,
+            );
 
             // Agent tracing is OPT-IN: set LEGION_PROF_AI_TRACE_DIR to a
             // directory to record one JSON line per agent span under
@@ -3141,8 +3177,7 @@ impl ProfApp {
             if b > a {
                 let x0 = rect.left() + a * rect.width();
                 let x1 = rect.left() + b * rect.width();
-                let band =
-                    Rect::from_min_max(Pos2::new(x0, rect.min.y), Pos2::new(x1, rect.max.y));
+                let band = Rect::from_min_max(Pos2::new(x0, rect.min.y), Pos2::new(x1, rect.max.y));
                 ui.painter().rect(
                     band,
                     0.0,
@@ -3445,7 +3480,8 @@ impl eframe::App for ProfApp {
         // MCP driver (single outstanding screenshot across both). Idempotent; no
         // effect on the sole-driver path (the token is always free for it).
         #[cfg(feature = "ai")]
-        cx.chat_panel.ensure_viewport_token(cx.viewport_token.clone());
+        cx.chat_panel
+            .ensure_viewport_token(cx.viewport_token.clone());
 
         // Start the in-viewer HTTP MCP server once a DuckDB path is configured.
         // Runs on its OWN thread — never the egui main thread. One spawn attempt;
@@ -3502,7 +3538,11 @@ impl eframe::App for ProfApp {
                             .ui_bridge(crate::ai::bridge::MCP_CONSUMER_ID)
                             .with_wake(move || egui_ctx2.request_repaint());
                         match crate::ai::viewer_mcp::spawn(
-                            duckdb_path, 0, bridge2, wiki_root, code_root,
+                            duckdb_path,
+                            0,
+                            bridge2,
+                            wiki_root,
+                            code_root,
                         ) {
                             Ok((port, token, broker)) => {
                                 eprintln!(
@@ -3874,7 +3914,8 @@ impl eframe::App for ProfApp {
                         });
                     }
                 } else {
-                    cx.chat_panel.send_screenshot(request_id, png_bytes, metadata);
+                    cx.chat_panel
+                        .send_screenshot(request_id, png_bytes, metadata);
                 }
             }
 
@@ -3923,7 +3964,10 @@ impl eframe::App for ProfApp {
                         "Highlight added on {} [{}, {}].",
                         hl.entry_slug, hl.start_ns, hl.stop_ns
                     );
-                    let _ = reply_tx.send(crate::ai::UiCommand::Ack { request_id, message });
+                    let _ = reply_tx.send(crate::ai::UiCommand::Ack {
+                        request_id,
+                        message,
+                    });
                 }
                 // Clear highlights: clear the shared state, ACK the count.
                 if let Some((request_id, reply_tx)) = sink.pending_clear {
@@ -3933,7 +3977,10 @@ impl eframe::App for ProfApp {
                     } else {
                         format!("Cleared highlights on {n} row(s).")
                     };
-                    let _ = reply_tx.send(crate::ai::UiCommand::Ack { request_id, message });
+                    let _ = reply_tx.send(crate::ai::UiCommand::Ack {
+                        request_id,
+                        message,
+                    });
                 }
                 // get_selection: a non-driving READ of the human's current
                 // selection — the SAME state the embedded `build_selection_preamble`
@@ -4282,7 +4329,13 @@ pub fn start(data_sources: Vec<Box<dyn DeferredDataSource>>) {
             .start(
                 canvas,
                 web_options,
-                Box::new(|cc| Ok(Box::new(ProfApp::new(cc, data_sources, StartOptions::default())))),
+                Box::new(|cc| {
+                    Ok(Box::new(ProfApp::new(
+                        cc,
+                        data_sources,
+                        StartOptions::default(),
+                    )))
+                }),
             )
             .await;
 
@@ -4311,8 +4364,8 @@ pub fn start(data_sources: Vec<Box<dyn DeferredDataSource>>) {
 #[cfg(all(test, feature = "ai"))]
 mod mcp_sink_tests {
     use super::McpDrainSink;
-    use crate::ai::bridge::apply_agent_event;
     use crate::ai::AgentEvent;
+    use crate::ai::bridge::apply_agent_event;
     use std::sync::mpsc::channel;
 
     /// Drive one event into a fresh sink, return the sink.
@@ -4327,9 +4380,20 @@ mod mcp_sink_tests {
     fn test_mcp_sink_records_every_navigation_variant() {
         let evs = vec![
             AgentEvent::ScreenshotRequest { request_id: 1 },
-            AgentEvent::ZoomRequest { request_id: 2, start_ns: 0, stop_ns: 10 },
-            AgentEvent::PanRequest { request_id: 3, direction: "left".into(), percent: 25.0 },
-            AgentEvent::ScrollToRequest { request_id: 4, entry_slug: "n0_cpu_c1".into() },
+            AgentEvent::ZoomRequest {
+                request_id: 2,
+                start_ns: 0,
+                stop_ns: 10,
+            },
+            AgentEvent::PanRequest {
+                request_id: 3,
+                direction: "left".into(),
+                percent: 25.0,
+            },
+            AgentEvent::ScrollToRequest {
+                request_id: 4,
+                entry_slug: "n0_cpu_c1".into(),
+            },
             AgentEvent::SetViewRequest {
                 request_id: 5,
                 start_ns: 0,
@@ -4340,12 +4404,18 @@ mod mcp_sink_tests {
                 collapse_kinds: None,
                 vertical_scale: None,
             },
-            AgentEvent::SearchRequest { request_id: 6, query: "x".into() },
+            AgentEvent::SearchRequest {
+                request_id: 6,
+                query: "x".into(),
+            },
             AgentEvent::ResetViewRequest { request_id: 7 },
         ];
         for ev in evs {
             let sink = drive(ev);
-            assert!(sink.pending.is_some(), "nav variant must be RECORDED, not a no-op");
+            assert!(
+                sink.pending.is_some(),
+                "nav variant must be RECORDED, not a no-op"
+            );
             assert!(sink.pending_highlight.is_none() && sink.pending_clear.is_none());
         }
     }
@@ -4360,7 +4430,9 @@ mod mcp_sink_tests {
             severity: "high".into(),
             label: "blk".into(),
         });
-        let (hl, rid, _tx) = sink.pending_highlight.expect("highlight must be RECORDED, not a no-op");
+        let (hl, rid, _tx) = sink
+            .pending_highlight
+            .expect("highlight must be RECORDED, not a no-op");
         assert_eq!(rid, 9);
         assert_eq!(hl.entry_slug, "n0_cpu_c1");
         assert_eq!((hl.start_ns, hl.stop_ns), (1, 2));
@@ -4370,7 +4442,9 @@ mod mcp_sink_tests {
     #[test]
     fn test_mcp_sink_records_clear() {
         let sink = drive(AgentEvent::ClearHighlightsRequest { request_id: 11 });
-        let (rid, _tx) = sink.pending_clear.expect("clear must be RECORDED, not a no-op");
+        let (rid, _tx) = sink
+            .pending_clear
+            .expect("clear must be RECORDED, not a no-op");
         assert_eq!(rid, 11);
         assert!(sink.pending.is_none() && sink.pending_highlight.is_none());
     }
@@ -4378,9 +4452,15 @@ mod mcp_sink_tests {
     #[test]
     fn test_mcp_sink_records_get_selection() {
         let sink = drive(AgentEvent::GetSelection { request_id: 13 });
-        let (rid, _tx) = sink.pending_selection.expect("get_selection must be RECORDED, not a no-op");
+        let (rid, _tx) = sink
+            .pending_selection
+            .expect("get_selection must be RECORDED, not a no-op");
         assert_eq!(rid, 13);
-        assert!(sink.pending.is_none() && sink.pending_highlight.is_none() && sink.pending_clear.is_none());
+        assert!(
+            sink.pending.is_none()
+                && sink.pending_highlight.is_none()
+                && sink.pending_clear.is_none()
+        );
     }
 }
 
@@ -4408,19 +4488,29 @@ mod banner_tests {
 
     #[test]
     fn test_format_selection_banner_range_only() {
-        let b = format_selection_banner(&[], &Some(("n0_cpu_c2".into(), 1_000_000_000, 1_500_000_000)))
-            .expect("range -> Some");
+        let b = format_selection_banner(
+            &[],
+            &Some(("n0_cpu_c2".into(), 1_000_000_000, 1_500_000_000)),
+        )
+        .expect("range -> Some");
         assert!(b.starts_with("Selected:"), "banner: {b}");
         assert!(b.contains("n0_cpu_c2"), "range label shown: {b}");
-        assert!(!b.contains("more"), "no overflow for a range-only selection: {b}");
+        assert!(
+            !b.contains("more"),
+            "no overflow for a range-only selection: {b}"
+        );
     }
 
     #[test]
     fn test_format_selection_banner_items() {
-        let b = format_selection_banner(&[item(48, "top_level <6>")], &None).expect("items -> Some");
+        let b =
+            format_selection_banner(&[item(48, "top_level <6>")], &None).expect("items -> Some");
         assert!(b.starts_with("Selected:"));
         assert!(b.contains("top_level <6>"), "title shown: {b}");
-        assert!(b.contains('@') && b.contains("n0_cpu_c1"), "interval + slug shown: {b}");
+        assert!(
+            b.contains('@') && b.contains("n0_cpu_c1"),
+            "interval + slug shown: {b}"
+        );
         assert!(!b.contains("more"));
     }
 
@@ -4429,8 +4519,14 @@ mod banner_tests {
         // 3 items, SHOWN=2 -> first two in full, the rest collapse to "+1 more".
         let many = vec![item(1, "alpha"), item(2, "beta"), item(3, "gamma")];
         let b = format_selection_banner(&many, &None).expect("items -> Some");
-        assert!(b.contains("alpha") && b.contains("beta"), "first two shown: {b}");
-        assert!(!b.contains("gamma"), "3rd item collapsed, not shown by title: {b}");
+        assert!(
+            b.contains("alpha") && b.contains("beta"),
+            "first two shown: {b}"
+        );
+        assert!(
+            !b.contains("gamma"),
+            "3rd item collapsed, not shown by title: {b}"
+        );
         assert!(b.contains("+1 more"), "overflow summarized: {b}");
     }
 }
@@ -4459,10 +4555,18 @@ mod highlight_model_tests {
         // Fields carried correctly.
         assert_eq!(a.label, "blk");
         assert_eq!((a.interval.start.0, a.interval.stop.0), (100, 200));
-        assert!(a.item_uid.is_none(), "region/interval highlight has no task target");
+        assert!(
+            a.item_uid.is_none(),
+            "region/interval highlight has no task target"
+        );
         assert!(a.enabled, "new highlights start enabled");
         // Unique + monotonic ids across BOTH apply sites (allocated in highlight_to_ai).
-        assert!(b.id > a.id, "ids must be monotonic + unique: {} then {}", a.id, b.id);
+        assert!(
+            b.id > a.id,
+            "ids must be monotonic + unique: {} then {}",
+            a.id,
+            b.id
+        );
     }
 
     use crate::ai::AiHighlight;
@@ -4484,21 +4588,37 @@ mod highlight_model_tests {
     fn test_flatten_highlights_sorted_is_deterministic() {
         let mut map: HashMap<EntryID, Vec<AiHighlight>> = HashMap::new();
         // Out-of-order ids across two entries -> flat list sorted by id.
-        map.insert(EntryID::root().child(0), vec![ahl(30, 0, 1, true), ahl(10, 0, 1, true)]);
+        map.insert(
+            EntryID::root().child(0),
+            vec![ahl(30, 0, 1, true), ahl(10, 0, 1, true)],
+        );
         map.insert(EntryID::root().child(1), vec![ahl(20, 0, 1, false)]);
-        let order: Vec<u64> =
-            flatten_highlights_sorted(&mut map).iter().map(|(_, h)| h.id).collect();
-        assert_eq!(order, vec![10, 20, 30], "flat list sorted by id across all entries");
+        let order: Vec<u64> = flatten_highlights_sorted(&mut map)
+            .iter()
+            .map(|(_, h)| h.id)
+            .collect();
+        assert_eq!(
+            order,
+            vec![10, 20, 30],
+            "flat list sorted by id across all entries"
+        );
     }
 
     #[test]
     fn test_highlight_union_enabled_only() {
         let mut map: HashMap<EntryID, Vec<AiHighlight>> = HashMap::new();
         // ENABLED [100,200] + [400,500]; a DISABLED [0,1000] must be IGNORED.
-        map.insert(EntryID::root().child(0), vec![ahl(1, 100, 200, true), ahl(2, 0, 1000, false)]);
+        map.insert(
+            EntryID::root().child(0),
+            vec![ahl(1, 100, 200, true), ahl(2, 0, 1000, false)],
+        );
         map.insert(EntryID::root().child(1), vec![ahl(3, 400, 500, true)]);
         let u = highlight_union(&map).expect("some enabled -> Some");
-        assert_eq!((u.start.0, u.stop.0), (100, 500), "union of ENABLED only (disabled [0,1000] ignored)");
+        assert_eq!(
+            (u.start.0, u.stop.0),
+            (100, 500),
+            "union of ENABLED only (disabled [0,1000] ignored)"
+        );
 
         // All disabled -> None.
         let mut none_map: HashMap<EntryID, Vec<AiHighlight>> = HashMap::new();

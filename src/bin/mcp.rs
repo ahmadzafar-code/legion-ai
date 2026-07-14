@@ -7,8 +7,8 @@
 //!
 //! Usage: `mcp --duckdb <path.duckdb> [--code-root <dir>]`.
 
-use legion_prof_viewer::ai::mcp_core::{handle_request, ServerCtx};
-use serde_json::{json, Value};
+use legion_prof_viewer::ai::mcp_core::{ServerCtx, handle_request};
+use serde_json::{Value, json};
 use std::io::{BufRead, Write};
 
 fn main() {

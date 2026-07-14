@@ -14,8 +14,8 @@
 use crate::ai::agent::{AgentEvent, AgentResponse, AgentSession, Highlight, UiCommand};
 use crate::data::EntryID;
 use crate::timestamp::Interval;
-use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 
 /// Shared event channel type — receives progressive AgentEvents from the agent thread.
 type EventChannel = Arc<Mutex<Option<mpsc::Receiver<AgentEvent>>>>;
@@ -87,9 +87,17 @@ pub enum PendingNavigation {
     /// Plain screenshot capture.
     Screenshot { request_id: u64 },
     /// Zoom to a time range, then screenshot.
-    Zoom { request_id: u64, start_ns: i64, stop_ns: i64 },
+    Zoom {
+        request_id: u64,
+        start_ns: i64,
+        stop_ns: i64,
+    },
     /// Pan left/right by a percentage, then screenshot.
-    Pan { request_id: u64, direction: String, percent: f64 },
+    Pan {
+        request_id: u64,
+        direction: String,
+        percent: f64,
+    },
     /// Scroll vertically to a processor row, then screenshot.
     ScrollTo { request_id: u64, entry_slug: String },
     /// Zoom + optional scroll/filter/expand, then screenshot.
@@ -303,7 +311,10 @@ impl std::fmt::Debug for ChatPanel {
             .field("visible", &self.visible)
             .field("messages", &self.messages.len())
             .field("pending_request", &self.pending_request)
-            .field("pending_highlight_actions", &self.pending_highlight_actions.len())
+            .field(
+                "pending_highlight_actions",
+                &self.pending_highlight_actions.len(),
+            )
             .finish()
     }
 }
@@ -455,7 +466,11 @@ impl ChatPanel {
                     .size(11.0),
                 );
             }
-            if ui.small_button("×").on_hover_text("Clear selection").clicked() {
+            if ui
+                .small_button("×")
+                .on_hover_text("Clear selection")
+                .clicked()
+            {
                 self.selected_items.clear();
                 self.selection = None;
                 self.pending_clear_selection = true;
@@ -585,7 +600,9 @@ impl ChatPanel {
         if !trimmed.is_empty() {
             return Some(trimmed.to_owned());
         }
-        std::env::var("ANTHROPIC_API_KEY").ok().map(|s| s.trim().to_owned())
+        std::env::var("ANTHROPIC_API_KEY")
+            .ok()
+            .map(|s| s.trim().to_owned())
     }
 
     // ── Tool status helpers ────────────────────────────────────────────────
@@ -1014,10 +1031,7 @@ impl ChatPanel {
 
         self.add_message(ChatMessageKind::User, &user_query);
         let time_hint = "typically 30–90 s";
-        self.add_message(
-            ChatMessageKind::System,
-            format!("Working… ({time_hint})"),
-        );
+        self.add_message(ChatMessageKind::System, format!("Working… ({time_hint})"));
         self.pending_request = true;
 
         let model = NATIVE_MODEL.to_owned();
@@ -1103,8 +1117,7 @@ impl ChatPanel {
                 // (hard_stop kills the child; the reader sees EOF). Native keeps
                 // disabled-while-pending behavior (its thread can't be stopped).
                 #[cfg(feature = "viewer-mcp")]
-                let can_reset =
-                    !self.pending_request || self.cc_agent.lock().unwrap().is_some();
+                let can_reset = !self.pending_request || self.cc_agent.lock().unwrap().is_some();
                 #[cfg(not(feature = "viewer-mcp"))]
                 let can_reset = !self.pending_request;
                 if ui
@@ -1240,8 +1253,7 @@ impl ChatPanel {
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .open(&mut open)
             .show(ctx, |ui| {
-                ui.visuals_mut().override_text_color =
-                    Some(egui::Color32::from_rgb(30, 30, 30));
+                ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(30, 30, 30));
                 ui.set_min_width(320.0);
                 ui.label(
                     egui::RichText::new(
@@ -1287,7 +1299,10 @@ impl ChatPanel {
         let card = |ui: &mut egui::Ui, title: &str| -> bool {
             let resp = egui::Frame::none()
                 .fill(egui::Color32::WHITE)
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(225, 225, 225)))
+                .stroke(egui::Stroke::new(
+                    1.0,
+                    egui::Color32::from_rgb(225, 225, 225),
+                ))
                 .rounding(12.0)
                 .inner_margin(egui::Margin::same(14.0))
                 .show(ui, |ui: &mut egui::Ui| {
@@ -1351,8 +1366,7 @@ impl ChatPanel {
             ui.horizontal(|ui| {
                 ui.spinner();
                 ui.label(
-                    egui::RichText::new("Analyzing…")
-                        .color(egui::Color32::from_rgb(100, 100, 100)),
+                    egui::RichText::new("Analyzing…").color(egui::Color32::from_rgb(100, 100, 100)),
                 );
             });
             ui.add_space(4.0);
@@ -1514,7 +1528,10 @@ impl ChatPanel {
             .fill(egui::Color32::from_rgb(245, 245, 245))
             .rounding(10.0)
             .inner_margin(egui::Margin::same(10.0))
-            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(220, 220, 220)))
+            .stroke(egui::Stroke::new(
+                1.0,
+                egui::Color32::from_rgb(220, 220, 220),
+            ))
             .show(ui, |ui: &mut egui::Ui| {
                 // Human-in-the-loop: a pending question from the agent.
                 if let Some((request_id, question, options)) = self.pending_question.clone() {
@@ -1623,8 +1640,7 @@ impl ChatPanel {
                                         .add_filter("DuckDB", &["duckdb"])
                                         .pick_file()
                                     {
-                                        self.duckdb_path_buffer =
-                                            f.to_string_lossy().into_owned();
+                                        self.duckdb_path_buffer = f.to_string_lossy().into_owned();
                                     }
                                 }
                                 if item(ui, "Connect code repo…") {
@@ -1634,8 +1650,7 @@ impl ChatPanel {
                                         )
                                         .pick_folder()
                                     {
-                                        self.code_path_buffer =
-                                            d.to_string_lossy().into_owned();
+                                        self.code_path_buffer = d.to_string_lossy().into_owned();
                                     }
                                 }
                                 if item(ui, "Add file…") {
@@ -1648,11 +1663,7 @@ impl ChatPanel {
                                         // attachment (binary would inject garbage).
                                         if f.extension().is_some_and(|e| e == "duckdb") {
                                             self.duckdb_path_buffer = path;
-                                        } else if !self
-                                            .attachments
-                                            .iter()
-                                            .any(|a| a.path == path)
-                                        {
+                                        } else if !self.attachments.iter().any(|a| a.path == path) {
                                             let display_name = f
                                                 .file_name()
                                                 .map(|n| n.to_string_lossy().into_owned())
@@ -1669,39 +1680,35 @@ impl ChatPanel {
                     );
 
                     // Right-aligned: Send
-                    ui.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            if ui
-                                .add_enabled(
-                                    enabled && !self.input_buffer.trim().is_empty(),
-                                    egui::Button::new(
-                                        // ↵ lives in Hack (the monospace font) —
-                                        // the proportional font lacks all the
-                                        // arrow glyphs (they render as boxes).
-                                        egui::RichText::new("↵")
-                                            .monospace()
-                                            .size(19.0)
-                                            .color(egui::Color32::WHITE),
-                                    )
-                                    .fill(egui::Color32::from_rgb(50, 50, 50))
-                                    .rounding(18.0)
-                                    .min_size(egui::vec2(36.0, 36.0)),
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add_enabled(
+                                enabled && !self.input_buffer.trim().is_empty(),
+                                egui::Button::new(
+                                    // ↵ lives in Hack (the monospace font) —
+                                    // the proportional font lacks all the
+                                    // arrow glyphs (they render as boxes).
+                                    egui::RichText::new("↵")
+                                        .monospace()
+                                        .size(19.0)
+                                        .color(egui::Color32::WHITE),
                                 )
-                                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                                .clicked()
-                            {
-                                let can_submit =
-                                    !self.pending_request || self.pending_question.is_some();
-                                if !self.input_buffer.trim().is_empty() && can_submit {
-                                    let text = self.input_buffer.trim().to_string();
-                                    self.input_buffer.clear();
-                                    self.submit_input(text);
-                                }
+                                .fill(egui::Color32::from_rgb(50, 50, 50))
+                                .rounding(18.0)
+                                .min_size(egui::vec2(36.0, 36.0)),
+                            )
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .clicked()
+                        {
+                            let can_submit =
+                                !self.pending_request || self.pending_question.is_some();
+                            if !self.input_buffer.trim().is_empty() && can_submit {
+                                let text = self.input_buffer.trim().to_string();
+                                self.input_buffer.clear();
+                                self.submit_input(text);
                             }
-
-                        },
-                    );
+                        }
+                    });
                 });
             });
     }
@@ -1740,8 +1747,7 @@ impl ChatPanel {
             )
             .show(ctx, |ui| {
                 // Force dark text throughout this panel
-                ui.visuals_mut().override_text_color =
-                    Some(egui::Color32::from_rgb(30, 30, 30));
+                ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(30, 30, 30));
                 // Larger, more readable text throughout the chat panel.
                 for font_id in ui.style_mut().text_styles.values_mut() {
                     font_id.size *= 1.2;
@@ -1771,10 +1777,7 @@ impl ChatPanel {
                 // Inner margin keeps message text off the panel walls (the other
                 // zones have their own margins: settings 8px, composer 10px).
                 egui::CentralPanel::default()
-                    .frame(
-                        egui::Frame::none()
-                            .inner_margin(egui::Margin::symmetric(12.0, 6.0)),
-                    )
+                    .frame(egui::Frame::none().inner_margin(egui::Margin::symmetric(12.0, 6.0)))
                     .show_inside(ui, |ui| {
                         self.ui_transcript(ui);
                     });
@@ -1789,10 +1792,14 @@ impl ChatPanel {
     /// like a routine one.
     #[cfg(feature = "viewer-mcp")]
     fn ui_approval_dialog(&mut self, ctx: &egui::Context) {
-        use crate::ai::claude_code::{bash_rule_prefix, ApprovalDecision};
+        use crate::ai::claude_code::{ApprovalDecision, bash_rule_prefix};
 
-        let Some(broker) = self.approval_broker.clone() else { return };
-        let Some((id, tool_name, tool_input)) = broker.front() else { return };
+        let Some(broker) = self.approval_broker.clone() else {
+            return;
+        };
+        let Some((id, tool_name, tool_input)) = broker.front() else {
+            return;
+        };
         // A verdict can arrive from a background thread at any time — keep frames
         // coming while the dialog is up (cheap: only while a request is pending).
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -1823,7 +1830,11 @@ impl ChatPanel {
                     .or_else(|| tool_input.get("new_source"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                if body.is_empty() { path.to_owned() } else { format!("{path}\n\n{body}") }
+                if body.is_empty() {
+                    path.to_owned()
+                } else {
+                    format!("{path}\n\n{body}")
+                }
             }
             "WebFetch" => tool_input
                 .get("url")
@@ -1874,16 +1885,20 @@ impl ChatPanel {
                     ui.label(egui::RichText::new(&tool_name).strong().size(15.0));
                 });
                 ui.add_space(6.0);
-                egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
-                    ui.add(
-                        egui::Label::new(egui::RichText::new(&detail).monospace().size(12.5))
-                            .wrap(),
-                    );
-                });
+                egui::ScrollArea::vertical()
+                    .max_height(220.0)
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(&detail).monospace().size(12.5))
+                                .wrap(),
+                        );
+                    });
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     if ui
-                        .button(egui::RichText::new("Deny").color(egui::Color32::from_rgb(180, 30, 30)))
+                        .button(
+                            egui::RichText::new("Deny").color(egui::Color32::from_rgb(180, 30, 30)),
+                        )
                         .clicked()
                     {
                         verdict = Some((ApprovalDecision::Deny, false));
@@ -2014,9 +2029,7 @@ fn render_message(
                         }
                     });
                 }
-                if msg.highlights.len() > 1
-                    && ui.small_button("Zoom to all \u{25b8}").clicked()
-                {
+                if msg.highlights.len() > 1 && ui.small_button("Zoom to all \u{25b8}").clicked() {
                     for hl in &msg.highlights {
                         actions.push(HighlightAction {
                             highlight: hl.clone(),
@@ -2088,7 +2101,11 @@ impl crate::ai::bridge::EventSink for ChatPanel {
             kind: ChatMessageKind::System,
             text: format!("  ✓ {name} ({summary})"),
             highlights: vec![],
-            expandable_content: if has_content { Some(full_content) } else { None },
+            expandable_content: if has_content {
+                Some(full_content)
+            } else {
+                None
+            },
         });
     }
 
@@ -2164,7 +2181,11 @@ impl crate::ai::bridge::EventSink for ChatPanel {
                 format!(
                     "Done. {} quer{} executed.",
                     response.queries_executed,
-                    if response.queries_executed == 1 { "y" } else { "ies" }
+                    if response.queries_executed == 1 {
+                        "y"
+                    } else {
+                        "ies"
+                    }
                 ),
             );
         } else {
@@ -2197,7 +2218,10 @@ mod selection_tests {
 
         // Nothing selected -> empty snapshot.
         let (items, range) = p.selection_snapshot();
-        assert!(items.is_empty() && range.is_none(), "empty selection -> empty snapshot");
+        assert!(
+            items.is_empty() && range.is_none(),
+            "empty selection -> empty snapshot"
+        );
 
         // Seed a selected task bar + a dragged region.
         p.set_item_selection(vec![SelectedItem {
@@ -2239,7 +2263,10 @@ mod project_root_tests {
         let dir = std::env::temp_dir().join(format!("p3v2_dir_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let dir_s = dir.to_string_lossy().into_owned();
-        assert_eq!(effective_project_root(&format!("  {dir_s}  ")), Some(dir_s.clone()));
+        assert_eq!(
+            effective_project_root(&format!("  {dir_s}  ")),
+            Some(dir_s.clone())
+        );
         // A FILE normalizes to its parent.
         let file = dir.join("kernel.cu");
         std::fs::write(&file, "x").unwrap();
@@ -2270,7 +2297,10 @@ mod project_root_tests {
         assert_eq!(saved.duckdb_path, "/db.duckdb");
         // The API key must not appear anywhere in the persisted form.
         let json = serde_json::to_string(&saved).unwrap();
-        assert!(!json.contains("sk-ant-secret"), "API key must never persist");
+        assert!(
+            !json.contains("sk-ant-secret"),
+            "API key must never persist"
+        );
 
         let mut b = ChatPanel::new();
         b.apply_persisted(&saved);
@@ -2298,6 +2328,10 @@ mod project_root_tests {
         assert_eq!(*handle.read().unwrap(), Some("/app/src".to_owned()));
         p.code_path_buffer.clear();
         p.sync_project_root();
-        assert_eq!(*handle.read().unwrap(), None, "clearing the field must clear the handle");
+        assert_eq!(
+            *handle.read().unwrap(),
+            None,
+            "clearing the field must clear the handle"
+        );
     }
 }

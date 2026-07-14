@@ -22,7 +22,7 @@
 //!         [--out <path.jsonl>] [--model <id>]`
 
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -60,7 +60,9 @@ fn load_case(arg: &str) -> Result<Case, String> {
     } else if candidate.is_file() && candidate.file_name() == Some("case.toml".as_ref()) {
         candidate.parent().unwrap_or(Path::new(".")).to_path_buf()
     } else {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("eval_fixtures").join(arg)
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("eval_fixtures")
+            .join(arg)
     };
     let toml_path = case_dir.join("case.toml");
     let content = std::fs::read_to_string(&toml_path)
@@ -97,7 +99,9 @@ fn parse_toml(content: &str) -> Result<HashMap<String, String>, String> {
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        let Some(eq) = trimmed.find('=') else { continue };
+        let Some(eq) = trimmed.find('=') else {
+            continue;
+        };
         let key = trimmed[..eq].trim().to_string();
         let rest = trimmed[eq + 1..].trim();
 
@@ -153,7 +157,10 @@ fn get_f64(map: &HashMap<String, String>, key: &str) -> Option<f64> {
 fn get_int_pair(map: &HashMap<String, String>, key: &str) -> Option<(i64, i64)> {
     let raw = raw_scalar(map, key)?;
     let inner = raw.trim_start_matches('[').trim_end_matches(']');
-    let parts: Vec<i64> = inner.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+    let parts: Vec<i64> = inner
+        .split(',')
+        .filter_map(|s| s.trim().parse().ok())
+        .collect();
     (parts.len() == 2).then(|| (parts[0], parts[1]))
 }
 
@@ -177,10 +184,12 @@ fn verify_sha(case: &Case) -> Result<(), String> {
 
 fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write;
-    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-        let _ = write!(s, "{b:02x}");
-        s
-    })
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
 }
 
 // ── Oracle (independent ground truth on a DIRECT connection) ─────────────────
@@ -239,9 +248,11 @@ fn compute_oracle(case: &Case) -> Result<String, String> {
         vals.sort();
         vals.join(",")
     } else {
-        conn.query_row(&case.oracle_sql, [], |row| Ok(cell_to_string(row.get_ref(0)?)))
-            .map_err(|e| format!("oracle query: {e}"))?
-            .ok_or("oracle returned NULL")?
+        conn.query_row(&case.oracle_sql, [], |row| {
+            Ok(cell_to_string(row.get_ref(0)?))
+        })
+        .map_err(|e| format!("oracle query: {e}"))?
+        .ok_or("oracle returned NULL")?
     };
 
     if let Some(expected) = &case.expected {
@@ -329,10 +340,12 @@ fn grade_tuple(agent: &str, oracle: &str, tolerance: f64) -> bool {
     let a: Vec<&str> = agent.split(',').map(str::trim).collect();
     let o: Vec<&str> = oracle.split(',').map(str::trim).collect();
     a.len() == o.len()
-        && a.iter().zip(&o).all(|(x, y)| match (x.parse::<f64>(), y.parse::<f64>()) {
-            (Ok(xv), Ok(yv)) => (xv - yv).abs() / yv.abs().max(1e-9) <= tolerance,
-            _ => x.eq_ignore_ascii_case(y),
-        })
+        && a.iter()
+            .zip(&o)
+            .all(|(x, y)| match (x.parse::<f64>(), y.parse::<f64>()) {
+                (Ok(xv), Ok(yv)) => (xv - yv).abs() / yv.abs().max(1e-9) <= tolerance,
+                _ => x.eq_ignore_ascii_case(y),
+            })
 }
 
 /// The agent's `final_answer` value, flattened to a comparison string.
@@ -380,7 +393,12 @@ struct StubHarness {
 
 #[cfg(test)]
 impl Harness for StubHarness {
-    fn run(&self, _prompt: &str, _mcp_config: &Path, _allowed: &[&str]) -> Result<AgentRun, String> {
+    fn run(
+        &self,
+        _prompt: &str,
+        _mcp_config: &Path,
+        _allowed: &[&str],
+    ) -> Result<AgentRun, String> {
         Ok(self.canned.clone())
     }
 }
@@ -411,7 +429,10 @@ impl Harness for McpHarness {
         let stdout = String::from_utf8_lossy(&out.stdout).to_string();
         if stdout.trim().is_empty() {
             let stderr = String::from_utf8_lossy(&out.stderr);
-            return Err(format!("claude produced no output (status {}): {stderr}", out.status));
+            return Err(format!(
+                "claude produced no output (status {}): {stderr}",
+                out.status
+            ));
         }
         Ok(parse_stream_json(&stdout))
     }
@@ -504,16 +525,28 @@ fn runner_envelope_to_agent_run(stdout: &str) -> Result<AgentRun, String> {
         .rev()
         .find(|l| !l.trim().is_empty())
         .ok_or("embedded_runner produced no output")?;
-    let v: Value = serde_json::from_str(line.trim())
-        .map_err(|e| format!("bad runner envelope: {e}; line: {}", &line[..line.len().min(200)]))?;
-    let text = v.get("text").and_then(Value::as_str).unwrap_or("").to_owned();
+    let v: Value = serde_json::from_str(line.trim()).map_err(|e| {
+        format!(
+            "bad runner envelope: {e}; line: {}",
+            &line[..line.len().min(200)]
+        )
+    })?;
+    let text = v
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
     let error = v.get("error").and_then(Value::as_str).map(|s| s.to_owned());
     Ok(AgentRun {
         final_answer: extract_final_answer(&text),
         tools_called: v
             .get("tools_called")
             .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(|t| t.as_str().map(str::to_owned)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|t| t.as_str().map(str::to_owned))
+                    .collect()
+            })
             .unwrap_or_default(),
         turns_used: v.get("turns_used").and_then(Value::as_u64).unwrap_or(0) as u32,
         raw_transcript: text,
@@ -580,18 +613,25 @@ fn parse_stream_json(transcript: &str) -> AgentRun {
         if line.is_empty() {
             continue;
         }
-        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
         if v.get("type").and_then(Value::as_str) != Some("assistant") {
             continue;
         }
-        let Some(content) = v.pointer("/message/content").and_then(Value::as_array) else { continue };
+        let Some(content) = v.pointer("/message/content").and_then(Value::as_array) else {
+            continue;
+        };
         for block in content {
             if block.get("type").and_then(Value::as_str) != Some("tool_use") {
                 continue;
             }
             turns += 1;
             let name = block.get("name").and_then(Value::as_str).unwrap_or("");
-            let short = name.strip_prefix("mcp__legion__").unwrap_or(name).to_string();
+            let short = name
+                .strip_prefix("mcp__legion__")
+                .unwrap_or(name)
+                .to_string();
             if short == "final_answer" {
                 if let Some(input) = block.get("input") {
                     final_answer = Some(FinalAnswer {
@@ -608,8 +648,16 @@ fn parse_stream_json(transcript: &str) -> AgentRun {
         }
     }
 
-    let error = final_answer.is_none().then(|| "no final_answer".to_string());
-    AgentRun { final_answer, tools_called, turns_used: turns, raw_transcript: transcript.to_string(), error }
+    let error = final_answer
+        .is_none()
+        .then(|| "no final_answer".to_string());
+    AgentRun {
+        final_answer,
+        tools_called,
+        turns_used: turns,
+        raw_transcript: transcript.to_string(),
+        error,
+    }
 }
 
 // ── Result row (one JSON object per run) ─────────────────────────────────────
@@ -656,8 +704,16 @@ fn build_result_row(
     let (graded, divergence) = if run.error.is_some() {
         ("error".to_string(), None)
     } else if let Some(fa) = &run.final_answer {
-        let g = grade(&case.answer_type, &value_to_string(&fa.value), oracle, case.tolerance);
-        (if g.pass { "pass" } else { "fail" }.to_string(), g.divergence)
+        let g = grade(
+            &case.answer_type,
+            &value_to_string(&fa.value),
+            oracle,
+            case.tolerance,
+        );
+        (
+            if g.pass { "pass" } else { "fail" }.to_string(),
+            g.divergence,
+        )
     } else {
         ("error".to_string(), None)
     };
@@ -811,7 +867,11 @@ fn run_eval(
     let case = load_case(case_arg)?;
     let db = case.duckdb_abs_path();
     if !db.exists() {
-        eprintln!("[eval] SKIP {}: duckdb absent at {}", case.case_id, db.display());
+        eprintln!(
+            "[eval] SKIP {}: duckdb absent at {}",
+            case.case_id,
+            db.display()
+        );
         return Ok(None);
     }
     verify_sha(&case)?; // refuse on mismatch
@@ -826,7 +886,10 @@ fn run_eval(
 
     let run = match harness_name {
         "embedded" => {
-            let harness = EmbeddedHarness { model: model.clone(), db: db.clone() };
+            let harness = EmbeddedHarness {
+                model: model.clone(),
+                db: db.clone(),
+            };
             match harness.run(&build_prompt_embedded(&case), Path::new(""), &[]) {
                 Ok(run) => run,
                 Err(e) => AgentRun {
@@ -840,7 +903,9 @@ fn run_eval(
         }
         "mcp" => {
             let mcp_cfg = write_mcp_config(&db)?;
-            let harness = McpHarness { model: Some(model.clone()) };
+            let harness = McpHarness {
+                model: Some(model.clone()),
+            };
             let result = harness.run(&build_prompt(&case), &mcp_cfg, ALLOWED_TOOLS);
             let _ = std::fs::remove_file(&mcp_cfg);
             match result {
@@ -876,8 +941,7 @@ fn run_eval(
     Ok(Some(row))
 }
 
-const USAGE: &str =
-    "usage: eval run --case <DIR_or_ID> --harness <mcp|embedded> --seed <N> [--out <path.jsonl>] [--model <id>]\n       eval run-all --harness <mcp|embedded> [--seed <N>] [--out <path.jsonl>] [--model <id>]";
+const USAGE: &str = "usage: eval run --case <DIR_or_ID> --harness <mcp|embedded> --seed <N> [--out <path.jsonl>] [--model <id>]\n       eval run-all --harness <mcp|embedded> [--seed <N>] [--out <path.jsonl>] [--model <id>]";
 
 /// List every fixture case id under eval_fixtures/, sorted for determinism.
 fn list_fixture_ids() -> Result<Vec<String>, String> {
@@ -922,10 +986,13 @@ fn run_all(
                     row.graded.to_uppercase(),
                     row.duration_s,
                     row.turns_used,
-                    row.error.as_deref().map(|e| {
-                        let e: String = e.chars().take(80).collect();
-                        format!("; {e}")
-                    }).unwrap_or_default()
+                    row.error
+                        .as_deref()
+                        .map(|e| {
+                            let e: String = e.chars().take(80).collect();
+                            format!("; {e}")
+                        })
+                        .unwrap_or_default()
                 );
                 match row.graded.as_str() {
                     "pass" => pass += 1,
@@ -944,9 +1011,13 @@ fn run_all(
         }
     }
     let ran = pass + fail + error;
-    eprintln!("\n== eval gate: {pass} pass / {fail} fail / {error} error / {skip} skip (of {n}) ==");
+    eprintln!(
+        "\n== eval gate: {pass} pass / {fail} fail / {error} error / {skip} skip (of {n}) =="
+    );
     if ran == 0 {
-        eprintln!("GATE FAIL: zero cases actually ran — fixtures missing? (soft-skip is not a pass)");
+        eprintln!(
+            "GATE FAIL: zero cases actually ran — fixtures missing? (soft-skip is not a pass)"
+        );
         return Ok(1);
     }
     if fail > 0 || error > 0 {
@@ -1062,7 +1133,10 @@ mod tests {
     #[test]
     fn test_extract_final_answer_bare_and_absent() {
         let bare = "The answer is below. {\"answer_type\": \"number\", \"value\": 42}";
-        assert_eq!(extract_final_answer(bare).unwrap().value, serde_json::json!(42));
+        assert_eq!(
+            extract_final_answer(bare).unwrap().value,
+            serde_json::json!(42)
+        );
         assert!(extract_final_answer("no answer here").is_none());
         assert!(extract_final_answer("```json\n{\"highlights\": []}\n```").is_none());
     }
@@ -1077,7 +1151,10 @@ mod tests {
         assert_eq!(run.turns_used, 4);
         assert_eq!(run.tools_called, vec!["run_query", "overview"]);
         assert!(run.error.is_none());
-        assert_eq!(run.final_answer.expect("answer").value, serde_json::json!(7));
+        assert_eq!(
+            run.final_answer.expect("answer").value,
+            serde_json::json!(7)
+        );
     }
 
     #[test]
@@ -1096,9 +1173,15 @@ mod tests {
     #[test]
     fn test_build_prompt_embedded_prose() {
         let p = build_prompt_embedded(&fake_case("number"));
-        assert!(p.contains("\"answer_type\": \"number\""), "typed-answer instruction");
+        assert!(
+            p.contains("\"answer_type\": \"number\""),
+            "typed-answer instruction"
+        );
         assert!(p.contains("Do NOT use screenshot"), "headless tool ban");
-        assert!(!p.contains("final_answer"), "must not reference the MCP-only tool");
+        assert!(
+            !p.contains("final_answer"),
+            "must not reference the MCP-only tool"
+        );
     }
 
     // ── grader ──────────────────────────────────────────────────────────────
@@ -1241,7 +1324,10 @@ mod tests {
         // All fixtures share bg4N2; check presence once via the first case.
         let probe = load_case(CASES[0]).expect("load first case");
         if !probe.duckdb_abs_path().exists() {
-            eprintln!("skipping oracle lock: bg4N2 absent at {}", probe.duckdb_abs_path().display());
+            eprintln!(
+                "skipping oracle lock: bg4N2 absent at {}",
+                probe.duckdb_abs_path().display()
+            );
             return;
         }
         for id in CASES {
@@ -1249,7 +1335,10 @@ mod tests {
             // Err == oracle drift (computed value != manifest expected).
             let value = compute_oracle(&case)
                 .unwrap_or_else(|e| panic!("ORACLE LOCK FAILED for {id}: {e}"));
-            assert!(case.expected.is_some(), "{id} has no expected to lock against");
+            assert!(
+                case.expected.is_some(),
+                "{id} has no expected to lock against"
+            );
             eprintln!("locked {id}: oracle={value:?}");
         }
     }
@@ -1273,7 +1362,10 @@ mod tests {
 
     fn run_with_stub(answer: Option<Value>) -> ResultRow {
         let canned = AgentRun {
-            final_answer: answer.map(|v| FinalAnswer { answer_type: "uid".into(), value: v }),
+            final_answer: answer.map(|v| FinalAnswer {
+                answer_type: "uid".into(),
+                value: v,
+            }),
             tools_called: vec!["run_query".into(), "final_answer".into()],
             turns_used: 2,
             raw_transcript: "stub".into(),
@@ -1285,7 +1377,10 @@ mod tests {
             .run("p", Path::new("/dev/null"), ALLOWED_TOOLS)
             .unwrap();
         let run = if run.final_answer.is_none() {
-            AgentRun { error: Some("no final_answer".into()), ..run }
+            AgentRun {
+                error: Some("no final_answer".into()),
+                ..run
+            }
         } else {
             run
         };
@@ -1329,10 +1424,14 @@ mod tests {
     #[test]
     fn test_parse_stream_json_extracts_last_final_answer() {
         let transcript = concat!(
-            r#"{"type":"system","subtype":"init"}"#, "\n",
-            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"mcp__legion__run_query","input":{"sql":"SELECT 1"}}]}}"#, "\n",
-            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"mcp__legion__final_answer","input":{"answer_type":"uid","value":48}}]}}"#, "\n",
-            r#"{"type":"result","subtype":"success"}"#, "\n",
+            r#"{"type":"system","subtype":"init"}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"mcp__legion__run_query","input":{"sql":"SELECT 1"}}]}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"mcp__legion__final_answer","input":{"answer_type":"uid","value":48}}]}}"#,
+            "\n",
+            r#"{"type":"result","subtype":"success"}"#,
+            "\n",
         );
         let run = parse_stream_json(transcript);
         assert_eq!(run.turns_used, 2);
@@ -1341,7 +1440,9 @@ mod tests {
         assert_eq!(fa.value, json!(48));
         assert!(run.error.is_none());
 
-        let none = parse_stream_json(r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#);
+        let none = parse_stream_json(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#,
+        );
         assert_eq!(none.error.as_deref(), Some("no final_answer"));
     }
 

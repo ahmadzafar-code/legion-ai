@@ -75,7 +75,11 @@ pub enum AgentEvent {
     /// Agent is about to execute a tool.
     ToolCall { name: String, purpose: String },
     /// Tool returned a result (summary = first ~100 chars, full_content = complete result).
-    ToolResult { name: String, summary: String, full_content: String },
+    ToolResult {
+        name: String,
+        summary: String,
+        full_content: String,
+    },
     /// Agent needs a screenshot from the UI thread.
     ScreenshotRequest { request_id: u64 },
     /// Agent needs the UI to zoom to a time range and return a screenshot.
@@ -91,10 +95,7 @@ pub enum AgentEvent {
         percent: f64,
     },
     /// Agent wants to scroll vertically to a processor and get a screenshot.
-    ScrollToRequest {
-        request_id: u64,
-        entry_slug: String,
-    },
+    ScrollToRequest { request_id: u64, entry_slug: String },
     /// Agent wants to zoom + optionally scroll/filter/expand in one call.
     SetViewRequest {
         request_id: u64,
@@ -318,10 +319,7 @@ impl AgentSession {
             self.findings.clear();
         }
         for line in note.lines() {
-            let cleaned = line
-                .trim()
-                .trim_start_matches(['-', '*', '•', ' '])
-                .trim();
+            let cleaned = line.trim().trim_start_matches(['-', '*', '•', ' ']).trim();
             if cleaned.is_empty() {
                 continue;
             }
@@ -387,11 +385,14 @@ impl AgentSession {
     /// proceeds as the sole driver.
     fn claim_viewport(&self) -> Result<Option<super::bridge::ViewportGuard>, String> {
         match &self.viewport_token {
-            Some(token) => token.try_claim(self.viewport_consumer_id).map(Some).map_err(|_| {
-                "viewport busy: an external driver (Claude Code via the in-viewer MCP \
+            Some(token) => token
+                .try_claim(self.viewport_consumer_id)
+                .map(Some)
+                .map_err(|_| {
+                    "viewport busy: an external driver (Claude Code via the in-viewer MCP \
                  server) is currently controlling the timeline. Retry shortly."
-                    .to_string()
-            }),
+                        .to_string()
+                }),
             None => Ok(None),
         }
     }
@@ -402,10 +403,7 @@ impl AgentSession {
     /// `command_rx` until the UI sends back `ScreenshotData` with matching
     /// `request_id`. Returns the base64-encoded PNG string (prefixed with
     /// `__IMAGE_BASE64__` so the caller can build an image content block).
-    fn request_screenshot(
-        &mut self,
-        zoom_range: Option<(i64, i64)>,
-    ) -> Result<String, String> {
+    fn request_screenshot(&mut self, zoom_range: Option<(i64, i64)>) -> Result<String, String> {
         // Hold the viewport for the whole round-trip (claim -> emit -> await PNG ->
         // release on drop). Single outstanding screenshot across embedded + MCP.
         let _viewport = self.claim_viewport()?;
@@ -492,7 +490,9 @@ impl AgentSession {
                 }
                 use base64::Engine;
                 let encoded = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
-                Some(Ok(format!("__IMAGE_BASE64__{encoded}\n__METADATA__{metadata}")))
+                Some(Ok(format!(
+                    "__IMAGE_BASE64__{encoded}\n__METADATA__{metadata}"
+                )))
             }
             _ => None,
         })
@@ -580,8 +580,7 @@ impl AgentSession {
 
             if response.stop_reason == "end_turn" || turns >= self.max_turns {
                 Span::current().record("n_tool_calls", 0u64);
-                Span::current()
-                    .record("wall_ms", turn_started.elapsed().as_millis() as u64);
+                Span::current().record("wall_ms", turn_started.elapsed().as_millis() as u64);
                 let mut highlights = std::mem::take(&mut self.run_highlights);
                 highlights.extend(parse_highlights_from_text(&response_text));
                 return Ok(AgentResponse {
@@ -602,8 +601,7 @@ impl AgentSession {
             if tool_use_blocks.is_empty() {
                 // No tool calls but stop_reason != "end_turn" — treat as done
                 Span::current().record("n_tool_calls", 0u64);
-                Span::current()
-                    .record("wall_ms", turn_started.elapsed().as_millis() as u64);
+                Span::current().record("wall_ms", turn_started.elapsed().as_millis() as u64);
                 let mut highlights = std::mem::take(&mut self.run_highlights);
                 highlights.extend(parse_highlights_from_text(&response_text));
                 return Ok(AgentResponse {
@@ -771,270 +769,290 @@ impl AgentSession {
         // post-call span recording below.
         let mut inner = || -> Result<String, String> {
             match name {
-            "run_query" => {
-                #[cfg(feature = "duckdb")]
-                {
-                    let sql = input
-                        .get("sql")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| "Missing 'sql' parameter".to_owned())?;
-                    super::tools::execute_run_query(&self.duckdb_path, sql)
-                }
-                #[cfg(not(feature = "duckdb"))]
-                {
-                    let _ = input;
-                    Err("DuckDB support not compiled in. Rebuild with --features duckdb.".into())
-                }
-            }
-
-            "overview" => {
-                let _ = input;
-                #[cfg(feature = "duckdb")]
-                {
-                    super::tools::gather_overview(&self.duckdb_path)
-                }
-                #[cfg(not(feature = "duckdb"))]
-                {
-                    Err("DuckDB support not compiled in. Rebuild with --features duckdb.".into())
-                }
-            }
-
-            "list_files" => {
-                let path = input
-                    .get("path")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(".");
-                super::tools::execute_list_files(&self.code_path, path)
-            }
-
-            "read_code" => {
-                let path = input
-                    .get("path")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| "Missing 'path' parameter".to_owned())?;
-                super::tools::execute_read_code(&self.code_path, path)
-            }
-
-            "wiki_index" => {
-                let section = input.get("section").and_then(|v| v.as_str());
-                super::tools::wiki_index(&self.wiki_path, section)
-            }
-
-            "wiki_read" => {
-                let path = input
-                    .get("path")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| "Missing 'path' parameter".to_owned())?;
-                let section = input.get("section").and_then(|v| v.as_str());
-                let max_chars = input
-                    .get("max_chars")
-                    .and_then(|v| v.as_u64())
-                    .map(|n| n as usize);
-                super::tools::wiki_read(&self.wiki_path, path, section, max_chars)
-            }
-
-            "wiki_search" => {
-                let query = input
-                    .get("query")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| "Missing 'query' parameter".to_owned())?;
-                let section = input.get("section").and_then(|v| v.as_str());
-                let tag = input.get("tag").and_then(|v| v.as_str());
-                let limit = input
-                    .get("limit")
-                    .and_then(|v| v.as_u64())
-                    .map(|n| n as usize)
-                    .unwrap_or(5);
-                super::tools::wiki_search(&self.wiki_path, query, section, tag, limit)
-            }
-
-            "screenshot" => self.request_screenshot(None),
-
-            "zoom_to" => {
-                let start_ns = input
-                    .get("start_ns")
-                    .and_then(|v| v.as_i64())
-                    .ok_or("zoom_to requires start_ns (integer)")?;
-                let stop_ns = input
-                    .get("stop_ns")
-                    .and_then(|v| v.as_i64())
-                    .ok_or("zoom_to requires stop_ns (integer)")?;
-                self.request_screenshot(Some((start_ns, stop_ns)))
-            }
-
-            "pan" => {
-                let direction = input
-                    .get("direction")
-                    .and_then(|v| v.as_str())
-                    .ok_or("pan requires direction (\"left\" or \"right\")")?;
-                if direction != "left" && direction != "right" {
-                    return Err("direction must be \"left\" or \"right\"".into());
-                }
-                let percent = input
-                    .get("percent")
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(25.0)
-                    .clamp(1.0, 200.0);
-                let request_id = self.alloc_request_id();
-                self.request_navigation(request_id, AgentEvent::PanRequest {
-                    request_id,
-                    direction: direction.to_owned(),
-                    percent,
-                })
-            }
-
-            "scroll_to" => {
-                let entry_slug = input
-                    .get("entry_slug")
-                    .and_then(|v| v.as_str())
-                    .ok_or("scroll_to requires entry_slug (string)")?;
-                let request_id = self.alloc_request_id();
-                self.request_navigation(request_id, AgentEvent::ScrollToRequest {
-                    request_id,
-                    entry_slug: entry_slug.to_owned(),
-                })
-            }
-
-            "set_view" => {
-                let start_ns = input
-                    .get("start_ns")
-                    .and_then(|v| v.as_i64())
-                    .ok_or("set_view requires start_ns (integer)")?;
-                let stop_ns = input
-                    .get("stop_ns")
-                    .and_then(|v| v.as_i64())
-                    .ok_or("set_view requires stop_ns (integer)")?;
-                let entry_slug = input
-                    .get("entry_slug")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_owned());
-                let str_array = |key: &str| -> Option<Vec<String>> {
-                    input.get(key).and_then(|v| v.as_array()).map(|arr| {
-                        arr.iter()
-                            .filter_map(|x| x.as_str().map(str::to_owned))
-                            .collect()
-                    })
-                };
-                let vertical_scale = input.get("vertical_scale").and_then(|v| v.as_f64());
-                let request_id = self.alloc_request_id();
-                self.request_navigation(request_id, AgentEvent::SetViewRequest {
-                    request_id,
-                    start_ns,
-                    stop_ns,
-                    entry_slug,
-                    filter_kinds: str_array("filter_kinds"),
-                    expand_kinds: str_array("expand_kinds"),
-                    collapse_kinds: str_array("collapse_kinds"),
-                    vertical_scale,
-                })
-            }
-
-            "search" => {
-                let query = input
-                    .get("query")
-                    .and_then(|v| v.as_str())
-                    .ok_or("search requires query (string)")?
-                    .to_owned();
-                let request_id = self.alloc_request_id();
-                self.request_navigation(request_id, AgentEvent::SearchRequest { request_id, query })
-            }
-
-            "reset_view" => {
-                let request_id = self.alloc_request_id();
-                self.request_navigation(request_id, AgentEvent::ResetViewRequest { request_id })
-            }
-
-            "highlight" => {
-                let entry_slug = input
-                    .get("entry_slug")
-                    .and_then(|v| v.as_str())
-                    .ok_or("highlight requires entry_slug (string)")?;
-                let start_ns = input
-                    .get("start_ns")
-                    .and_then(|v| v.as_i64())
-                    .ok_or("highlight requires start_ns (integer)")?;
-                let stop_ns = input
-                    .get("stop_ns")
-                    .and_then(|v| v.as_i64())
-                    .ok_or("highlight requires stop_ns (integer)")?;
-                let severity = input
-                    .get("severity")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("medium")
-                    .to_owned();
-                let label = input
-                    .get("label")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_owned();
-                // Reject unknown slugs explicitly so an invalid highlight does not
-                // silently no-op at render time while reporting success. Gated by a
-                // cfg ATTRIBUTE (not cfg!()) so the call to the duckdb-only
-                // `slug_exists` is textually absent under the {ai}-only combo.
-                #[cfg(feature = "duckdb")]
-                {
-                    if !self.slug_exists(entry_slug) {
-                        return Err(format!(
-                            "highlight: unknown entry_slug '{entry_slug}'. \
-                             Query `SELECT entry_slug FROM entries` for valid slugs."
-                        ));
+                "run_query" => {
+                    #[cfg(feature = "duckdb")]
+                    {
+                        let sql = input
+                            .get("sql")
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| "Missing 'sql' parameter".to_owned())?;
+                        super::tools::execute_run_query(&self.duckdb_path, sql)
+                    }
+                    #[cfg(not(feature = "duckdb"))]
+                    {
+                        let _ = input;
+                        Err(
+                            "DuckDB support not compiled in. Rebuild with --features duckdb."
+                                .into(),
+                        )
                     }
                 }
-                self.run_highlights.push(Highlight {
-                    entry_slug: entry_slug.to_owned(),
-                    start_ns,
-                    stop_ns,
-                    severity,
-                    label,
-                });
-                Ok(format!("Highlight added on {entry_slug} [{start_ns}, {stop_ns}]."))
-            }
 
-            "ask_user" => {
-                let question = input
-                    .get("question")
-                    .and_then(|v| v.as_str())
-                    .ok_or("ask_user requires question (string)")?;
-                let options = input
-                    .get("options")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|o| o.as_str().map(str::to_owned))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                self.ask_user(question, options)
-            }
-
-            "clear_highlights" => {
-                // Report what actually happened instead of always claiming success.
-                // Clear the run accumulator too, so the count is truthful and the
-                // cleared highlights do not still appear in the final response.
-                let n = self.run_highlights.len();
-                if n == 0 {
-                    Ok("No highlights to clear.".to_owned())
-                } else {
-                    self.emit(AgentEvent::ClearHighlights);
-                    self.run_highlights.clear();
-                    Ok(format!("Cleared {n} highlight(s)."))
+                "overview" => {
+                    let _ = input;
+                    #[cfg(feature = "duckdb")]
+                    {
+                        super::tools::gather_overview(&self.duckdb_path)
+                    }
+                    #[cfg(not(feature = "duckdb"))]
+                    {
+                        Err(
+                            "DuckDB support not compiled in. Rebuild with --features duckdb."
+                                .into(),
+                        )
+                    }
                 }
-            }
 
-            "update_findings" => {
-                let note = input
-                    .get("note")
-                    .and_then(|v| v.as_str())
-                    .ok_or("update_findings requires note (string)")?;
-                let replace = input
-                    .get("replace")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                self.add_finding(note, replace);
-                Ok(format!("Noted. Tracking {} finding(s).", self.findings.len()))
-            }
+                "list_files" => {
+                    let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+                    super::tools::execute_list_files(&self.code_path, path)
+                }
 
-            _ => Err(format!("Unknown tool: {name}")),
+                "read_code" => {
+                    let path = input
+                        .get("path")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| "Missing 'path' parameter".to_owned())?;
+                    super::tools::execute_read_code(&self.code_path, path)
+                }
+
+                "wiki_index" => {
+                    let section = input.get("section").and_then(|v| v.as_str());
+                    super::tools::wiki_index(&self.wiki_path, section)
+                }
+
+                "wiki_read" => {
+                    let path = input
+                        .get("path")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| "Missing 'path' parameter".to_owned())?;
+                    let section = input.get("section").and_then(|v| v.as_str());
+                    let max_chars = input
+                        .get("max_chars")
+                        .and_then(|v| v.as_u64())
+                        .map(|n| n as usize);
+                    super::tools::wiki_read(&self.wiki_path, path, section, max_chars)
+                }
+
+                "wiki_search" => {
+                    let query = input
+                        .get("query")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| "Missing 'query' parameter".to_owned())?;
+                    let section = input.get("section").and_then(|v| v.as_str());
+                    let tag = input.get("tag").and_then(|v| v.as_str());
+                    let limit = input
+                        .get("limit")
+                        .and_then(|v| v.as_u64())
+                        .map(|n| n as usize)
+                        .unwrap_or(5);
+                    super::tools::wiki_search(&self.wiki_path, query, section, tag, limit)
+                }
+
+                "screenshot" => self.request_screenshot(None),
+
+                "zoom_to" => {
+                    let start_ns = input
+                        .get("start_ns")
+                        .and_then(|v| v.as_i64())
+                        .ok_or("zoom_to requires start_ns (integer)")?;
+                    let stop_ns = input
+                        .get("stop_ns")
+                        .and_then(|v| v.as_i64())
+                        .ok_or("zoom_to requires stop_ns (integer)")?;
+                    self.request_screenshot(Some((start_ns, stop_ns)))
+                }
+
+                "pan" => {
+                    let direction = input
+                        .get("direction")
+                        .and_then(|v| v.as_str())
+                        .ok_or("pan requires direction (\"left\" or \"right\")")?;
+                    if direction != "left" && direction != "right" {
+                        return Err("direction must be \"left\" or \"right\"".into());
+                    }
+                    let percent = input
+                        .get("percent")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(25.0)
+                        .clamp(1.0, 200.0);
+                    let request_id = self.alloc_request_id();
+                    self.request_navigation(
+                        request_id,
+                        AgentEvent::PanRequest {
+                            request_id,
+                            direction: direction.to_owned(),
+                            percent,
+                        },
+                    )
+                }
+
+                "scroll_to" => {
+                    let entry_slug = input
+                        .get("entry_slug")
+                        .and_then(|v| v.as_str())
+                        .ok_or("scroll_to requires entry_slug (string)")?;
+                    let request_id = self.alloc_request_id();
+                    self.request_navigation(
+                        request_id,
+                        AgentEvent::ScrollToRequest {
+                            request_id,
+                            entry_slug: entry_slug.to_owned(),
+                        },
+                    )
+                }
+
+                "set_view" => {
+                    let start_ns = input
+                        .get("start_ns")
+                        .and_then(|v| v.as_i64())
+                        .ok_or("set_view requires start_ns (integer)")?;
+                    let stop_ns = input
+                        .get("stop_ns")
+                        .and_then(|v| v.as_i64())
+                        .ok_or("set_view requires stop_ns (integer)")?;
+                    let entry_slug = input
+                        .get("entry_slug")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_owned());
+                    let str_array = |key: &str| -> Option<Vec<String>> {
+                        input.get(key).and_then(|v| v.as_array()).map(|arr| {
+                            arr.iter()
+                                .filter_map(|x| x.as_str().map(str::to_owned))
+                                .collect()
+                        })
+                    };
+                    let vertical_scale = input.get("vertical_scale").and_then(|v| v.as_f64());
+                    let request_id = self.alloc_request_id();
+                    self.request_navigation(
+                        request_id,
+                        AgentEvent::SetViewRequest {
+                            request_id,
+                            start_ns,
+                            stop_ns,
+                            entry_slug,
+                            filter_kinds: str_array("filter_kinds"),
+                            expand_kinds: str_array("expand_kinds"),
+                            collapse_kinds: str_array("collapse_kinds"),
+                            vertical_scale,
+                        },
+                    )
+                }
+
+                "search" => {
+                    let query = input
+                        .get("query")
+                        .and_then(|v| v.as_str())
+                        .ok_or("search requires query (string)")?
+                        .to_owned();
+                    let request_id = self.alloc_request_id();
+                    self.request_navigation(
+                        request_id,
+                        AgentEvent::SearchRequest { request_id, query },
+                    )
+                }
+
+                "reset_view" => {
+                    let request_id = self.alloc_request_id();
+                    self.request_navigation(request_id, AgentEvent::ResetViewRequest { request_id })
+                }
+
+                "highlight" => {
+                    let entry_slug = input
+                        .get("entry_slug")
+                        .and_then(|v| v.as_str())
+                        .ok_or("highlight requires entry_slug (string)")?;
+                    let start_ns = input
+                        .get("start_ns")
+                        .and_then(|v| v.as_i64())
+                        .ok_or("highlight requires start_ns (integer)")?;
+                    let stop_ns = input
+                        .get("stop_ns")
+                        .and_then(|v| v.as_i64())
+                        .ok_or("highlight requires stop_ns (integer)")?;
+                    let severity = input
+                        .get("severity")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("medium")
+                        .to_owned();
+                    let label = input
+                        .get("label")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned();
+                    // Reject unknown slugs explicitly so an invalid highlight does not
+                    // silently no-op at render time while reporting success. Gated by a
+                    // cfg ATTRIBUTE (not cfg!()) so the call to the duckdb-only
+                    // `slug_exists` is textually absent under the {ai}-only combo.
+                    #[cfg(feature = "duckdb")]
+                    {
+                        if !self.slug_exists(entry_slug) {
+                            return Err(format!(
+                                "highlight: unknown entry_slug '{entry_slug}'. \
+                             Query `SELECT entry_slug FROM entries` for valid slugs."
+                            ));
+                        }
+                    }
+                    self.run_highlights.push(Highlight {
+                        entry_slug: entry_slug.to_owned(),
+                        start_ns,
+                        stop_ns,
+                        severity,
+                        label,
+                    });
+                    Ok(format!(
+                        "Highlight added on {entry_slug} [{start_ns}, {stop_ns}]."
+                    ))
+                }
+
+                "ask_user" => {
+                    let question = input
+                        .get("question")
+                        .and_then(|v| v.as_str())
+                        .ok_or("ask_user requires question (string)")?;
+                    let options = input
+                        .get("options")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|o| o.as_str().map(str::to_owned))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    self.ask_user(question, options)
+                }
+
+                "clear_highlights" => {
+                    // Report what actually happened instead of always claiming success.
+                    // Clear the run accumulator too, so the count is truthful and the
+                    // cleared highlights do not still appear in the final response.
+                    let n = self.run_highlights.len();
+                    if n == 0 {
+                        Ok("No highlights to clear.".to_owned())
+                    } else {
+                        self.emit(AgentEvent::ClearHighlights);
+                        self.run_highlights.clear();
+                        Ok(format!("Cleared {n} highlight(s)."))
+                    }
+                }
+
+                "update_findings" => {
+                    let note = input
+                        .get("note")
+                        .and_then(|v| v.as_str())
+                        .ok_or("update_findings requires note (string)")?;
+                    let replace = input
+                        .get("replace")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    self.add_finding(note, replace);
+                    Ok(format!(
+                        "Noted. Tracking {} finding(s).",
+                        self.findings.len()
+                    ))
+                }
+
+                _ => Err(format!("Unknown tool: {name}")),
             }
         };
         let result = inner();
@@ -1084,7 +1102,11 @@ impl AgentSession {
         let api_started = std::time::Instant::now();
 
         // Opus benefits from a larger token budget for its thinking + response.
-        let max_tokens: u32 = if use_opus { MAX_TOKENS_OPUS } else { MAX_TOKENS_SONNET };
+        let max_tokens: u32 = if use_opus {
+            MAX_TOKENS_OPUS
+        } else {
+            MAX_TOKENS_SONNET
+        };
 
         // --- Prompt caching ---
         // Wrap system prompt in the array format with cache_control so Anthropic
@@ -1152,15 +1174,13 @@ impl AgentSession {
             match result {
                 Ok(resp) => {
                     let status = resp.status();
-                    let text = resp
-                        .into_string()
-                        .map_err(|e| {
-                            finalize_err(
-                                format!("Failed to read response body: {e}"),
-                                Some(status),
-                                retries_count,
-                            )
-                        })?;
+                    let text = resp.into_string().map_err(|e| {
+                        finalize_err(
+                            format!("Failed to read response body: {e}"),
+                            Some(status),
+                            retries_count,
+                        )
+                    })?;
                     let span = Span::current();
                     span.record("latency_ms", api_started.elapsed().as_millis() as u64);
                     span.record("retries", retries_count as u64);
@@ -1677,13 +1697,28 @@ Found issues.
             "directive wording missing"
         );
         // No leftover placeholder, and the wiki pointer is unaffected.
-        assert!(!with_code.contains("{{CODE_POINTER}}"), "placeholder not substituted");
-        assert!(with_code.contains("wiki_index"), "wiki pointer should remain");
+        assert!(
+            !with_code.contains("{{CODE_POINTER}}"),
+            "placeholder not substituted"
+        );
+        assert!(
+            with_code.contains("wiki_index"),
+            "wiki pointer should remain"
+        );
 
         let no_code = build_system_prompt(false);
-        assert!(!no_code.contains("read_code"), "no code pointer without a code root");
-        assert!(!no_code.contains("{{CODE_POINTER}}"), "placeholder not substituted");
-        assert!(no_code.contains("wiki_index"), "wiki pointer should remain without code");
+        assert!(
+            !no_code.contains("read_code"),
+            "no code pointer without a code root"
+        );
+        assert!(
+            !no_code.contains("{{CODE_POINTER}}"),
+            "placeholder not substituted"
+        );
+        assert!(
+            no_code.contains("wiki_index"),
+            "wiki pointer should remain without code"
+        );
     }
 
     /// Unknown-slug rejection: the `highlight` handler must reject an unknown
@@ -1713,7 +1748,10 @@ Found issues.
         );
 
         // slug_exists membership (entries has >50 rows; "all" is a real slug).
-        assert!(s.slug_exists("all"), "expected 'all' to be a valid entry_slug");
+        assert!(
+            s.slug_exists("all"),
+            "expected 'all' to be a valid entry_slug"
+        );
         assert!(!s.slug_exists("nonexistent/proc_999"));
 
         // The handler accepts a real slug ...

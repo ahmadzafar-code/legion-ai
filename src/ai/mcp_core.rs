@@ -16,7 +16,7 @@ use super::tools::{
     execute_list_files, execute_read_code, execute_run_query_raw, find_blockers_sql,
     gather_overview, tool_definitions,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Protocol version the stdio server speaks (the in-viewer HTTP server overrides
 /// this to "2025-03-26" — the streamable-HTTP version Claude Code negotiates).
@@ -344,7 +344,10 @@ fn tools_call_result(params: &Value, ctx: &ServerCtx) -> Value {
     if name == "get_selection" {
         return match &ctx.ui_bridge {
             Some(bridge) => get_selection_result(bridge),
-            None => text_result("get_selection is unavailable: this server has no UI bridge.", true),
+            None => text_result(
+                "get_selection is unavailable: this server has no UI bridge.",
+                true,
+            ),
         };
     }
 
@@ -358,10 +361,14 @@ fn tools_call_result(params: &Value, ctx: &ServerCtx) -> Value {
         }
         "find_blockers" => match args.get("start_uid").and_then(Value::as_u64) {
             // Typed u64 -> find_blockers_sql formats only this integer; no model SQL.
-            Some(uid) => {
-                into_tool_result(execute_run_query_raw(&ctx.duckdb_path, &find_blockers_sql(uid)))
-            }
-            None => ("find_blockers requires start_uid (integer).".to_owned(), true),
+            Some(uid) => into_tool_result(execute_run_query_raw(
+                &ctx.duckdb_path,
+                &find_blockers_sql(uid),
+            )),
+            None => (
+                "find_blockers requires start_uid (integer).".to_owned(),
+                true,
+            ),
         },
         "overview" => {
             // Reinforce the source-read habit with ONE concise line (no multi-line
@@ -478,7 +485,9 @@ fn visual_tool_result(
     let i64_arg = |k: &str| args.get(k).and_then(Value::as_i64);
     let str_array = |k: &str| -> Option<Vec<String>> {
         args.get(k).and_then(|v| v.as_array()).map(|a| {
-            a.iter().filter_map(|x| x.as_str().map(str::to_owned)).collect()
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_owned))
+                .collect()
         })
     };
 
@@ -491,7 +500,11 @@ fn visual_tool_result(
             let (Some(start_ns), Some(stop_ns)) = (i64_arg("start_ns"), i64_arg("stop_ns")) else {
                 return text_result("zoom_to requires start_ns and stop_ns (integers).", true);
             };
-            Box::new(move |rid| AgentEvent::ZoomRequest { request_id: rid, start_ns, stop_ns })
+            Box::new(move |rid| AgentEvent::ZoomRequest {
+                request_id: rid,
+                start_ns,
+                stop_ns,
+            })
         }
 
         "pan" => {
@@ -501,9 +514,17 @@ fn visual_tool_result(
             if direction != "left" && direction != "right" {
                 return text_result("pan direction must be \"left\" or \"right\".", true);
             }
-            let percent = args.get("percent").and_then(Value::as_f64).unwrap_or(25.0).clamp(1.0, 200.0);
+            let percent = args
+                .get("percent")
+                .and_then(Value::as_f64)
+                .unwrap_or(25.0)
+                .clamp(1.0, 200.0);
             let direction = direction.to_owned();
-            Box::new(move |rid| AgentEvent::PanRequest { request_id: rid, direction, percent })
+            Box::new(move |rid| AgentEvent::PanRequest {
+                request_id: rid,
+                direction,
+                percent,
+            })
         }
 
         "scroll_to" => {
@@ -511,14 +532,20 @@ fn visual_tool_result(
                 return text_result("scroll_to requires entry_slug (string).", true);
             };
             let entry_slug = slug.to_owned();
-            Box::new(move |rid| AgentEvent::ScrollToRequest { request_id: rid, entry_slug })
+            Box::new(move |rid| AgentEvent::ScrollToRequest {
+                request_id: rid,
+                entry_slug,
+            })
         }
 
         "set_view" => {
             let (Some(start_ns), Some(stop_ns)) = (i64_arg("start_ns"), i64_arg("stop_ns")) else {
                 return text_result("set_view requires start_ns and stop_ns (integers).", true);
             };
-            let entry_slug = args.get("entry_slug").and_then(Value::as_str).map(str::to_owned);
+            let entry_slug = args
+                .get("entry_slug")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
             let filter_kinds = str_array("filter_kinds");
             let expand_kinds = str_array("expand_kinds");
             let collapse_kinds = str_array("collapse_kinds");
@@ -540,7 +567,10 @@ fn visual_tool_result(
                 return text_result("search requires query (string).", true);
             };
             let query = query.to_owned();
-            Box::new(move |rid| AgentEvent::SearchRequest { request_id: rid, query })
+            Box::new(move |rid| AgentEvent::SearchRequest {
+                request_id: rid,
+                query,
+            })
         }
 
         "reset_view" => Box::new(|rid| AgentEvent::ResetViewRequest { request_id: rid }),
@@ -564,8 +594,16 @@ fn visual_tool_result(
                     true,
                 );
             }
-            let severity = args.get("severity").and_then(Value::as_str).unwrap_or("medium").to_owned();
-            let label = args.get("label").and_then(Value::as_str).unwrap_or("").to_owned();
+            let severity = args
+                .get("severity")
+                .and_then(Value::as_str)
+                .unwrap_or("medium")
+                .to_owned();
+            let label = args
+                .get("label")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
             let entry_slug = slug.to_owned();
             Box::new(move |rid| AgentEvent::HighlightRequest {
                 request_id: rid,
@@ -577,7 +615,9 @@ fn visual_tool_result(
             })
         }
 
-        "clear_highlights" => Box::new(|rid| AgentEvent::ClearHighlightsRequest { request_id: rid }),
+        "clear_highlights" => {
+            Box::new(|rid| AgentEvent::ClearHighlightsRequest { request_id: rid })
+        }
 
         other => return text_result(&format!("unknown visual tool: {other}"), true),
     };
@@ -596,9 +636,11 @@ fn visual_tool_result(
     );
 
     match reply {
-        Ok(UiCommand::ScreenshotData { png_bytes, metadata, .. }) => {
-            screenshot_result(&png_bytes, &metadata)
-        }
+        Ok(UiCommand::ScreenshotData {
+            png_bytes,
+            metadata,
+            ..
+        }) => screenshot_result(&png_bytes, &metadata),
         Ok(UiCommand::Ack { message, .. }) => text_result(&message, false),
         Ok(other) => text_result(&format!("unexpected viewport reply: {other:?}"), true),
         // "viewport busy" / timeout / disconnect -> model-readable tool error.
@@ -684,7 +726,9 @@ fn screenshot_result(png_bytes: &[u8], metadata: &str) -> Value {
     }
     use base64::Engine;
     let encoded = base64::engine::general_purpose::STANDARD.encode(png_bytes);
-    let bare = encoded.strip_prefix("data:image/png;base64,").unwrap_or(&encoded);
+    let bare = encoded
+        .strip_prefix("data:image/png;base64,")
+        .unwrap_or(&encoded);
     json!({
         "content": [
             { "type": "image", "data": bare, "mimeType": "image/png" },
@@ -779,14 +823,28 @@ mod tests {
         let ctx = ServerCtx::new("db".to_owned(), Some("/app/src".to_owned()))
             .with_wiki_root(Some("/wiki".to_owned()));
         let resp = handle_request(&req("initialize", json!({})), &ctx).unwrap();
-        let instr = resp["result"]["instructions"].as_str().expect("instructions present");
+        let instr = resp["result"]["instructions"]
+            .as_str()
+            .expect("instructions present");
         assert!(!instr.is_empty(), "instructions must be non-empty");
         // Always-framing.
-        assert!(instr.contains("Legion Profiler Co-Pilot"), "missing framing");
-        assert!(instr.contains("run_query"), "missing the verify-with-run_query rule");
+        assert!(
+            instr.contains("Legion Profiler Co-Pilot"),
+            "missing framing"
+        );
+        assert!(
+            instr.contains("run_query"),
+            "missing the verify-with-run_query rule"
+        );
         // Both conditional clauses present, with the code_root path interpolated.
-        assert!(instr.contains("/app/src"), "code_root path not interpolated");
-        assert!(instr.contains("Application source root"), "missing source clause");
+        assert!(
+            instr.contains("/app/src"),
+            "code_root path not interpolated"
+        );
+        assert!(
+            instr.contains("Application source root"),
+            "missing source clause"
+        );
         assert!(instr.contains("wiki_index"), "missing wiki clause");
     }
 
@@ -794,11 +852,25 @@ mod tests {
     fn test_initialize_instructions_no_roots() {
         // dummy_ctx() has code_root=None, wiki_root=None.
         let resp = handle_request(&req("initialize", json!({})), &dummy_ctx()).unwrap();
-        let instr = resp["result"]["instructions"].as_str().expect("instructions present");
-        assert!(instr.contains("Legion Profiler Co-Pilot"), "framing must still be present");
-        assert!(!instr.contains("Application source root"), "no source clause without code_root");
-        assert!(!instr.contains("wiki_index"), "no wiki clause without wiki_root");
-        assert!(!instr.contains("curated Legion wiki"), "no wiki clause without wiki_root");
+        let instr = resp["result"]["instructions"]
+            .as_str()
+            .expect("instructions present");
+        assert!(
+            instr.contains("Legion Profiler Co-Pilot"),
+            "framing must still be present"
+        );
+        assert!(
+            !instr.contains("Application source root"),
+            "no source clause without code_root"
+        );
+        assert!(
+            !instr.contains("wiki_index"),
+            "no wiki clause without wiki_root"
+        );
+        assert!(
+            !instr.contains("curated Legion wiki"),
+            "no wiki clause without wiki_root"
+        );
         // MiniAero guardrail (verify-verdict-vs-data): sizing claims must be
         // reconciled against the overview's Data-Size Evidence.
         assert!(
@@ -810,14 +882,18 @@ mod tests {
     #[test]
     fn test_initialize_instructions_single_root() {
         // Only wiki configured.
-        let wiki_only = ServerCtx::new("db".to_owned(), None).with_wiki_root(Some("/wiki".to_owned()));
+        let wiki_only =
+            ServerCtx::new("db".to_owned(), None).with_wiki_root(Some("/wiki".to_owned()));
         let i = handle_request(&req("initialize", json!({})), &wiki_only).unwrap()["result"]
             ["instructions"]
             .as_str()
             .unwrap()
             .to_owned();
         assert!(i.contains("wiki_index"), "wiki clause expected");
-        assert!(!i.contains("Application source root"), "no source clause without code_root");
+        assert!(
+            !i.contains("Application source root"),
+            "no source clause without code_root"
+        );
 
         // Only code configured (vice-versa).
         let code_only = ServerCtx::new("db".to_owned(), Some("/only/code".to_owned()));
@@ -827,7 +903,10 @@ mod tests {
             .unwrap()
             .to_owned();
         assert!(j.contains("/only/code"), "source clause with path expected");
-        assert!(!j.contains("wiki_index"), "no wiki clause without wiki_root");
+        assert!(
+            !j.contains("wiki_index"),
+            "no wiki clause without wiki_root"
+        );
     }
 
     /// The MCP `overview` handler appends a one-line source-root reminder iff a
@@ -849,7 +928,10 @@ mod tests {
         let no_code = ServerCtx::new(path, None);
         let (text2, is_error2) = call(&no_code, "overview", json!({}));
         assert!(!is_error2, "overview should succeed: {text2:.80}");
-        assert!(!text2.contains("Source root:"), "source-root line must be absent without a code root");
+        assert!(
+            !text2.contains("Source root:"),
+            "source-root line must be absent without a code root"
+        );
     }
 
     #[test]
@@ -863,7 +945,10 @@ mod tests {
     fn test_unknown_method_is_protocol_error() {
         let resp = handle_request(&req("does/not/exist", json!({})), &dummy_ctx()).unwrap();
         assert_eq!(resp["error"]["code"], -32601);
-        assert!(resp.get("result").is_none(), "must be an error, not a result");
+        assert!(
+            resp.get("result").is_none(),
+            "must be an error, not a result"
+        );
     }
 
     #[test]
@@ -880,15 +965,35 @@ mod tests {
         assert!(!names.contains(&"read_code"));
         // GUI/view tools are NEVER advertised.
         for forbidden in [
-            "screenshot", "zoom_to", "pan", "scroll_to", "set_view", "search", "reset_view",
-            "highlight", "clear_highlights", "ask_user", "update_findings",
+            "screenshot",
+            "zoom_to",
+            "pan",
+            "scroll_to",
+            "set_view",
+            "search",
+            "reset_view",
+            "highlight",
+            "clear_highlights",
+            "ask_user",
+            "update_findings",
         ] {
-            assert!(!names.contains(&forbidden), "must not advertise {forbidden}");
+            assert!(
+                !names.contains(&forbidden),
+                "must not advertise {forbidden}"
+            );
         }
         // MCP requires camelCase inputSchema; the Anthropic snake_case must not leak.
         for t in tools {
-            assert!(t.get("inputSchema").is_some(), "tool {} missing inputSchema", t["name"]);
-            assert!(t.get("input_schema").is_none(), "tool {} leaked input_schema", t["name"]);
+            assert!(
+                t.get("inputSchema").is_some(),
+                "tool {} missing inputSchema",
+                t["name"]
+            );
+            assert!(
+                t.get("input_schema").is_none(),
+                "tool {} leaked input_schema",
+                t["name"]
+            );
         }
     }
 
@@ -913,27 +1018,38 @@ mod tests {
         let before = handle_request(&req("tools/list", json!({})), &ctx).unwrap();
         assert!(!names(&before).contains(&"read_code".to_owned()));
         let init_before = handle_request(&req("initialize", json!({})), &ctx).unwrap();
-        assert!(!init_before["result"]["instructions"]
-            .as_str()
-            .unwrap()
-            .contains("Application source root"));
+        assert!(
+            !init_before["result"]["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("Application source root")
+        );
 
         // The user sets a project folder in the panel (same shared handle).
         *ctx.code_root.write().unwrap() = Some("/app/src".to_owned());
 
         let after = handle_request(&req("tools/list", json!({})), &ctx).unwrap();
         let after_names = names(&after);
-        assert!(after_names.contains(&"read_code".to_owned()), "read_code must appear live");
+        assert!(
+            after_names.contains(&"read_code".to_owned()),
+            "read_code must appear live"
+        );
         assert!(after_names.contains(&"list_files".to_owned()));
         let init_after = handle_request(&req("initialize", json!({})), &ctx).unwrap();
-        assert!(init_after["result"]["instructions"]
-            .as_str()
-            .unwrap()
-            .contains("Application source root: `/app/src`"));
+        assert!(
+            init_after["result"]["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("Application source root: `/app/src`")
+        );
 
         // Clearing it retracts the tools again (and empty normalizes to None).
         *ctx.code_root.write().unwrap() = Some("   ".to_owned());
-        assert_eq!(ctx.code_root(), None, "whitespace-only root must read as None");
+        assert_eq!(
+            ctx.code_root(),
+            None,
+            "whitespace-only root must read as None"
+        );
         let cleared = handle_request(&req("tools/list", json!({})), &ctx).unwrap();
         assert!(!names(&cleared).contains(&"read_code".to_owned()));
     }
@@ -955,15 +1071,18 @@ mod tests {
     #[test]
     fn test_tools_list_wiki_gated_on_wiki_root() {
         // WITHOUT a wiki root: the wiki tools are not advertised.
-        let names_no_wiki: Vec<String> = handle_request(&req("tools/list", json!({})), &dummy_ctx())
-            .unwrap()["result"]["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|t| t["name"].as_str().unwrap().to_owned())
-            .collect();
+        let names_no_wiki: Vec<String> =
+            handle_request(&req("tools/list", json!({})), &dummy_ctx()).unwrap()["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_owned())
+                .collect();
         for w in ["wiki_index", "wiki_read", "wiki_search"] {
-            assert!(!names_no_wiki.contains(&w.to_owned()), "wiki tool {w} leaked without a wiki root");
+            assert!(
+                !names_no_wiki.contains(&w.to_owned()),
+                "wiki tool {w} leaked without a wiki root"
+            );
         }
 
         // WITH a wiki root: all three appear, with camelCase inputSchema (no leak).
@@ -974,14 +1093,25 @@ mod tests {
             .clone();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         for w in ["wiki_index", "wiki_read", "wiki_search"] {
-            assert!(names.contains(&w), "tools/list missing {w} with a wiki root");
+            assert!(
+                names.contains(&w),
+                "tools/list missing {w} with a wiki root"
+            );
         }
         for t in tools.iter().filter(|t| {
             let n = t["name"].as_str().unwrap();
             n == "wiki_index" || n == "wiki_read" || n == "wiki_search"
         }) {
-            assert!(t.get("inputSchema").is_some(), "{} missing inputSchema", t["name"]);
-            assert!(t.get("input_schema").is_none(), "{} leaked input_schema", t["name"]);
+            assert!(
+                t.get("inputSchema").is_some(),
+                "{} missing inputSchema",
+                t["name"]
+            );
+            assert!(
+                t.get("input_schema").is_none(),
+                "{} leaked input_schema",
+                t["name"]
+            );
         }
     }
 
@@ -996,12 +1126,21 @@ mod tests {
             .with_wiki_root(Some(p.to_string_lossy().into_owned()));
         let (text, is_error) = call(&ctx, "wiki_index", json!({ "section": "pitfalls" }));
         assert!(!is_error, "wiki_index should succeed: {text}");
-        assert!(text.contains("## pitfalls ("), "wiki_index output unexpected: {text:.80}");
+        assert!(
+            text.contains("## pitfalls ("),
+            "wiki_index output unexpected: {text:.80}"
+        );
 
         // Routed without a wiki root => a clear isError result, not a protocol error.
         let (text2, is_error2) = call(&dummy_ctx(), "wiki_index", json!({}));
-        assert!(is_error2, "wiki_index without a wiki root must be an error result");
-        assert!(text2.contains("without a wiki root"), "unexpected msg: {text2}");
+        assert!(
+            is_error2,
+            "wiki_index without a wiki root must be an error result"
+        );
+        assert!(
+            text2.contains("without a wiki root"),
+            "unexpected msg: {text2}"
+        );
     }
 
     #[test]
@@ -1011,7 +1150,11 @@ mod tests {
             return;
         };
         let ctx = ServerCtx::new(path, None);
-        let (text, is_error) = call(&ctx, "run_query", json!({ "sql": "SELECT COUNT(*) AS n FROM items" }));
+        let (text, is_error) = call(
+            &ctx,
+            "run_query",
+            json!({ "sql": "SELECT COUNT(*) AS n FROM items" }),
+        );
         assert!(!is_error, "benign query should succeed: {text}");
         assert!(text.starts_with('['), "expected a JSON array, got {text}");
         assert!(text.contains("\"n\""), "expected the `n` alias, got {text}");
@@ -1025,10 +1168,16 @@ mod tests {
         };
         let ctx = ServerCtx::new(path, None);
         // The exfil gate must hold end-to-end through the MCP route.
-        let (text, is_error) =
-            call(&ctx, "run_query", json!({ "sql": "SELECT content FROM read_text('/etc/hosts')" }));
+        let (text, is_error) = call(
+            &ctx,
+            "run_query",
+            json!({ "sql": "SELECT content FROM read_text('/etc/hosts')" }),
+        );
         assert!(is_error, "external file read must be an error");
-        assert!(!text.contains("localhost"), "must NOT leak /etc/hosts contents: {text}");
+        assert!(
+            !text.contains("localhost"),
+            "must NOT leak /etc/hosts contents: {text}"
+        );
     }
 
     #[test]
@@ -1044,8 +1193,13 @@ mod tests {
         let ctx = ServerCtx::new(path, None);
         let (text, is_error) = call(&ctx, "find_blockers", json!({ "start_uid": 48 }));
         assert!(!is_error, "find_blockers should succeed: {text}");
-        let rows: Vec<Value> = serde_json::from_str(&text).expect("find_blockers returns a JSON array");
-        assert_eq!(rows.len(), 7, "find_blockers(48) should route to the 7-row chain");
+        let rows: Vec<Value> =
+            serde_json::from_str(&text).expect("find_blockers returns a JSON array");
+        assert_eq!(
+            rows.len(),
+            7,
+            "find_blockers(48) should route to the 7-row chain"
+        );
     }
 
     #[test]
@@ -1053,7 +1207,11 @@ mod tests {
         let ctx = dummy_ctx();
 
         // Valid: echoes the normalized {answer_type, value}.
-        let (text, is_error) = call(&ctx, "final_answer", json!({ "answer_type": "uid", "value": 221 }));
+        let (text, is_error) = call(
+            &ctx,
+            "final_answer",
+            json!({ "answer_type": "uid", "value": 221 }),
+        );
         assert!(!is_error);
         assert!(
             text.contains("\"answer_type\":\"uid\"") && text.contains("221"),
@@ -1065,13 +1223,17 @@ mod tests {
         assert!(is_error, "missing value must be rejected");
 
         // answer_type not in the enum -> error.
-        let (_t, is_error) = call(&ctx, "final_answer", json!({ "answer_type": "bogus", "value": 1 }));
+        let (_t, is_error) = call(
+            &ctx,
+            "final_answer",
+            json!({ "answer_type": "bogus", "value": 1 }),
+        );
         assert!(is_error, "bogus answer_type must be rejected");
     }
 
     // ── Visual tools (stub UiBridge — no live window) ────────────────────────
     use crate::ai::agent::{AgentEvent, SelectedItemInfo, UiCommand};
-    use crate::ai::bridge::{UiBridge, ViewportGuard, ViewportToken, MCP_CONSUMER_ID};
+    use crate::ai::bridge::{MCP_CONSUMER_ID, UiBridge, ViewportGuard, ViewportToken};
     use std::sync::mpsc::channel;
 
     /// The request_id any of the visual / read events carries (test helper).
@@ -1115,7 +1277,10 @@ mod tests {
             let _ = cmd_tx.send(reply(&ev));
             ev
         });
-        (ServerCtx::new(duckdb_path, None).with_ui_bridge(bridge), handle)
+        (
+            ServerCtx::new(duckdb_path, None).with_ui_bridge(bridge),
+            handle,
+        )
     }
 
     #[test]
@@ -1123,29 +1288,54 @@ mod tests {
         // WITHOUT a bridge: the 9 visual tools are NOT advertised (regression — the
         // stdio path is unchanged).
         let resp = handle_request(&req("tools/list", json!({})), &dummy_ctx()).unwrap();
-        let none: Vec<&str> =
-            resp["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        let none: Vec<&str> = resp["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
         for v in VISUAL_TOOLS {
-            assert!(!none.contains(v), "no-bridge tools/list must NOT advertise {v}");
+            assert!(
+                !none.contains(v),
+                "no-bridge tools/list must NOT advertise {v}"
+            );
         }
 
         // WITH a bridge: all 9 visual tools advertised, alongside the data tools.
-        let resp = handle_request(&req("tools/list", json!({})), &ctx_with_dangling_bridge("unused")).unwrap();
+        let resp = handle_request(
+            &req("tools/list", json!({})),
+            &ctx_with_dangling_bridge("unused"),
+        )
+        .unwrap();
         let tools = resp["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         for v in VISUAL_TOOLS {
-            assert!(names.contains(v), "bridge tools/list must advertise visual tool {v}");
+            assert!(
+                names.contains(v),
+                "bridge tools/list must advertise visual tool {v}"
+            );
         }
         for want in ["run_query", "overview", "final_answer"] {
             assert!(names.contains(&want), "data tool {want} still present");
         }
         // ask_user / update_findings are NEVER exposed over MCP.
         assert!(!names.contains(&"ask_user"), "ask_user must not be exposed");
-        assert!(!names.contains(&"update_findings"), "update_findings must not be exposed");
+        assert!(
+            !names.contains(&"update_findings"),
+            "update_findings must not be exposed"
+        );
         // camelCase inputSchema, no snake_case leak (incl. the visual tools).
         for t in tools {
-            assert!(t.get("inputSchema").is_some(), "tool {} missing inputSchema", t["name"]);
-            assert!(t.get("input_schema").is_none(), "tool {} leaked input_schema", t["name"]);
+            assert!(
+                t.get("inputSchema").is_some(),
+                "tool {} missing inputSchema",
+                t["name"]
+            );
+            assert!(
+                t.get("input_schema").is_none(),
+                "tool {} leaked input_schema",
+                t["name"]
+            );
         }
     }
 
@@ -1162,14 +1352,23 @@ mod tests {
         let (ctx, handle) = ctx_with_stub_ui(path, |ev| {
             let rid = event_request_id(ev);
             match ev {
-                AgentEvent::HighlightRequest { entry_slug, start_ns, stop_ns, severity, .. } => {
+                AgentEvent::HighlightRequest {
+                    entry_slug,
+                    start_ns,
+                    stop_ns,
+                    severity,
+                    ..
+                } => {
                     assert_eq!(entry_slug, "n0_cpu_c1");
                     assert_eq!((*start_ns, *stop_ns), (100, 200));
                     assert_eq!(severity, "high");
                 }
                 other => panic!("expected HighlightRequest, got {other:?}"),
             }
-            UiCommand::Ack { request_id: rid, message: "Highlight added on n0_cpu_c1.".into() }
+            UiCommand::Ack {
+                request_id: rid,
+                message: "Highlight added on n0_cpu_c1.".into(),
+            }
         });
 
         let (text, is_error) = call(
@@ -1196,8 +1395,14 @@ mod tests {
             "highlight",
             json!({ "entry_slug": "n0_not_a_real_slug", "start_ns": 1, "stop_ns": 2 }),
         );
-        assert!(is_error, "unknown slug must be a tool error, not a silent no-op");
-        assert!(text.contains("unknown entry_slug"), "actionable message: {text}");
+        assert!(
+            is_error,
+            "unknown slug must be a tool error, not a silent no-op"
+        );
+        assert!(
+            text.contains("unknown entry_slug"),
+            "actionable message: {text}"
+        );
     }
 
     #[test]
@@ -1205,7 +1410,10 @@ mod tests {
         let png = vec![0x89, 0x50, 0x4E, 0x47]; // \x89PNG magic
         let png_for_thread = png.clone();
         let (ctx, handle) = ctx_with_stub_ui("unused".into(), move |ev| {
-            assert!(matches!(ev, AgentEvent::ScreenshotRequest { .. }), "expected ScreenshotRequest");
+            assert!(
+                matches!(ev, AgentEvent::ScreenshotRequest { .. }),
+                "expected ScreenshotRequest"
+            );
             UiCommand::ScreenshotData {
                 request_id: event_request_id(ev),
                 png_bytes: png_for_thread.clone(),
@@ -1214,7 +1422,10 @@ mod tests {
         });
 
         let resp = handle_request(
-            &req("tools/call", json!({ "name": "screenshot", "arguments": {} })),
+            &req(
+                "tools/call",
+                json!({ "name": "screenshot", "arguments": {} }),
+            ),
             &ctx,
         )
         .unwrap();
@@ -1226,8 +1437,14 @@ mod tests {
         assert_eq!(content[0]["mimeType"], "image/png");
         use base64::Engine;
         let want_b64 = base64::engine::general_purpose::STANDARD.encode(&png);
-        assert_eq!(content[0]["data"], want_b64, "image data is bare base64 of the PNG");
-        assert!(!content[0]["data"].as_str().unwrap().starts_with("data:"), "no data-URI prefix");
+        assert_eq!(
+            content[0]["data"], want_b64,
+            "image data is bare base64 of the PNG"
+        );
+        assert!(
+            !content[0]["data"].as_str().unwrap().starts_with("data:"),
+            "no data-URI prefix"
+        );
         // Metadata rides along as a text block for follow-up queries.
         assert_eq!(content[1]["type"], "text");
         assert!(content[1]["text"].as_str().unwrap().contains("range="));
@@ -1248,7 +1465,10 @@ mod tests {
 
         let (text, is_error) = call(&ctx, "screenshot", json!({}));
         assert!(is_error, "viewport busy must be a tool error");
-        assert!(text.contains("viewport busy"), "busy message is model-readable: {text}");
+        assert!(
+            text.contains("viewport busy"),
+            "busy message is model-readable: {text}"
+        );
     }
 
     #[test]
@@ -1273,7 +1493,10 @@ mod tests {
         let ctx = ctx_with_dangling_bridge("unused");
         let (text, is_error) = call(&ctx, "zoom_to", json!({ "start_ns": 5 }));
         assert!(is_error, "missing stop_ns must be a tool error");
-        assert!(text.contains("zoom_to requires"), "actionable message: {text}");
+        assert!(
+            text.contains("zoom_to requires"),
+            "actionable message: {text}"
+        );
     }
 
     // ── get_selection (READ) ─────────────────────────────────────────────────
@@ -1281,7 +1504,10 @@ mod tests {
     fn test_get_selection_formats_json() {
         // Stub UI asserts the event is GetSelection, replies with a seeded selection.
         let (ctx, handle) = ctx_with_stub_ui("unused".into(), |ev| {
-            assert!(matches!(ev, AgentEvent::GetSelection { .. }), "expected GetSelection");
+            assert!(
+                matches!(ev, AgentEvent::GetSelection { .. }),
+                "expected GetSelection"
+            );
             UiCommand::SelectionData {
                 request_id: event_request_id(ev),
                 items: vec![SelectedItemInfo {
@@ -1316,7 +1542,10 @@ mod tests {
         });
         let (text, is_error) = call(&ctx, "get_selection", json!({}));
         assert!(!is_error, "nothing-selected is not an error");
-        assert!(text.contains("Nothing is selected"), "explicit empty note: {text}");
+        assert!(
+            text.contains("Nothing is selected"),
+            "explicit empty note: {text}"
+        );
         handle.join().unwrap();
     }
 
@@ -1324,12 +1553,23 @@ mod tests {
     fn test_tools_list_get_selection_gating() {
         // WITHOUT a bridge (stdio path): get_selection is NOT advertised.
         let resp = handle_request(&req("tools/list", json!({})), &dummy_ctx()).unwrap();
-        let names: Vec<&str> =
-            resp["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert!(!names.contains(&"get_selection"), "no-bridge tools/list must NOT advertise get_selection");
+        let names: Vec<&str> = resp["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert!(
+            !names.contains(&"get_selection"),
+            "no-bridge tools/list must NOT advertise get_selection"
+        );
 
         // WITH a bridge: advertised, camelCase inputSchema, no args.
-        let resp = handle_request(&req("tools/list", json!({})), &ctx_with_dangling_bridge("unused")).unwrap();
+        let resp = handle_request(
+            &req("tools/list", json!({})),
+            &ctx_with_dangling_bridge("unused"),
+        )
+        .unwrap();
         let tools = resp["result"]["tools"].as_array().unwrap();
         let gs = tools
             .iter()
@@ -1338,7 +1578,10 @@ mod tests {
         assert!(gs.get("inputSchema").is_some(), "camelCase inputSchema");
         assert!(gs.get("input_schema").is_none(), "no snake_case leak");
         assert!(
-            gs["inputSchema"]["properties"].as_object().map(|o| o.is_empty()).unwrap_or(false),
+            gs["inputSchema"]["properties"]
+                .as_object()
+                .map(|o| o.is_empty())
+                .unwrap_or(false),
             "get_selection takes no args"
         );
     }
