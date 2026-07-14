@@ -1,15 +1,9 @@
 name: Github Pages
 
-# By default, runs if you push to master. keeps your deployed app in sync with master branch.
+# Fork policy: deploy ONLY on manual dispatch — a push to the default branch
+# must never silently publish a site. (Upstream deploys on master pushes.)
 on:
-  push:
-    branches:
-      - master
-# to only run when you do a new github release, comment out above part and uncomment the below trigger.
-# on:
-#   release:
-#     types:
-#       - published
+  workflow_dispatch:
 
 permissions:
   contents: write # for committing to gh-pages branch.

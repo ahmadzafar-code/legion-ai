@@ -11,3 +11,9 @@
 # Secrets
 .env
 .env.*
+
+# Profiles and AI-layer outputs (never commit profile data)
+*.duckdb
+prof_results/
+agent_traces/
+eval-*.jsonl

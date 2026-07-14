@@ -15,6 +15,18 @@ use tracing::{Span, info_span};
 
 // ── Public response types ────────────────────────────────────────────────────
 
+// ── API-call tuning ──────────────────────────────────────────────────────────
+
+/// Response token budget per request. Opus gets headroom for extended thinking.
+const MAX_TOKENS_OPUS: u32 = 16_000;
+const MAX_TOKENS_SONNET: u32 = 8_000;
+/// One API request may legitimately take minutes (large prompts, thinking).
+const API_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+/// Exponential backoff on 429/529: base doubling per retry, bounded ceiling.
+const API_MAX_ATTEMPTS: u32 = 5;
+const API_RETRY_BASE_MS: u64 = 1_000;
+const API_RETRY_CEILING_MS: u64 = 60_000;
+
 /// A timeline highlight returned by the agent.
 ///
 /// `entry_slug` is the DuckDB entry slug (e.g. `"n0_cpu_c6"`).
@@ -1072,7 +1084,7 @@ impl AgentSession {
         let api_started = std::time::Instant::now();
 
         // Opus benefits from a larger token budget for its thinking + response.
-        let max_tokens: u32 = if use_opus { 16_000 } else { 8_000 };
+        let max_tokens: u32 = if use_opus { MAX_TOKENS_OPUS } else { MAX_TOKENS_SONNET };
 
         // --- Prompt caching ---
         // Wrap system prompt in the array format with cache_control so Anthropic
@@ -1114,7 +1126,7 @@ impl AgentSession {
             .map_err(|e| format!("Failed to serialize request: {e}"))?;
         Span::current().record("request_size", body_str.len() as u64);
 
-        let mut retry_delay_ms = 1_000u64;
+        let mut retry_delay_ms = API_RETRY_BASE_MS;
         let mut retries_count: u32 = 0;
 
         // Helper to record terminal fields on every exit path.
@@ -1129,12 +1141,12 @@ impl AgentSession {
             err
         };
 
-        for attempt in 0..5u32 {
+        for attempt in 0..API_MAX_ATTEMPTS {
             let result = ureq::post("https://api.anthropic.com/v1/messages")
                 .set("x-api-key", &self.api_key)
                 .set("anthropic-version", "2023-06-01")
                 .set("Content-Type", "application/json")
-                .timeout(std::time::Duration::from_secs(300))
+                .timeout(API_REQUEST_TIMEOUT)
                 .send_string(&body_str);
 
             match result {
@@ -1182,7 +1194,7 @@ impl AgentSession {
                     if attempt < 4 {
                         retries_count += 1;
                         std::thread::sleep(std::time::Duration::from_millis(wait_ms));
-                        retry_delay_ms = (retry_delay_ms * 2).min(60_000);
+                        retry_delay_ms = (retry_delay_ms * 2).min(API_RETRY_CEILING_MS);
                         continue;
                     }
                     return Err(finalize_err(

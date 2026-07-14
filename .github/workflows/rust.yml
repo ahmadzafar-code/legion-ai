@@ -17,6 +17,12 @@ jobs:
       - run: cargo check --no-default-features --features client --all-targets
       - run: cargo check --no-default-features --features server --lib
       - run: cargo check --all-features --all-targets
+      # AI-layer feature matrix: each combo must compile on its own.
+      - run: cargo check --features ai --all-targets
+      - run: cargo check --features duckdb --all-targets
+      - run: cargo check --features ai,duckdb --all-targets
+      - run: cargo check --features viewer-mcp --all-targets
+      - run: cargo check --features eval --all-targets
 
   check_mac:
     name: Check macOS
@@ -29,6 +35,12 @@ jobs:
       - run: cargo check --no-default-features --features client --all-targets
       - run: cargo check --no-default-features --features server --lib
       - run: cargo check --all-features --all-targets
+      # AI-layer feature matrix: each combo must compile on its own.
+      - run: cargo check --features ai --all-targets
+      - run: cargo check --features duckdb --all-targets
+      - run: cargo check --features ai,duckdb --all-targets
+      - run: cargo check --features viewer-mcp --all-targets
+      - run: cargo check --features eval --all-targets
 
   check_wasm:
     name: Check wasm32

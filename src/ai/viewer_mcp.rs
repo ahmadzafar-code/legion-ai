@@ -41,6 +41,11 @@ const HTTP_PROTOCOL_VERSION: &str = "2025-03-26";
 /// Max request size we will buffer from a single connection (DoS guard).
 const MAX_REQUEST_BYTES: usize = 1_048_576;
 
+/// Well-known port the server tries first, so external `claude mcp add
+/// …:8765/mcp` registrations keep working across restarts (an ephemeral port
+/// is the fallback when it is taken).
+pub const DEFAULT_MCP_PORT: u16 = 8765;
+
 /// Pure parse → dispatch → serialize: raw HTTP request bytes → raw HTTP response
 /// bytes. No sockets, no GUI — unit-testable. Enforces POST /mcp, the loopback
 /// Origin check, and notification (202) vs result (200) framing.

@@ -3,6 +3,18 @@
 //! This module provides:
 //! - Chat panel UI (`chat_panel`)
 //! - Native Rust AI agent + direct tool calls (`agent`, `tools`)
+//!
+//! # Conventions
+//!
+//! **Errors** are `Result<_, String>` throughout: the messages are written for
+//! their actual consumers — the model (tool results) and the chat transcript —
+//! and never cross a typed error boundary, so a structured error type would add
+//! conversion noise without a consumer.
+//!
+//! **Locks**: `.lock().unwrap()` is deliberate fail-fast. Every critical
+//! section in this layer is short and non-reentrant; a poisoned lock means a
+//! holder panicked mid-update, and limping on with torn agent/UI state is worse
+//! than crashing.
 
 pub mod agent;
 pub mod bridge;

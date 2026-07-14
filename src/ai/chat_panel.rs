@@ -2014,14 +2014,14 @@ fn render_message(
                         }
                     });
                 }
-                if msg.highlights.len() > 1 {
-                    if ui.small_button("Zoom to all \u{25b8}").clicked() {
-                        for hl in &msg.highlights {
-                            actions.push(HighlightAction {
-                                highlight: hl.clone(),
-                                zoom_to: true,
-                            });
-                        }
+                if msg.highlights.len() > 1
+                    && ui.small_button("Zoom to all \u{25b8}").clicked()
+                {
+                    for hl in &msg.highlights {
+                        actions.push(HighlightAction {
+                            highlight: hl.clone(),
+                            zoom_to: true,
+                        });
                     }
                 }
             }

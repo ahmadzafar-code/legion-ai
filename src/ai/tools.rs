@@ -194,14 +194,19 @@ pub fn execute_run_query(duckdb_path: &str, sql: &str) -> Result<String, String>
 /// — parse fails, a scalar/non-array, `len <= 50`, or empty `[]` — the original
 /// string is returned UNCHANGED. The `json_group_array(...)`-in-one-row aggregates
 /// (`slug_exists`, `gather_overview` sections) are a single row → len 1 → never marked.
+/// Hard cap on rows returned by `run_query` (applied in Rust — trailing SQL
+/// LIMITs are stripped, so the cap cannot be talked around by the model).
+#[cfg(feature = "duckdb")]
+const QUERY_ROW_CAP: usize = 50;
+
 #[cfg(feature = "duckdb")]
 fn mark_truncation_if_over(result: String) -> String {
     match serde_json::from_str::<Vec<serde_json::Value>>(&result) {
-        Ok(mut arr) if arr.len() > 50 => {
-            arr.truncate(50);
+        Ok(mut arr) if arr.len() > QUERY_ROW_CAP => {
+            arr.truncate(QUERY_ROW_CAP);
             arr.push(serde_json::json!({
                 "_truncated": true,
-                "_shown": 50,
+                "_shown": QUERY_ROW_CAP,
                 "_hint": "result capped at 50 rows; refine with aggregation or a narrower filter"
             }));
             serde_json::to_string(&arr).unwrap_or(result)
@@ -2836,7 +2841,7 @@ mod tests {
     fn test_run_query_blocks_external_file_read() {
         let db = test_db_path();
         if !db.exists() {
-            eprintln!("skipping {}: test DB absent at {}", "exfil", db.display());
+            eprintln!("skipping exfil test: test DB absent at {}", db.display());
             return;
         }
         let db = db.to_str().unwrap();

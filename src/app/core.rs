@@ -955,7 +955,7 @@ impl Slot {
                         if let Some(pos) = i.pointer.hover_pos() {
                             let norm_x =
                                 ((pos.x - rect.min.x) / rect.width()).clamp(0.0, 1.0);
-                            let click_time = cx.view_interval.lerp(norm_x as f32);
+                            let click_time = cx.view_interval.lerp(norm_x);
 
                             // Find the gap containing this timestamp using row 0 items
                             if let Some(Ok(tile_data)) =
@@ -2818,19 +2818,18 @@ impl ProfApp {
                 .chat_panel
                 .set_tool_paths(opts.ai_duckdb_path, opts.ai_code_path, opts.ai_wiki_path);
 
-            // Initialize agent tracing subscriber once at startup. Best-effort:
-            // if the trace dir can't be created, log and continue without tracing.
-            let trace_root_candidates = [
-                std::path::PathBuf::from("prof_results"),
-                std::path::PathBuf::from("../prof_results"),
-            ];
-            let trace_root = trace_root_candidates
-                .iter()
-                .find(|p| p.exists())
-                .map(|p| p.as_path())
-                .unwrap_or(std::path::Path::new("prof_results"));
-            if let Err(e) = crate::ai::trace::init_subscriber(trace_root) {
-                eprintln!("Failed to initialize agent tracing: {e}");
+            // Agent tracing is OPT-IN: set LEGION_PROF_AI_TRACE_DIR to a
+            // directory to record one JSON line per agent span under
+            // <dir>/agent_traces/agent.jsonl. Off by default so the viewer
+            // never silently writes logs into the user's working directory.
+            if let Ok(dir) = std::env::var("LEGION_PROF_AI_TRACE_DIR") {
+                let dir = dir.trim();
+                if !dir.is_empty() {
+                    match crate::ai::trace::init_subscriber(std::path::Path::new(dir)) {
+                        Ok(()) => eprintln!("Agent traces: {dir}/agent_traces/agent.jsonl"),
+                        Err(e) => eprintln!("Failed to initialize agent tracing: {e}"),
+                    }
+                }
             }
         }
 
@@ -3488,7 +3487,7 @@ impl eframe::App for ProfApp {
                 let mut approval_broker = None;
                 match crate::ai::viewer_mcp::spawn(
                     duckdb_path.clone(),
-                    8765,
+                    crate::ai::viewer_mcp::DEFAULT_MCP_PORT,
                     bridge,
                     wiki_root.clone(),
                     code_root.clone(),
