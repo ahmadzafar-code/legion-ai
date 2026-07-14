@@ -3675,12 +3675,15 @@ impl eframe::App for ProfApp {
                 });
 
                 // Toggle for the left controls sidebar — the counterpart of the
-                // Co-Pilot toggle on the right. Text-only (hamburger glyphs are
-                // tofu in egui's default fonts); subtle selected fill while open.
+                // Co-Pilot toggle on the right. NOT named "Controls": the
+                // sidebar's bottom "Show Controls" button (the shortcuts help
+                // window) already owns that word. Text-only (hamburger glyphs
+                // are tofu in egui's default fonts); subtle selected fill while
+                // open.
                 if ui
-                    .selectable_label(!cx.sidebar_hidden, "Controls")
+                    .selectable_label(!cx.sidebar_hidden, "Sidebar")
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .on_hover_text("Show / hide the controls sidebar")
+                    .on_hover_text("Show / hide the sidebar")
                     .clicked()
                 {
                     cx.sidebar_hidden = !cx.sidebar_hidden;
