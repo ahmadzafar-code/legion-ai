@@ -1,15 +1,22 @@
 [package]
 name = "legion_prof_viewer"
 version = "0.6.2"
-authors = ["Elliott Slaughter <slaughter@cs.stanford.edu>"]
-description = "Profiler UI frontend component for Legion Prof"
-documentation = "https://github.com/StanfordLegion/prof-viewer"
-homepage = "https://github.com/StanfordLegion/prof-viewer"
-repository = "https://github.com/StanfordLegion/prof-viewer"
+# Fork of StanfordLegion/prof-viewer (upstream author kept for attribution).
+authors = [
+    "Elliott Slaughter <slaughter@cs.stanford.edu>",
+    "Ahmad Zafar <ahmadz@stanford.edu>",
+]
+description = "Profiler UI frontend for Legion Prof, with an AI diagnostic co-pilot (fork)"
+documentation = "https://github.com/ahmadzafar-code/prof-viewer"
+homepage = "https://github.com/ahmadzafar-code/prof-viewer"
+repository = "https://github.com/ahmadzafar-code/prof-viewer"
 readme = "README.md"
 keywords = ["legion", "legion-prof", "profiler"]
 categories = ["development-tools::profiling"]
 license = "Apache-2.0"
+# The legion_prof_viewer crate name on crates.io belongs to upstream — this
+# fork is distributed via GitHub only.
+publish = false
 
 edition = "2024"
 rust-version = "1.85"

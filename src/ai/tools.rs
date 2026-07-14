@@ -472,7 +472,7 @@ pub fn execute_read_code(code_root: &str, path: &str) -> Result<String, String> 
     }
 
     let full_path = Path::new(code_root).join(path);
-    // S3b: reject symlink/canonicalization escapes. The `..` string check above does
+    // Reject symlink/canonicalization escapes. The `..` string check above does
     // NOT stop a symlink INSIDE the root pointing at, e.g., ~/.ssh/id_rsa; the resolved
     // target must stay under the resolved root. Only enforced when the target exists —
     // a not-found path falls through to the helpful "Available files" tree below.
