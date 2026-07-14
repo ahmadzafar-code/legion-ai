@@ -370,7 +370,7 @@ impl ClaudeCodeAgent {
     /// Lifecycle core, parameterized on the command (tests drive it with `cat`).
     /// `cwd_dir` (if any) is a viewer-owned scratch dir, `settings_path` (if any)
     /// the viewer-owned hook settings file — both removed on Drop.
-    fn spawn_with_command(
+    pub(crate) fn spawn_with_command(
         mut cmd: Command,
         cfg_path: PathBuf,
         cwd_dir: Option<PathBuf>,
@@ -1132,6 +1132,19 @@ mod tests {
         assert!(!broker.has_pending(), "expired request must not linger");
     }
 
+    /// `Duration::ZERO` is the fail-closed floor: with no time to wait for a
+    /// verdict, the broker must deny immediately and leave nothing pending.
+    #[test]
+    fn broker_zero_deadline_denies_and_clears() {
+        let broker = ApprovalBroker::new();
+        let got = broker.decide("Write", &json!({"file_path": "/x"}), Duration::ZERO);
+        assert_eq!(got, ApprovalDecision::Deny);
+        assert!(
+            !broker.has_pending(),
+            "zero-deadline request must not linger"
+        );
+    }
+
     #[test]
     fn broker_always_allow_rules_and_metachar_guard() {
         let broker = Arc::new(ApprovalBroker::new());
@@ -1297,6 +1310,21 @@ mod tests {
             assert!(
                 map_line(line, &mut names).is_empty(),
                 "line should be silent: {line}"
+            );
+        }
+    }
+
+    /// A line cut mid-object — what the stdout pump yields when a giant
+    /// tool_result line hits the `MAX_LINE_BYTES` cap and the tail is
+    /// discarded — must map to no events and never panic.
+    #[test]
+    fn map_truncated_line_is_silent() {
+        let mut st = MapState::default();
+        let full = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01A","content":[{"type":"text","text":"a very large query result"}]}]},"session_id":"s"}"#;
+        for cut in [10, full.len() / 2, full.len() - 1] {
+            assert!(
+                map_line(&full[..cut], &mut st).is_empty(),
+                "line truncated at byte {cut} should be silent"
             );
         }
     }

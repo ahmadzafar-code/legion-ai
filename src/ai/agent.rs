@@ -616,100 +616,7 @@ impl AgentSession {
             // Execute all tool calls and collect results
             let tool_results: Vec<Value> = tool_use_blocks
                 .iter()
-                .map(|block| {
-                    let id = block
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown");
-                    let name = block
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown");
-                    let input = block
-                        .get("input")
-                        .cloned()
-                        .unwrap_or(Value::Object(serde_json::Map::new()));
-
-                    if name == "run_query" {
-                        queries_executed += 1;
-                    }
-
-                    // Emit progressive status: tool is about to execute
-                    self.emit(AgentEvent::ToolCall {
-                        name: name.to_owned(),
-                        purpose: input
-                            .get("purpose")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_owned(),
-                    });
-
-                    let (content, is_error) = match self.execute_tool(name, &input) {
-                        Ok(result) => (result, false),
-                        Err(e) => (format!("Error: {}", e), true),
-                    };
-
-                    // Emit progressive status: tool returned
-                    self.emit(AgentEvent::ToolResult {
-                        name: name.to_owned(),
-                        summary: if content.starts_with("__IMAGE_BASE64__") {
-                            "screenshot captured".to_owned()
-                        } else if content.len() > 100 {
-                            format!("{}…", &content[..100])
-                        } else {
-                            content.clone()
-                        },
-                        full_content: if content.starts_with("__IMAGE_BASE64__") {
-                            String::new()
-                        } else {
-                            content.clone()
-                        },
-                    });
-
-                    // Image results → image + metadata content blocks for Claude
-                    if !is_error && content.starts_with("__IMAGE_BASE64__") {
-                        // Split off metadata if present
-                        let (base64_data, metadata) =
-                            if let Some(meta_pos) = content.find("\n__METADATA__") {
-                                (
-                                    &content["__IMAGE_BASE64__".len()..meta_pos],
-                                    &content[meta_pos + "\n__METADATA__".len()..],
-                                )
-                            } else {
-                                (&content["__IMAGE_BASE64__".len()..], "")
-                            };
-
-                        let mut content_blocks = vec![serde_json::json!({
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/png",
-                                "data": base64_data
-                            }
-                        })];
-
-                        // Add metadata as a text block if present
-                        if !metadata.is_empty() {
-                            content_blocks.push(serde_json::json!({
-                                "type": "text",
-                                "text": metadata
-                            }));
-                        }
-
-                        return serde_json::json!({
-                            "type": "tool_result",
-                            "tool_use_id": id,
-                            "content": content_blocks
-                        });
-                    }
-
-                    serde_json::json!({
-                        "type": "tool_result",
-                        "tool_use_id": id,
-                        "content": content,
-                        "is_error": is_error
-                    })
-                })
+                .map(|block| self.tool_result_block(block, &mut queries_executed))
                 .collect();
 
             // Send tool results back — all in a single user message (API requirement)
@@ -731,6 +638,114 @@ impl AgentSession {
 
             Span::current().record("wall_ms", turn_started.elapsed().as_millis() as u64);
         }
+    }
+
+    /// Execute one `tool_use` block and package the outcome as a `tool_result`
+    /// content block for the next API request, emitting the progressive
+    /// `ToolCall` / `ToolResult` status events along the way. Bumps
+    /// `queries_executed` when the tool is `run_query`.
+    ///
+    /// This is the single decoder of the stringly-typed screenshot protocol:
+    /// viewport-capturing tools (`screenshot`, `zoom_to`, and the navigation
+    /// tools) return `Ok` strings of the form `__IMAGE_BASE64__<base64 PNG>`,
+    /// optionally followed by `\n__METADATA__<viewport description>` (encoded
+    /// by `wait_for_screenshot`). Such results become a `tool_result` whose
+    /// content is an image block plus, when metadata is present, a text block,
+    /// so Claude sees the pixels and the viewport description together. All
+    /// other results (including errors) pass through as a plain string
+    /// `content` with `is_error` set accordingly.
+    fn tool_result_block(&mut self, block: &Value, queries_executed: &mut usize) -> Value {
+        let id = block
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let name = block
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let input = block
+            .get("input")
+            .cloned()
+            .unwrap_or(Value::Object(serde_json::Map::new()));
+
+        if name == "run_query" {
+            *queries_executed += 1;
+        }
+
+        // Emit progressive status: tool is about to execute
+        self.emit(AgentEvent::ToolCall {
+            name: name.to_owned(),
+            purpose: input
+                .get("purpose")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_owned(),
+        });
+
+        let (content, is_error) = match self.execute_tool(name, &input) {
+            Ok(result) => (result, false),
+            Err(e) => (format!("Error: {}", e), true),
+        };
+
+        // Emit progressive status: tool returned
+        self.emit(AgentEvent::ToolResult {
+            name: name.to_owned(),
+            summary: if content.starts_with("__IMAGE_BASE64__") {
+                "screenshot captured".to_owned()
+            } else if content.len() > 100 {
+                format!("{}…", &content[..100])
+            } else {
+                content.clone()
+            },
+            full_content: if content.starts_with("__IMAGE_BASE64__") {
+                String::new()
+            } else {
+                content.clone()
+            },
+        });
+
+        // Image results → image + metadata content blocks for Claude
+        if !is_error && content.starts_with("__IMAGE_BASE64__") {
+            // Split off metadata if present
+            let (base64_data, metadata) = if let Some(meta_pos) = content.find("\n__METADATA__") {
+                (
+                    &content["__IMAGE_BASE64__".len()..meta_pos],
+                    &content[meta_pos + "\n__METADATA__".len()..],
+                )
+            } else {
+                (&content["__IMAGE_BASE64__".len()..], "")
+            };
+
+            let mut content_blocks = vec![serde_json::json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": base64_data
+                }
+            })];
+
+            // Add metadata as a text block if present
+            if !metadata.is_empty() {
+                content_blocks.push(serde_json::json!({
+                    "type": "text",
+                    "text": metadata
+                }));
+            }
+
+            return serde_json::json!({
+                "type": "tool_result",
+                "tool_use_id": id,
+                "content": content_blocks
+            });
+        }
+
+        serde_json::json!({
+            "type": "tool_result",
+            "tool_use_id": id,
+            "content": content,
+            "is_error": is_error
+        })
     }
 
     /// Returns true if `slug` is a known `entry_slug` in the profile's `entries`
@@ -772,10 +787,7 @@ impl AgentSession {
                 "run_query" => {
                     #[cfg(feature = "duckdb")]
                     {
-                        let sql = input
-                            .get("sql")
-                            .and_then(|v| v.as_str())
-                            .ok_or_else(|| "Missing 'sql' parameter".to_owned())?;
+                        let sql = req_str(input, "sql")?;
                         super::tools::execute_run_query(&self.duckdb_path, sql)
                     }
                     #[cfg(not(feature = "duckdb"))]
@@ -809,10 +821,7 @@ impl AgentSession {
                 }
 
                 "read_code" => {
-                    let path = input
-                        .get("path")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| "Missing 'path' parameter".to_owned())?;
+                    let path = req_str(input, "path")?;
                     super::tools::execute_read_code(&self.code_path, path)
                 }
 
@@ -822,10 +831,7 @@ impl AgentSession {
                 }
 
                 "wiki_read" => {
-                    let path = input
-                        .get("path")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| "Missing 'path' parameter".to_owned())?;
+                    let path = req_str(input, "path")?;
                     let section = input.get("section").and_then(|v| v.as_str());
                     let max_chars = input
                         .get("max_chars")
@@ -835,10 +841,7 @@ impl AgentSession {
                 }
 
                 "wiki_search" => {
-                    let query = input
-                        .get("query")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| "Missing 'query' parameter".to_owned())?;
+                    let query = req_str(input, "query")?;
                     let section = input.get("section").and_then(|v| v.as_str());
                     let tag = input.get("tag").and_then(|v| v.as_str());
                     let limit = input
@@ -1259,6 +1262,15 @@ const MAX_TOOLRESULT_CHARS: usize = 3000;
 const TRUNCATE_KEEP_CHARS: usize = 2000;
 
 /// Truncate `s` to at most `max` bytes, snapping down to a UTF-8 char boundary.
+/// Fetch a required string parameter from a tool's JSON `input`, with the
+/// standard model-readable error when it is absent or not a string.
+fn req_str<'a>(input: &'a Value, key: &str) -> Result<&'a str, String> {
+    input
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("Missing '{key}' parameter"))
+}
+
 fn truncate_on_boundary(s: &str, max: usize) -> &str {
     if s.len() <= max {
         return s;
