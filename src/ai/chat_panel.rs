@@ -2035,36 +2035,45 @@ fn render_message(
         ChatMessageKind::System => {
             if let Some(ref content) = msg.expandable_content {
                 let id = ui.make_persistent_id(ui.next_auto_id());
-                // CollapsingHeader headers are button-like: they EXTEND instead
-                // of wrapping, which widens the whole scroll pane past the panel
-                // edge. Truncate the one-line summary to the pane instead.
-                ui.scope(|ui| {
-                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-                    egui::CollapsingHeader::new(
-                        egui::RichText::new(&msg.text)
-                            .italics()
-                            .color(egui::Color32::from_rgb(120, 120, 120)),
-                    )
-                    .id_salt(id)
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            if ui.small_button("Copy result").clicked() {
-                                ui.output_mut(|o| o.copied_text = content.clone());
-                            }
-                        });
-                        // Explicit .wrap(): the body must WRAP (long JSON breaks
-                        // anywhere), overriding the scope's Truncate.
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(content)
-                                    .monospace()
-                                    .size(11.0)
-                                    .color(egui::Color32::from_rgb(60, 60, 60)),
-                            )
-                            .wrap(),
-                        );
+                // NOT CollapsingHeader: egui 0.29 hardcodes TextWrapMode::Extend
+                // for its header galley and ALLOCATES that full text width
+                // (collapsing_header.rs:521-531) — one long tool summary then
+                // permanently widens the scroll Ui, and every later row
+                // (including the right-anchored user bubble) anchors past the
+                // visible pane. CollapsingState::show_header lets the header be
+                // our own TRUNCATING label, so the row can never exceed it.
+                egui::collapsing_header::CollapsingState::load_with_default_open(
+                    ui.ctx(),
+                    id,
+                    false,
+                )
+                .show_header(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(&msg.text)
+                                .italics()
+                                .color(egui::Color32::from_rgb(120, 120, 120)),
+                        )
+                        .truncate(),
+                    );
+                })
+                .body(|ui| {
+                    ui.horizontal(|ui| {
+                        if ui.small_button("Copy result").clicked() {
+                            ui.output_mut(|o| o.copied_text = content.clone());
+                        }
                     });
+                    // Explicit .wrap(): long JSON has no natural break points —
+                    // wrapping breaks anywhere rather than extending.
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(content)
+                                .monospace()
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(60, 60, 60)),
+                        )
+                        .wrap(),
+                    );
                 });
             } else {
                 // Explicit .wrap() — plain labels in odd parent layouts must
