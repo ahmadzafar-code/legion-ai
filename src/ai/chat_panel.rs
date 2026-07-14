@@ -1633,11 +1633,12 @@ impl ChatPanel {
                                             .size(19.0)
                                             .color(egui::Color32::WHITE),
                                     )
-                                    // Accent fill when ready — the flat dark disc
-                                    // read as non-interactive; pale when there is
+                                    // Legion-red fill when ready (#EC3937, the
+                                    // brand logo red) — the flat dark disc read
+                                    // as non-interactive; pale when there is
                                     // nothing to send.
                                     .fill(if ready {
-                                        egui::Color32::from_rgb(193, 95, 60)
+                                        egui::Color32::from_rgb(236, 57, 55)
                                     } else {
                                         egui::Color32::from_rgb(190, 190, 190)
                                     })
@@ -1666,12 +1667,13 @@ impl ChatPanel {
     fn ui_stop_button(&mut self, ui: &mut egui::Ui) {
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(36.0, 36.0), egui::Sense::click());
         let active = !self.stop_requested;
+        // Legion red (#EC3937, the brand logo fill), lightened on hover.
         let fill = if !active {
             egui::Color32::from_rgb(190, 190, 190) // stop already queued — inert
         } else if resp.hovered() {
-            egui::Color32::from_rgb(216, 116, 80)
+            egui::Color32::from_rgb(243, 96, 94)
         } else {
-            egui::Color32::from_rgb(193, 95, 60)
+            egui::Color32::from_rgb(236, 57, 55)
         };
         let painter = ui.painter();
         painter.circle_filled(rect.center(), 18.0, fill);

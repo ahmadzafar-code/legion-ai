@@ -3671,10 +3671,12 @@ impl eframe::App for ProfApp {
                 // Right-aligned Legion AI Co-Pilot toggle button
                 #[cfg(feature = "ai")]
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // A real button: filled blue while the panel is open, grey
-                    // otherwise. (No emoji — 🤖 was a tofu box in egui's fonts.)
+                    // A real button: filled Legion red while the panel is open,
+                    // grey otherwise. (No emoji — 🤖 was a tofu box in egui's
+                    // fonts.) #EC3937 is the flat fill of the Legion brick logo
+                    // (legion/realm/doxygen/logo.png).
                     let (fill, text_color) = if cx.chat_panel.visible {
-                        (egui::Color32::from_rgb(59, 130, 246), egui::Color32::WHITE)
+                        (egui::Color32::from_rgb(236, 57, 55), egui::Color32::WHITE)
                     } else {
                         (
                             egui::Color32::from_rgb(232, 234, 238),
