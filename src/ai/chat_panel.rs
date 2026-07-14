@@ -184,6 +184,10 @@ pub struct ChatPanel {
     /// user's outside setup (claude login / API key) IS the choice. Re-resolved
     /// on ↺ New session.
     resolved_backend: Option<ChatBackendKind>,
+    /// Cached "does `claude` look signed in" heuristic for the welcome-screen
+    /// hint — (value, when checked). Recomputed at most every few seconds
+    /// while the welcome screen is visible (~/.claude.json can be megabytes).
+    cc_auth_cache: Option<(bool, std::time::Instant)>,
 
     // ── ＋-menu context ────────────────────────────────────────────────────
     /// Plain-file attachments added via the ＋ menu (inline context).
@@ -277,6 +281,7 @@ impl Clone for ChatPanel {
             selected_items: self.selected_items.clone(),
             api_key_popup_open: self.api_key_popup_open,
             resolved_backend: self.resolved_backend,
+            cc_auth_cache: self.cc_auth_cache,
             attachments: self.attachments.clone(),
             duckdb_path_buffer: self.duckdb_path_buffer.clone(),
             code_path_buffer: self.code_path_buffer.clone(),
@@ -342,6 +347,7 @@ impl ChatPanel {
             selected_items: Vec::new(),
             api_key_popup_open: false,
             resolved_backend: None,
+            cc_auth_cache: None,
             attachments: Vec::new(),
             duckdb_path_buffer: String::new(),
             code_path_buffer: String::new(),
@@ -1212,7 +1218,7 @@ impl ChatPanel {
                 ToolStatus::Off => (
                     "Code ○",
                     egui::Color32::from_rgb(160, 160, 160),
-                    "Optional — add a code repo via the ＋ menu".to_string(),
+                    "Optional — use + → Connect Code to add your application source".to_string(),
                 ),
             };
             ui.label(egui::RichText::new(code_label).size(13.5).color(code_color))
@@ -1300,6 +1306,21 @@ impl ChatPanel {
     }
 
     /// The empty-state screen (Claude-Code-style): centered headline + two
+    /// Cached [`claude_looks_authenticated`] (recomputed at most every 3 s
+    /// while the welcome screen is visible, so `claude login` in a terminal
+    /// flips the hint without a restart).
+    fn claude_auth_cached(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        match self.cc_auth_cache {
+            Some((v, t)) if now.duration_since(t) < std::time::Duration::from_secs(3) => v,
+            _ => {
+                let v = claude_looks_authenticated();
+                self.cc_auth_cache = Some((v, now));
+                v
+            }
+        }
+    }
+
     /// suggestion cards. Shown instead of the transcript until the first
     /// message exists; clicking a card submits its prompt.
     fn ui_empty_state(&mut self, ui: &mut egui::Ui) {
@@ -1372,6 +1393,34 @@ impl ChatPanel {
                 );
             }
         });
+
+        // First-open guidance under the cards, keyed to the Claude Code
+        // backend's state: not signed in -> the one-time login step; signed
+        // in -> how to connect the application source. Heuristic check only
+        // (the first turn's 401 stays the authoritative error).
+        if self.resolved_backend == Some(ChatBackendKind::ClaudeCode) {
+            let authed = self.claude_auth_cached();
+            ui.add_space(18.0);
+            ui.vertical_centered(|ui| {
+                ui.set_max_width(card_w);
+                let hint = if authed {
+                    "Tip: use + below → Connect Code to point the co-pilot at your \
+                     application's source — it reads the code to explain what each \
+                     slow task computes."
+                } else {
+                    "One-time setup: Claude Code isn't signed in yet. Run \
+                     `claude login` in a terminal, then come back and ask away."
+                };
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(hint)
+                            .size(12.5)
+                            .color(egui::Color32::from_rgb(130, 130, 130)),
+                    )
+                    .wrap(),
+                );
+            });
+        }
 
         if let Some(prompt) = submit {
             self.submit_input(prompt.to_owned());
@@ -1737,7 +1786,7 @@ impl ChatPanel {
                     .color(egui::Color32::from_rgb(30, 30, 30)),
             )
             .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text("Connect the profile DB or code repo, or attach a file");
+            .on_hover_text("Connect the profile DB or your code, or attach a file");
         let plus_menu_id = ui.make_persistent_id("plus_context_menu");
         if plus_resp.clicked() {
             ui.memory_mut(|m| m.toggle_popup(plus_menu_id));
@@ -1775,7 +1824,7 @@ impl ChatPanel {
                             self.duckdb_path_buffer = f.to_string_lossy().into_owned();
                         }
                     }
-                    if item(ui, "Connect code repo…") {
+                    if item(ui, "Connect Code…") {
                         if let Some(d) = rfd::FileDialog::new()
                             .set_title("Choose the profiled application's source folder")
                             .pick_folder()
@@ -2170,6 +2219,26 @@ fn render_message(
             }
         }
     }
+}
+
+/// Best-effort LOCAL signal that the `claude` CLI has credentials: an
+/// `ANTHROPIC_API_KEY` in the environment, or the `oauthAccount` /
+/// `primaryApiKey` marker `claude login` writes into `~/.claude.json` (on
+/// macOS the tokens themselves live in the keychain, but the marker is
+/// written either way). Powers the welcome-screen hint only — never gates a
+/// turn; a stale/revoked credential still surfaces as the 401 error path.
+fn claude_looks_authenticated() -> bool {
+    if std::env::var("ANTHROPIC_API_KEY").is_ok_and(|v| !v.trim().is_empty()) {
+        return true;
+    }
+    let Some(home) =
+        std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+    else {
+        return false;
+    };
+    std::fs::read_to_string(std::path::Path::new(&home).join(".claude.json"))
+        .map(|s| s.contains("\"oauthAccount\"") || s.contains("\"primaryApiKey\""))
+        .unwrap_or(false)
 }
 
 /// Menu-row visuals (Claude-style): rows are invisible until hovered, then a
