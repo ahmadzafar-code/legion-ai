@@ -1404,9 +1404,7 @@ impl ChatPanel {
             ui.vertical_centered(|ui| {
                 ui.set_max_width(card_w);
                 let hint = if authed {
-                    "Tip: use + below → Connect Code to point the co-pilot at your \
-                     application's source — it reads the code to explain what each \
-                     slow task computes."
+                    "Use + → Connect Code. It allows the AI agent to read your code."
                 } else {
                     "One-time setup: Claude Code isn't signed in yet. Run \
                      `claude login` in a terminal, then come back and ask away."
