@@ -188,6 +188,13 @@ pub struct ChatPanel {
     /// hint — (value, when checked). Recomputed at most every few seconds
     /// while the welcome screen is visible (~/.claude.json can be megabytes).
     cc_auth_cache: Option<(bool, std::time::Instant)>,
+    /// The session reasoning transcript (default-ON; see `trace.rs`). Opened
+    /// lazily on the FIRST user turn so sessions that never touch the agent
+    /// leave no file. Arc-shared with the Claude Code stdout pump.
+    session_trace: Option<std::sync::Arc<crate::ai::trace::SessionTrace>>,
+    /// Whether the lazy open already ran (distinguishes "not yet" from
+    /// "tried, tracing disabled").
+    session_trace_opened: bool,
 
     // ── ＋-menu context ────────────────────────────────────────────────────
     /// Plain-file attachments added via the ＋ menu (inline context).
@@ -282,6 +289,8 @@ impl Clone for ChatPanel {
             api_key_popup_open: self.api_key_popup_open,
             resolved_backend: self.resolved_backend,
             cc_auth_cache: self.cc_auth_cache,
+            session_trace: self.session_trace.clone(),
+            session_trace_opened: self.session_trace_opened,
             attachments: self.attachments.clone(),
             duckdb_path_buffer: self.duckdb_path_buffer.clone(),
             code_path_buffer: self.code_path_buffer.clone(),
@@ -348,6 +357,8 @@ impl ChatPanel {
             api_key_popup_open: false,
             resolved_backend: None,
             cc_auth_cache: None,
+            session_trace: None,
+            session_trace_opened: false,
             attachments: Vec::new(),
             duckdb_path_buffer: String::new(),
             code_path_buffer: String::new(),
@@ -592,9 +603,46 @@ impl ChatPanel {
         }
     }
 
+    /// The session reasoning transcript, opened on first use (default-ON —
+    /// `LEGION_PROF_AI_TRACE=off` disables; see `trace.rs`). Prints the path
+    /// once so testers know what is recorded and where.
+    fn session_trace(&mut self) -> Option<std::sync::Arc<crate::ai::trace::SessionTrace>> {
+        if !self.session_trace_opened {
+            self.session_trace_opened = true;
+            self.session_trace = crate::ai::trace::SessionTrace::open_default();
+            if let Some(t) = &self.session_trace {
+                eprintln!(
+                    "[legion-ai] session trace: {} (set LEGION_PROF_AI_TRACE=off to disable)",
+                    t.path.display()
+                );
+            }
+        }
+        self.session_trace.clone()
+    }
+
+    /// Short backend tag for trace lines.
+    fn backend_tag(&self) -> &'static str {
+        match self.resolved_backend {
+            Some(ChatBackendKind::ClaudeCode) => "claude-code",
+            Some(ChatBackendKind::Native) => "native",
+            None => "unresolved",
+        }
+    }
+
     /// Submit composer text: answer a pending `ask_user` question if one is open,
     /// otherwise start a new agent request.
     fn submit_input(&mut self, text: String) {
+        let answers_question = self.pending_question.is_some();
+        if let Some(t) = self.session_trace() {
+            t.event(
+                "user_turn",
+                serde_json::json!({
+                    "text": text,
+                    "answers_question": answers_question,
+                    "backend": self.backend_tag(),
+                }),
+            );
+        }
         if let Some((request_id, _, _)) = self.pending_question.take() {
             self.send_user_answer(request_id, text.clone());
             self.add_message(ChatMessageKind::User, text);
@@ -957,12 +1005,14 @@ impl ChatPanel {
                 let code_root = self.code_path();
                 // No --model: the child uses the user's own Claude Code default
                 // (their install, their model choice).
+                let trace = self.session_trace();
                 match crate::ai::claude_code::ClaudeCodeAgent::spawn(
                     port,
                     &token,
                     "",
                     code_root.as_deref(),
                     event_tx,
+                    trace,
                 ) {
                     Ok(agent) => {
                         *self.event_rx.lock().unwrap() = Some(event_rx);
@@ -1761,6 +1811,9 @@ impl ChatPanel {
                 None => {
                     self.stop_requested = true;
                     self.add_message(ChatMessageKind::System, "Stopping…");
+                    if let Some(t) = self.session_trace() {
+                        t.event("stop_click", serde_json::Value::Null);
+                    }
                 }
                 Some(e) => {
                     self.add_message(ChatMessageKind::System, format!("Stop failed: {e}"));
@@ -2349,6 +2402,18 @@ impl crate::ai::bridge::EventSink for ChatPanel {
     }
 
     fn on_complete(&mut self, response: AgentResponse) {
+        if let Some(t) = self.session_trace() {
+            t.event(
+                "turn_complete",
+                serde_json::json!({
+                    "backend": self.backend_tag(),
+                    "chars": response.text.len(),
+                    "highlights": response.highlights.len(),
+                    "turns_used": response.turns_used,
+                    "usage_note": response.usage_note.as_deref(),
+                }),
+            );
+        }
         let display = if response.text.len() > 10_000 {
             format!(
                 "{}…\n\n*(truncated — full response was {} chars)*",
@@ -2412,6 +2477,16 @@ impl crate::ai::bridge::EventSink for ChatPanel {
     }
 
     fn on_error(&mut self, error: String) {
+        if let Some(t) = self.session_trace() {
+            t.event(
+                "turn_error",
+                serde_json::json!({
+                    "backend": self.backend_tag(),
+                    "error": error,
+                    "stopped_by_user": self.stop_requested,
+                }),
+            );
+        }
         if self.stop_requested {
             // The user interrupted the turn on purpose — claude reports the
             // abort as an error result; render the standard-UI "Stopped.".
@@ -2595,6 +2670,7 @@ mod channel_cleanup_tests {
             None,
             None,
             event_tx,
+            None,
         )
         .unwrap();
 

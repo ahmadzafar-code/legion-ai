@@ -268,6 +268,7 @@ impl ClaudeCodeAgent {
         model: &str,
         code_root: Option<&str>,
         event_tx: Sender<AgentEvent>,
+        trace: Option<Arc<super::trace::SessionTrace>>,
     ) -> Result<Arc<Self>, String> {
         // Private 0600 mcp-config carrying the Authorization header.
         let cfg_path = std::env::temp_dir().join(format!(
@@ -364,7 +365,26 @@ impl ClaudeCodeAgent {
         if let Some(root) = code_root.map(str::trim).filter(|r| !r.is_empty()) {
             cmd.arg("--add-dir").arg(root);
         }
-        Self::spawn_with_command(cmd, cfg_path, Some(cwd_dir), Some(settings_path), event_tx)
+        let agent = Self::spawn_with_command(
+            cmd,
+            cfg_path,
+            Some(cwd_dir),
+            Some(settings_path),
+            event_tx,
+            trace.clone(),
+        )?;
+        if let Some(t) = &trace {
+            t.event(
+                "session_start",
+                json!({
+                    "engine": "claude-code",
+                    "model": model,
+                    "mcp_port": port,
+                    "code_root_set": code_root.map(str::trim).is_some_and(|r| !r.is_empty()),
+                }),
+            );
+        }
+        Ok(agent)
     }
 
     /// Lifecycle core, parameterized on the command (tests drive it with `cat`).
@@ -376,6 +396,7 @@ impl ClaudeCodeAgent {
         cwd_dir: Option<PathBuf>,
         settings_path: Option<PathBuf>,
         event_tx: Sender<AgentEvent>,
+        trace: Option<Arc<super::trace::SessionTrace>>,
     ) -> Result<Arc<Self>, String> {
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -494,6 +515,11 @@ impl ClaudeCodeAgent {
                     if !buf.is_empty() {
                         activity.store(now_secs(), Ordering::Relaxed);
                         let line = String::from_utf8_lossy(&buf);
+                        // Mirror the raw event into the session reasoning
+                        // trace (full tool inputs; screenshots redacted).
+                        if let Some(t) = &trace {
+                            trace_stream_line(t, &line);
+                        }
                         for ev in map_line(&line, &mut st) {
                             let terminal =
                                 matches!(ev, AgentEvent::Complete(_) | AgentEvent::Error(_));
@@ -619,6 +645,83 @@ impl ClaudeCodeAgent {
         if let Some(child) = self.child.lock().unwrap().as_mut() {
             kill_child(child);
         }
+    }
+}
+
+/// Mirror ONE stream-json stdout line into the session reasoning trace (the
+/// content layer of `trace.rs`): assistant text/thinking, tool calls with
+/// FULL inputs (the transcript preview truncates at 120 chars — the trace
+/// must not), image-redacted tool results, the per-turn result with usage,
+/// and engine init. Control-protocol and rate-limit noise is skipped.
+fn trace_stream_line(trace: &super::trace::SessionTrace, line: &str) {
+    use super::trace::redact_images;
+    let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
+        return;
+    };
+    let field = |b: &Value, k: &str| b.get(k).cloned().unwrap_or(Value::Null);
+    match v.get("type").and_then(Value::as_str) {
+        Some("assistant") => {
+            if let Some(blocks) = v.pointer("/message/content").and_then(Value::as_array) {
+                for b in blocks {
+                    match b.get("type").and_then(Value::as_str) {
+                        Some("text") => {
+                            trace.event("assistant_text", json!({ "text": field(b, "text") }));
+                        }
+                        Some("thinking") => {
+                            trace.event(
+                                "assistant_thinking",
+                                json!({ "text": field(b, "thinking") }),
+                            );
+                        }
+                        Some("tool_use") => {
+                            trace.event(
+                                "tool_call",
+                                json!({ "name": field(b, "name"), "input": field(b, "input") }),
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Some("user") => {
+            if let Some(blocks) = v.pointer("/message/content").and_then(Value::as_array) {
+                for b in blocks {
+                    if b.get("type").and_then(Value::as_str) == Some("tool_result") {
+                        trace.event(
+                            "tool_result",
+                            json!({
+                                "tool_use_id": field(b, "tool_use_id"),
+                                "content": b.get("content").map(redact_images).unwrap_or(Value::Null),
+                            }),
+                        );
+                    }
+                }
+            }
+        }
+        Some("result") => {
+            trace.event(
+                "turn_result",
+                json!({
+                    "is_error": field(&v, "is_error"),
+                    "num_turns": field(&v, "num_turns"),
+                    "duration_ms": field(&v, "duration_ms"),
+                    "usage": field(&v, "usage"),
+                    "total_cost_usd": field(&v, "total_cost_usd"),
+                    "text": field(&v, "result"),
+                }),
+            );
+        }
+        Some("system") if v.get("subtype").and_then(Value::as_str) == Some("init") => {
+            trace.event(
+                "engine_init",
+                json!({
+                    "model": field(&v, "model"),
+                    "tools": v.get("tools").and_then(Value::as_array).map(Vec::len).unwrap_or(0),
+                }),
+            );
+        }
+        _ => {}
     }
 }
 
@@ -1477,6 +1580,49 @@ mod tests {
         }
     }
 
+    /// The session reasoning trace must keep FULL tool inputs (the UI preview
+    /// truncates at 120 chars — the trace exists to replay the agent's exact
+    /// queries), strip screenshot base64, and skip control noise.
+    #[test]
+    fn trace_stream_line_full_inputs_and_redacted_images() {
+        let dir = std::env::temp_dir().join(format!(
+            "legion_cc_trace_{}",
+            crate::ai::trace::new_session_id()
+        ));
+        let t = crate::ai::trace::SessionTrace::open_in(&dir).expect("open trace");
+        let long_sql = format!("SELECT {} FROM items", "running.duration, ".repeat(30));
+        assert!(long_sql.len() > 120, "test premise: input beyond UI preview");
+        let line1 = format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"tu1","name":"mcp__legion-viewer__run_query","input":{{"sql":"{long_sql}"}}}},{{"type":"text","text":"Let me check."}}]}}}}"#
+        );
+        trace_stream_line(&t, &line1);
+        let b64 = "/9j/4AAQ".repeat(1000);
+        let line2 = format!(
+            r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"tu1","content":[{{"type":"image","source":{{"type":"base64","media_type":"image/jpeg","data":"{b64}"}}}}]}}]}}}}"#
+        );
+        trace_stream_line(&t, &line2);
+        trace_stream_line(
+            &t,
+            r#"{"type":"result","is_error":false,"num_turns":2,"result":"done","usage":{"output_tokens":42}}"#,
+        );
+        trace_stream_line(&t, r#"{"type":"control_response","response":{}}"#);
+
+        let body = std::fs::read_to_string(&t.path).unwrap();
+        let lines: Vec<Value> = body
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("valid JSONL"))
+            .collect();
+        assert_eq!(lines.len(), 4, "control noise must not be traced: {body}");
+        assert_eq!(lines[0]["kind"], "tool_call");
+        assert_eq!(lines[0]["input"]["sql"].as_str().unwrap(), long_sql);
+        assert_eq!(lines[1]["kind"], "assistant_text");
+        assert_eq!(lines[2]["kind"], "tool_result");
+        assert!(!body.contains("4AAQ"), "screenshot base64 must not reach the trace");
+        assert_eq!(lines[3]["kind"], "turn_result");
+        assert_eq!(lines[3]["usage"]["output_tokens"], 42);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The Stop button's wire line: a well-formed stream-json interrupt
     /// control_request with a unique, recognizable request_id.
     #[test]
@@ -1614,7 +1760,7 @@ mod tests {
         )
         .expect("server");
         let (tx, rx) = mpsc::channel::<AgentEvent>();
-        let agent = ClaudeCodeAgent::spawn(port, &token, "claude-sonnet-4-6", None, tx)
+        let agent = ClaudeCodeAgent::spawn(port, &token, "claude-sonnet-4-6", None, tx, None)
             .expect("spawn claude");
         agent
             .send_turn("Call the overview tool exactly once, then reply with exactly: DONE")
@@ -1710,7 +1856,7 @@ mod tests {
         let canary = std::env::temp_dir().join(format!("cc_live_approval_{}", std::process::id()));
         let _ = std::fs::remove_file(&canary);
         let (tx, rx) = mpsc::channel::<AgentEvent>();
-        let agent = ClaudeCodeAgent::spawn(port, &token, "claude-sonnet-4-6", None, tx)
+        let agent = ClaudeCodeAgent::spawn(port, &token, "claude-sonnet-4-6", None, tx, None)
             .expect("spawn claude");
         agent
             .send_turn(&format!(
@@ -1777,6 +1923,7 @@ mod tests {
             Some(scratch.clone()),
             None,
             tx,
+            None,
         )
         .unwrap();
         agent.send_turn("hello from the test").unwrap();

@@ -1,16 +1,26 @@
 //! Structured tracing for the AI agent loop.
 //!
-//! Emits one JSON Line per closed span to `{out_dir}/agent_traces/agent.jsonl`.
-//! Span hierarchy: `agent.run` → `agent.turn` → {`agent.tool_call`, `agent.claude_api`}.
+//! Two independent layers:
 //!
-//! This module only wires up the subscriber; the actual `info_span!`/`record`
-//! calls live in `agent.rs`.
+//! 1. **Span timings** ([`init_subscriber`], OPT-IN via
+//!    `LEGION_PROF_AI_TRACE_DIR` + the `agent.*` spans in `agent.rs`): one JSON
+//!    Line per closed span to `{out_dir}/agent_traces/agent.jsonl`.
+//! 2. **Session reasoning transcripts** ([`SessionTrace`], ON BY DEFAULT):
+//!    one JSONL file per chat session recording CONTENT — user turns,
+//!    assistant narration, tool calls with full inputs, image-redacted tool
+//!    results, per-turn usage — so the team can replay how a diagnosis was
+//!    reached and improve the product. `LEGION_PROF_AI_TRACE=off` disables;
+//!    `LEGION_PROF_AI_TRACE_DIR` overrides the directory (default
+//!    `~/.legion_prof_viewer/traces`). Best-effort everywhere: any I/O failure
+//!    silently disables tracing rather than disturbing the session.
 
 use std::fs::{self, OpenOptions};
-use std::path::Path;
-use std::sync::OnceLock;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
+use serde_json::{Value, json};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
@@ -82,6 +92,124 @@ pub fn new_session_id() -> String {
     format!("{nanos:x}-{tid_hex}")
 }
 
+/// One JSONL reasoning transcript per chat session (see module docs). Shared
+/// as `Arc` between the panel (user turns, stop clicks, turn outcomes) and the
+/// Claude Code stdout pump (assistant text, tool calls/results, usage).
+pub struct SessionTrace {
+    file: Mutex<fs::File>,
+    /// Where this session's transcript lives (shown once on stderr).
+    pub path: PathBuf,
+}
+
+impl SessionTrace {
+    /// Trace directory per the environment; `None` = tracing disabled.
+    /// Pure so tests can drive it: `toggle` = `LEGION_PROF_AI_TRACE`,
+    /// `dir_override` = `LEGION_PROF_AI_TRACE_DIR`, `home` = `$HOME`.
+    fn resolve_dir(
+        toggle: Option<&str>,
+        dir_override: Option<&str>,
+        home: Option<&Path>,
+    ) -> Option<PathBuf> {
+        if matches!(
+            toggle.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+            Some("off" | "0" | "false" | "no")
+        ) {
+            return None;
+        }
+        if let Some(d) = dir_override.map(str::trim).filter(|d| !d.is_empty()) {
+            return Some(PathBuf::from(d));
+        }
+        home.map(|h| h.join(".legion_prof_viewer").join("traces"))
+    }
+
+    /// Open a session transcript in `dir` (creating it). `None` on any I/O
+    /// failure — tracing is best-effort, never a startup blocker.
+    pub fn open_in(dir: &Path) -> Option<Arc<Self>> {
+        fs::create_dir_all(dir).ok()?;
+        let path = dir.join(format!("session_{}.jsonl", new_session_id()));
+        let file = OpenOptions::new()
+            .create_new(true)
+            .append(true)
+            .open(&path)
+            .ok()?;
+        Some(Arc::new(SessionTrace {
+            file: Mutex::new(file),
+            path,
+        }))
+    }
+
+    /// Open per the environment (default ON; see module docs). `None` when
+    /// disabled or the directory is unusable.
+    pub fn open_default() -> Option<Arc<Self>> {
+        let toggle = std::env::var("LEGION_PROF_AI_TRACE").ok();
+        let dir_override = std::env::var("LEGION_PROF_AI_TRACE_DIR").ok();
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from);
+        let dir = Self::resolve_dir(toggle.as_deref(), dir_override.as_deref(), home.as_deref())?;
+        Self::open_in(&dir)
+    }
+
+    /// Append one event line: `{"ts_ms":…,"kind":…,…payload}`. Object payloads
+    /// merge their fields into the line; anything else lands under `"data"`.
+    /// Write errors are swallowed (best-effort).
+    pub fn event(&self, kind: &str, payload: Value) {
+        let ts_ms = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let mut line = json!({ "ts_ms": ts_ms, "kind": kind });
+        match payload {
+            Value::Object(map) => {
+                for (k, v) in map {
+                    line[k] = v;
+                }
+            }
+            Value::Null => {}
+            other => line["data"] = other,
+        }
+        if let Ok(mut f) = self.file.lock() {
+            let _ = writeln!(f, "{line}");
+        }
+    }
+}
+
+/// Deep-copy `v` with every image content block's base64 payload replaced by a
+/// short note — both the Claude API shape (`source.data`) and the MCP shape
+/// (`data` + `mimeType`). A screenshot echo is ~400 KB of base64; the trace
+/// keeps the fact that an image was returned, not the bytes.
+pub fn redact_images(v: &Value) -> Value {
+    match v {
+        Value::Object(map) => {
+            if map.get("type").and_then(Value::as_str) == Some("image") {
+                let media = v
+                    .pointer("/source/media_type")
+                    .or_else(|| map.get("mimeType"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("image");
+                let b64_len = v
+                    .pointer("/source/data")
+                    .or_else(|| map.get("data"))
+                    .and_then(Value::as_str)
+                    .map(str::len)
+                    .unwrap_or(0);
+                let kb = (b64_len as f64 * 3.0 / 4.0 / 1024.0).round() as u64;
+                return json!({
+                    "type": "image",
+                    "note": format!("[{media} ~{kb} KB - base64 elided from trace]"),
+                });
+            }
+            Value::Object(
+                map.iter()
+                    .map(|(k, val)| (k.clone(), redact_images(val)))
+                    .collect(),
+            )
+        }
+        Value::Array(items) => Value::Array(items.iter().map(redact_images).collect()),
+        other => other.clone(),
+    }
+}
+
 /// Record token-usage fields from a Claude API `usage` JSON object onto the
 /// current span. Missing fields default to 0.
 pub fn record_usage(span: &tracing::Span, usage: &serde_json::Value) {
@@ -113,6 +241,72 @@ mod tests {
         assert!(!a.is_empty());
         assert!(!b.is_empty());
         assert_ne!(a, b, "session IDs should differ across calls");
+    }
+
+    /// Env resolution: kill-switch beats everything, explicit dir beats the
+    /// home default, home default is the documented path, no home -> None.
+    #[test]
+    fn session_trace_resolve_dir_precedence() {
+        let home = Path::new("/home/u");
+        for off in ["off", "0", "false", "no", " OFF "] {
+            assert_eq!(
+                SessionTrace::resolve_dir(Some(off), Some("/x"), Some(home)),
+                None,
+                "toggle {off:?} must disable"
+            );
+        }
+        assert_eq!(
+            SessionTrace::resolve_dir(None, Some("/custom/dir"), Some(home)),
+            Some(PathBuf::from("/custom/dir"))
+        );
+        assert_eq!(
+            SessionTrace::resolve_dir(Some("on"), None, Some(home)),
+            Some(home.join(".legion_prof_viewer").join("traces"))
+        );
+        assert_eq!(SessionTrace::resolve_dir(None, None, None), None);
+    }
+
+    /// Events land as parseable JSONL with ts_ms + kind, object payloads
+    /// merged flat.
+    #[test]
+    fn session_trace_writes_parseable_jsonl() {
+        let dir = std::env::temp_dir().join(format!("legion_trace_test_{}", new_session_id()));
+        let t = SessionTrace::open_in(&dir).expect("open");
+        t.event("user_turn", json!({ "text": "why slow?", "backend": "claude-code" }));
+        t.event("stop_click", Value::Null);
+        let body = fs::read_to_string(&t.path).unwrap();
+        let lines: Vec<Value> = body
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("valid JSON line"))
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["kind"], "user_turn");
+        assert_eq!(lines[0]["text"], "why slow?");
+        assert!(lines[0]["ts_ms"].as_u64().unwrap() > 0);
+        assert_eq!(lines[1]["kind"], "stop_click");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Image blocks lose their base64 in both API and MCP shapes; sibling
+    /// text blocks survive verbatim.
+    #[test]
+    fn redact_images_strips_base64_keeps_text() {
+        let v = json!([{
+            "type": "tool_result",
+            "content": [
+                { "type": "image",
+                  "source": { "type": "base64", "media_type": "image/jpeg", "data": "/9j/AAAA".repeat(512) } },
+                { "type": "image", "data": "iVBOR".repeat(100), "mimeType": "image/png" },
+                { "type": "text", "text": "Visible range 0-100ms" }
+            ]
+        }]);
+        let r = redact_images(&v);
+        let s = r.to_string();
+        assert!(!s.contains("/9j/"), "API-shape base64 must be gone");
+        assert!(!s.contains("iVBOR"), "MCP-shape base64 must be gone");
+        assert!(s.contains("base64 elided"));
+        assert!(s.contains("image/jpeg") && s.contains("image/png"));
+        assert!(s.contains("Visible range 0-100ms"));
     }
 
     #[test]

@@ -27,6 +27,7 @@ timeline itself.
 - [Engines and authentication](#engines-and-authentication)
 - [Using your own agent over MCP (BYOA)](#using-your-own-agent-over-mcp-byoa)
 - [Optional knowledge wiki](#optional-knowledge-wiki)
+- [Session traces (test program)](#session-traces-test-program)
 - [Security model](#security-model)
 - [Feature flags](#feature-flags)
 - [Troubleshooting](#troubleshooting)
@@ -223,6 +224,36 @@ diagnosing. Point `--wiki <dir>` at a corpus; `wiki-legion/wiki` relative to
 the launch directory is auto-detected. The corpus used during development is
 published separately — see this fork's release notes.
 
+## Session traces (test program)
+
+While this fork is in its evaluation phase, the viewer records a **local
+reasoning transcript** of each chat session so the team can replay how a
+diagnosis was reached and improve the product. On the first question of a
+session it prints where the file lives:
+
+```
+[legion-ai] session trace: ~/.legion_prof_viewer/traces/session_<id>.jsonl
+            (set LEGION_PROF_AI_TRACE=off to disable)
+```
+
+**What's recorded** (JSON Lines, one event per line): your prompts, the
+agent's narration and thinking, every tool call **with its full input**
+(e.g. the exact SQL), tool results, per-turn token usage/cost, stop clicks,
+and errors. **What's not**: screenshot image bytes are replaced with a
+`[image … KB elided]` note, and nothing is uploaded anywhere — the trace is a
+plain local file.
+
+- **Disable**: `LEGION_PROF_AI_TRACE=off` (or `0`/`false`).
+- **Relocate**: `LEGION_PROF_AI_TRACE_DIR=<dir>`.
+- **Share with the team**: zip your `~/.legion_prof_viewer/traces/` folder and
+  attach it to your feedback. Traces contain your prompts, profile-derived
+  numbers, and any source snippets the agent read — skim before sharing if
+  your application code is sensitive.
+
+(Separately, `LEGION_PROF_AI_TRACE_DIR` also enables the low-level span-timing
+log for the built-in engine — `agent_traces/agent.jsonl` — mainly of interest
+to maintainers.)
+
 ## Security model
 
 Short version (full details in [SECURITY.md](SECURITY.md)):
@@ -249,7 +280,8 @@ Short version (full details in [SECURITY.md](SECURITY.md)):
 | `--features viewer-mcp` | + in-viewer MCP server + the Claude Code engine (implies `ai,duckdb`) — **the recommended build** |
 | `--features eval` | + the oracle-graded eval harness (`eval` bin; maintainers) |
 
-Diagnostics tracing is opt-in via `LEGION_PROF_AI_TRACE_DIR`.
+Session reasoning traces are ON by default during the test program — see
+[Session traces](#session-traces-test-program).
 
 ## Troubleshooting
 
