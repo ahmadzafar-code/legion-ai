@@ -3747,6 +3747,9 @@ impl eframe::App for ProfApp {
                 // Right-aligned Legion AI toggle button
                 #[cfg(feature = "ai")]
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Gap so the button doesn't sit flush against the window edge
+                    // (right_to_left => this space reserves the right margin).
+                    ui.add_space(12.0);
                     // A real button: filled Legion red while the panel is open,
                     // grey otherwise. (No emoji — 🤖 was a tofu box in egui's
                     // fonts.) #EC3937 is the flat fill of the Legion brick logo
@@ -3772,7 +3775,9 @@ impl eframe::App for ProfApp {
                                     egui::Color32::from_rgb(190, 195, 205),
                                 ))
                                 .rounding(0.0)
-                                .min_size(egui::vec2(0.0, 28.0)),
+                                // Wider min-size so the red band spreads well past
+                                // the text instead of hugging it.
+                                .min_size(egui::vec2(170.0, 30.0)),
                         )
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
                         .on_hover_text("Toggle Legion AI")
