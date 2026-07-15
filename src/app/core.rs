@@ -3247,6 +3247,11 @@ impl ProfApp {
             });
         }
 
+        // Bound the content width: this window auto-sizes, and greedy widgets
+        // (a full-width `separator`, a table's `remainder` column) would
+        // otherwise stretch it across the whole screen.
+        ui.set_max_width(600.0);
+
         TableBuilder::new(ui)
             .striped(true)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
