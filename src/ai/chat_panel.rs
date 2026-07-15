@@ -22,10 +22,17 @@ type EventChannel = Arc<Mutex<Option<mpsc::Receiver<AgentEvent>>>>;
 
 // ── Public types ────────────────────────────────────────────────────────────
 
-/// The kind of chat message, controlling rendering style.
 /// Model the built-in API engine uses. The Claude Code backend deliberately
 /// passes no model (the user's own `claude` configuration decides).
 const NATIVE_MODEL: &str = "claude-sonnet-4-6";
+
+/// Whether the built-in raw-HTTP API engine (`AgentSession` in `agent.rs`) is
+/// offered as a fallback. Currently DISABLED: Legion AI runs exclusively on the
+/// user's own Claude Code. The engine's code is retained intact (not removed) so
+/// this is a one-line re-enable — flip to `true` and the fallback + API-key UI
+/// return. While disabled, a user without Claude Code is told to install it
+/// rather than being offered an API-key path.
+const NATIVE_ENGINE_ENABLED: bool = false;
 
 #[derive(Clone, Debug)]
 pub enum ChatMessageKind {
@@ -1006,8 +1013,23 @@ impl ChatPanel {
             return;
         }
         match self.resolve_backend() {
-            ChatBackendKind::Native => self.trigger_native(user_query),
             ChatBackendKind::ClaudeCode => self.trigger_claude_code(user_query),
+            ChatBackendKind::Native if NATIVE_ENGINE_ENABLED => self.trigger_native(user_query),
+            // Native disabled: Claude Code is the only engine. Tell a user
+            // without it to install it instead of falling back to the API loop.
+            ChatBackendKind::Native => {
+                let reason = self
+                    .claude_unavailable
+                    .as_deref()
+                    .unwrap_or("Claude Code (`claude`) was not found on PATH");
+                self.add_message(
+                    ChatMessageKind::System,
+                    format!(
+                        "Legion AI runs on your Claude Code, which isn't available: {reason}. \
+                         Install Claude Code and run `claude auth login`, then try again."
+                    ),
+                );
+            }
         }
     }
 
@@ -1357,49 +1379,63 @@ impl ChatPanel {
             ui.label(egui::RichText::new(vis_label).size(13.5).color(vis_color))
                 .on_hover_text("Screenshot + zoom always available");
 
-            // Engine + API key status. The Claude Code backend needs no key, so
-            // the key warning only nags on the API engine.
+            // Engine status. Claude Code needs no key. With the native API engine
+            // disabled, a missing Claude Code shows "⚠ Claude Code required"
+            // instead of an API-key prompt for an engine that won't run.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let engine = self.resolved_backend.unwrap_or(ChatBackendKind::Native);
-                let engine_label = match engine {
-                    ChatBackendKind::ClaudeCode => "Claude Code",
-                    ChatBackendKind::Native => "API",
-                };
-                // When we fell back to the API engine because Claude Code failed
-                // preflight, say so on hover — otherwise the fallback looks like
-                // an arbitrary key demand.
-                let engine_hover = match (engine, self.claude_unavailable.as_deref()) {
-                    (ChatBackendKind::Native, Some(reason)) => {
-                        format!("Using the built-in API engine — Claude Code unavailable: {reason}")
-                    }
-                    (ChatBackendKind::Native, None) => {
-                        "Using the built-in API engine (Anthropic API key).".to_string()
-                    }
-                    (ChatBackendKind::ClaudeCode, _) => {
-                        "Using your Claude Code — no API key needed.".to_string()
-                    }
-                };
-                if has_key || engine == ChatBackendKind::ClaudeCode {
+                if engine == ChatBackendKind::ClaudeCode {
                     ui.label(
-                        egui::RichText::new(engine_label)
+                        egui::RichText::new("Claude Code")
                             .small()
                             .color(egui::Color32::from_rgb(100, 100, 100)),
                     )
-                    .on_hover_text(&engine_hover);
-                } else {
-                    let key_btn = ui
-                        .add(
-                            egui::Button::new(
-                                egui::RichText::new("⚠ API key")
-                                    .small()
-                                    .color(egui::Color32::from_rgb(200, 120, 20)),
-                            )
-                            .frame(false),
+                    .on_hover_text("Using your Claude Code — no API key needed.");
+                } else if NATIVE_ENGINE_ENABLED {
+                    // API-engine fallback (only reachable when re-enabled).
+                    let hover = match self.claude_unavailable.as_deref() {
+                        Some(reason) => format!(
+                            "Using the built-in API engine — Claude Code unavailable: {reason}"
+                        ),
+                        None => "Using the built-in API engine (Anthropic API key).".to_string(),
+                    };
+                    if has_key {
+                        ui.label(
+                            egui::RichText::new("API")
+                                .small()
+                                .color(egui::Color32::from_rgb(100, 100, 100)),
                         )
-                        .on_hover_text(&engine_hover);
-                    if key_btn.clicked() {
-                        self.api_key_popup_open = true;
+                        .on_hover_text(&hover);
+                    } else {
+                        let key_btn = ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new("⚠ API key")
+                                        .small()
+                                        .color(egui::Color32::from_rgb(200, 120, 20)),
+                                )
+                                .frame(false),
+                            )
+                            .on_hover_text(&hover);
+                        if key_btn.clicked() {
+                            self.api_key_popup_open = true;
+                        }
                     }
+                } else {
+                    // Native disabled and Claude Code unavailable.
+                    let reason = self
+                        .claude_unavailable
+                        .as_deref()
+                        .unwrap_or("`claude` not found on PATH");
+                    ui.label(
+                        egui::RichText::new("⚠ Claude Code required")
+                            .small()
+                            .color(egui::Color32::from_rgb(200, 120, 20)),
+                    )
+                    .on_hover_text(format!(
+                        "Legion AI runs on your Claude Code: {reason}. Install it and run \
+                         `claude auth login`."
+                    ));
                 }
             });
         });
@@ -1542,17 +1578,29 @@ impl ChatPanel {
         // backend's state: not signed in -> the one-time login step; signed
         // in -> how to connect the application source. Heuristic check only
         // (the first turn's 401 stays the authoritative error).
-        if self.resolved_backend == Some(ChatBackendKind::ClaudeCode) {
-            let authed = self.claude_auth_cached();
+        let hint: Option<String> = if self.resolved_backend == Some(ChatBackendKind::ClaudeCode) {
+            Some(if self.claude_auth_cached() {
+                "Use + → Connect Code. It allows the AI agent to read your code.".to_string()
+            } else {
+                "One-time setup: Claude Code isn't signed in yet. Run `claude auth login` \
+                 in a terminal, then come back and ask away."
+                    .to_string()
+            })
+        } else if !NATIVE_ENGINE_ENABLED {
+            // Claude Code unavailable and the API fallback is disabled — point
+            // the user at installing Claude Code rather than leaving them stuck.
+            Some(
+                "Legion AI runs on your Claude Code. Install it and run \
+                 `claude auth login`, then reopen this profile."
+                    .to_string(),
+            )
+        } else {
+            None
+        };
+        if let Some(hint) = hint {
             ui.add_space(18.0);
             ui.vertical_centered(|ui| {
                 ui.set_max_width(card_w);
-                let hint = if authed {
-                    "Use + → Connect Code. It allows the AI agent to read your code."
-                } else {
-                    "One-time setup: Claude Code isn't signed in yet. Run \
-                     `claude auth login` in a terminal, then come back and ask away."
-                };
                 ui.add(
                     egui::Label::new(
                         egui::RichText::new(hint)

@@ -62,3 +62,8 @@
 - [ ] Filter channel lines by source/target memory (or memory kind)
 - [ ] Support sorting of channels by destination memory
 - [ ] Re-number different kinds of processors/memories starting from 0 (e.g. first GPU should be g0 rather than g7)
+
+## Legion AI — deferred (Phase 1, 2026-07-15)
+- [ ] Take subprocess work off the egui frame path (concurrency-lifecycle#3): background `preflight_claude`, detached reaper on ↺, condvar-wakeable watchdog instead of the 500ms sleep tick.
+- [ ] Live DB-path switching (ux-product#3): `+ → Connect DuckDB…` mid-session should re-point the MCP server (mirror the SharedCodeRoot handle) instead of querying the snapshot-at-spawn DB.
+- [ ] Schema-driven overview (ux-product#4): derive the overview's Schema section from `information_schema` so an old `legion_prof duckdb` doesn't silently mismatch.
