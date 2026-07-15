@@ -86,7 +86,7 @@ pub fn new_session_id() -> String {
     let tid_suffix = format!("{:?}", std::thread::current().id());
     let tid_hex: String = tid_suffix
         .chars()
-        .filter(|c| c.is_ascii_hexdigit())
+        .filter(char::is_ascii_hexdigit)
         .take(4)
         .collect();
     format!("{nanos:x}-{tid_hex}")
@@ -150,7 +150,7 @@ impl SessionTrace {
     }
 
     /// Create `dir` (and parents) owner-only (`0700`) on unix; a plain
-    /// create_dir_all elsewhere. Idempotent. On unix the mode is re-applied
+    /// `create_dir_all` elsewhere. Idempotent. On unix the mode is re-applied
     /// UNCONDITIONALLY after creation: a traces dir left `0755` by an earlier
     /// build (before this hardening) would otherwise keep its loose mode, and a
     /// `0700` dir blocks others from traversing in to read even the older

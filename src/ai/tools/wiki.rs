@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// Default per-read character budget for `wiki_read`. Chosen from the corpus size
-/// distribution (median ~5.7 KB, p90 ~7.2 KB, max ~40 KB): 12_000 chars (~3K
+/// distribution (median ~5.7 KB, p90 ~7.2 KB, max ~40 KB): `12_000` chars (~3K
 /// tokens) returns the vast majority of pages whole and caps only the handful of
 /// outliers (the application pages + the auto-generated meta lint report).
 const WIKI_READ_DEFAULT_MAX_CHARS: usize = 12_000;
@@ -216,15 +216,12 @@ fn wiki_corpus(wiki_root: &str) -> Result<Arc<Vec<WikiPage>>, String> {
     }
     let root = Path::new(wiki_root);
     if !root.is_dir() {
-        return Err(format!("Wiki root '{}' is not a directory.", wiki_root));
+        return Err(format!("Wiki root '{wiki_root}' is not a directory."));
     }
     let mut pages = Vec::new();
     collect_wiki_pages(root, root, &mut pages);
     if pages.is_empty() {
-        return Err(format!(
-            "No .md pages found under wiki root '{}'.",
-            wiki_root
-        ));
+        return Err(format!("No .md pages found under wiki root '{wiki_root}'."));
     }
     pages.sort_by(|a, b| a.path.cmp(&b.path));
     let arc = Arc::new(pages);
@@ -360,7 +357,7 @@ pub fn wiki_search(
     if q.is_empty() {
         return Err("wiki_search requires a non-empty query.".into());
     }
-    let tag_lc = tag.map(|t| t.to_lowercase());
+    let tag_lc = tag.map(str::to_lowercase);
 
     let mut scored: Vec<(i64, &WikiPage)> = corpus
         .iter()

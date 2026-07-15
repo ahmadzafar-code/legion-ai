@@ -27,7 +27,7 @@ fn format_size(bytes: u64) -> String {
     } else if bytes >= 1024 {
         format!("{:.1}KB", bytes as f64 / 1024.0)
     } else {
-        format!("{}B", bytes)
+        format!("{bytes}B")
     }
 }
 
@@ -120,10 +120,10 @@ fn recursive_file_tree(code_root: &str) -> Result<String, String> {
 
     let root = Path::new(code_root);
     if !root.is_dir() {
-        return Err(format!("'{}' is not a directory.", code_root));
+        return Err(format!("'{code_root}' is not a directory."));
     }
 
-    let mut output = format!("Files in `{}`:\n", code_root);
+    let mut output = format!("Files in `{code_root}`:\n");
     let mut file_count = 0usize;
     walk_dir_tree(root, "", 0, 6, &mut output, &mut file_count, 500);
 

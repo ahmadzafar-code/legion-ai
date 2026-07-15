@@ -24,7 +24,7 @@
 pub const MCP_SERVER_NAME: &str = "legion-viewer";
 
 /// Allow-list for `--allowedTools`: every tool the in-viewer MCP server can
-/// advertise (data + source + wiki + visual + get_selection), EXCEPT
+/// advertise (data + source + wiki + visual + `get_selection`), EXCEPT
 /// `final_answer` — that is the eval grader's terminal tool and has no place in
 /// an interactive chat. An unlisted tool is not auto-approved; in `-p`
 /// non-interactive mode an unapproved call is denied with feedback rather than
@@ -65,7 +65,7 @@ pub const ALLOWED_TOOLS: &[&str] = &[
 /// frictionless, no approval prompt.
 pub const READONLY_BUILTINS: &[&str] = &["Read", "Glob", "Grep", "BashOutput", "TodoWrite"];
 
-/// Action/egress built-ins: available but gated PER CALL by the PreToolUse hook →
+/// Action/egress built-ins: available but gated PER CALL by the `PreToolUse` hook →
 /// `/approve` → the panel's Deny / Allow / Always-allow dialog. NOT in
 /// `--allowedTools` — approval comes solely from the hook decision (verified
 /// empirically: a hook allow runs the tool, and a deny is non-fatal to the
@@ -288,7 +288,7 @@ pub fn preflight_claude() -> Result<String, String> {
 /// empirically against `claude` 2.1.x).
 ///
 /// OWNERSHIP (load-bearing): hold this behind `Arc<...>` inside
-/// `Arc<Mutex<Option<Arc<ClaudeCodeAgent>>>>` on the ChatPanel. `ChatPanel` is
+/// `Arc<Mutex<Option<Arc<ClaudeCodeAgent>>>>` on the `ChatPanel`. `ChatPanel` is
 /// `Clone` (Arc-shared handles), so the kill/reap lives in THIS type's `Drop`
 /// (runs when the last Arc drops), never on the panel struct — a throwaway
 /// panel clone must not kill the shared child.
@@ -306,7 +306,7 @@ pub struct ClaudeCodeAgent {
     /// Viewer-owned neutral scratch cwd — never the profiled application's
     /// source tree, whose `.claude/` could inject settings; removed on Drop.
     cwd_dir: Option<PathBuf>,
-    /// Viewer-owned `--settings` file carrying the PreToolUse approval hook
+    /// Viewer-owned `--settings` file carrying the `PreToolUse` approval hook
     /// (0600 — references the curl-config file below, NOT the token); deleted on Drop.
     settings_path: Option<PathBuf>,
     /// Viewer-owned `0600` curl-config file holding the bearer token OUT of the
@@ -890,7 +890,7 @@ impl Drop for ClaudeCodeAgent {
 
 // ── The approval bridge (PreToolUse hook → /approve → egui dialog) ──────────
 
-/// PreToolUse hook timeout (seconds) — the ceiling for a human to answer the
+/// `PreToolUse` hook timeout (seconds) — the ceiling for a human to answer the
 /// dialog. Fails CLOSED on expiry (verified empirically: a hook timeout behaves
 /// as deny/block and the turn continues), but the parent still answers first via
 /// [`APPROVAL_DEADLINE`] so the model gets a real reason instead of a hook error.
@@ -911,7 +911,7 @@ fn hook_curl_config(token: &str) -> String {
     format!("header = \"Authorization: Bearer {escaped}\"\n")
 }
 
-/// Viewer-owned `--settings` JSON: a PreToolUse hook matching exactly the
+/// Viewer-owned `--settings` JSON: a `PreToolUse` hook matching exactly the
 /// hook-gated tier, whose command POSTs the hook's stdin (the tool-call JSON) to
 /// this server's `/approve` route and emits the server's decision JSON on stdout.
 /// `curl` ships with macOS, Linux distros, and Windows 10+. `--max-time` bounds
@@ -949,7 +949,7 @@ pub enum ApprovalDecision {
 /// never silently auto-approve in a future session; rules die with ↺/restart).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AllowRule {
-    /// Always allow every call of one non-Bash tool (Edit / Write / WebFetch / …) —
+    /// Always allow every call of one non-Bash tool (Edit / Write / `WebFetch` / …) —
     /// keyed per tool, matching Claude Desktop's always-allow granularity.
     Tool(String),
     /// Always allow Bash commands whose FIRST TOKEN equals this prefix (e.g.
@@ -986,7 +986,7 @@ pub struct PendingApproval {
 
 /// The cross-thread seam between the `/approve` HTTP handler (blocks awaiting a
 /// verdict) and the egui panel (renders the dialog, delivers the verdict).
-/// Shared as `Arc`: viewer_mcp's server thread + the ChatPanel hold clones.
+/// Shared as `Arc`: `viewer_mcp`'s server thread + the `ChatPanel` hold clones.
 #[derive(Default)]
 pub struct ApprovalBroker {
     pending: Mutex<Vec<PendingApproval>>,
@@ -1046,7 +1046,7 @@ impl ApprovalBroker {
     }
 
     /// The panel's per-frame poll: the oldest pending request, if any —
-    /// (id, tool_name, tool_input) for the dialog.
+    /// (id, `tool_name`, `tool_input`) for the dialog.
     pub fn front(&self) -> Option<(u64, String, Value)> {
         self.pending
             .lock()
@@ -1115,7 +1115,7 @@ impl ApprovalBroker {
     }
 }
 
-/// The PreToolUse decision JSON the hook must print on stdout (documented shape;
+/// The `PreToolUse` decision JSON the hook must print on stdout (documented shape;
 /// both branches verified live against `claude` 2.1.x).
 pub fn hook_decision_json(decision: ApprovalDecision) -> Value {
     let (verdict, reason) = match decision {
@@ -1271,8 +1271,8 @@ struct MapState {
 /// emptied when it merely repeats the last interim message.
 ///
 /// Message shapes are the ones OBSERVED live from `claude`'s stream-json
-/// output: `system(init)`, `rate_limit_event`, `assistant` (tool_use /
-/// text blocks), `user` (tool_result blocks), `result` (with `is_error`,
+/// output: `system(init)`, `rate_limit_event`, `assistant` (`tool_use` /
+/// text blocks), `user` (`tool_result` blocks), `result` (with `is_error`,
 /// `api_error_status`, `result`, `num_turns`), `control_*`.
 fn map_line(line: &str, st: &mut MapState) -> Vec<AgentEvent> {
     let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {

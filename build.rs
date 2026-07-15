@@ -2,7 +2,7 @@
 //! the exact commit. `git describe --always --dirty` yields the short commit
 //! (plus `-dirty` for uncommitted changes); on a shallow CI clone it still
 //! returns the SHA, and with no `.git` (a source tarball, `cargo install` from
-//! crates.io) the command fails and the code falls back to CARGO_PKG_VERSION.
+//! crates.io) the command fails and the code falls back to `CARGO_PKG_VERSION`.
 use std::process::Command;
 
 fn main() {

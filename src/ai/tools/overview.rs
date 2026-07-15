@@ -10,7 +10,7 @@ use super::query::execute_run_query_raw;
 /// Walks `critical_path.item_uid` edges from `start_uid` toward the root blocker,
 /// carrying a visited-uid `path` array. The `list_contains` guard plus the
 /// `cycle` flag are MANDATORY: there is no self-loop, but real 2-cycles exist
-/// (e.g. 2220↔1481), and DuckDB's recursive UNION cannot dedup them because the
+/// (e.g. 2220↔1481), and `DuckDB`'s recursive UNION cannot dedup them because the
 /// growing `path`/`depth` keeps rows distinct — a depth cap alone would walk
 /// 100k+ rows. The depth cap (64) is a secondary backstop.
 ///
@@ -24,7 +24,7 @@ use super::query::execute_run_query_raw;
 /// WITHOUT a trailing `;` so it composes as a subquery and passes the
 /// `SELECT/WITH` prefix guard in [`execute_run_query_raw`].
 ///
-/// Data-Size Evidence (MiniAero guardrail): distinct channel-copy sizes with
+/// Data-Size Evidence (`MiniAero` guardrail): distinct channel-copy sizes with
 /// UNIT-AWARE parsing of the suffixed `size` strings ("96 B", "76.000 KiB",
 /// "175.781 MiB", "1.2 GiB" — the column is TEXT, not numeric). Dedup by
 /// `item_uid` (the 523× trap); `TRY_CAST` so a malformed size becomes NULL, not
@@ -48,7 +48,7 @@ FROM sized WHERE mib IS NOT NULL";
 
 /// Companion to [`DATA_SIZE_EVIDENCE_SQL`]: the 3 largest DISTINCT copy sizes
 /// with counts — the per-copy figures a sizing verdict must reconcile against
-/// (e.g. MiniAero's 175.8 MiB ×56 ghost exchanges refute "under-sized mesh").
+/// (e.g. `MiniAero`'s 175.8 MiB ×56 ghost exchanges refute "under-sized mesh").
 #[cfg(feature = "duckdb")]
 pub const DATA_SIZE_TOP_SQL: &str = "WITH sized AS ( \
   SELECT DISTINCT item_uid, size, \
@@ -142,7 +142,7 @@ fn overview_processor_hierarchy(duckdb_path: &str, out: &mut String) {
          STRING_AGG(entry_slug, ', ' ORDER BY entry_slug) AS slugs \
          FROM entries GROUP BY parent_slug, type ORDER BY parent_slug, type",
     )
-    .unwrap_or_else(|e| format!("[{{\"error\": {:?}}}]", e));
+    .unwrap_or_else(|e| format!("[{{\"error\": {e:?}}}]"));
     out.push_str(&format!("## Processor Hierarchy\n{hier}\n\n"));
 }
 
@@ -154,15 +154,15 @@ fn overview_timeline_bounds(duckdb_path: &str, out: &mut String) {
         "SELECT MIN(lifetime.start) AS earliest_ns, MAX(lifetime.stop) AS latest_ns, \
          ROUND((MAX(lifetime.stop) - MIN(lifetime.start)) / 1e6, 1) AS span_ms FROM items",
     )
-    .unwrap_or_else(|e| format!("[{{\"error\": {:?}}}]", e));
+    .unwrap_or_else(|e| format!("[{{\"error\": {e:?}}}]"));
     out.push_str(&format!("## Timeline Bounds\n{bounds}\n\n"));
 }
 
 /// Overview section: Task distribution.
 ///
 /// Top-10 headline — orientation, not an exhaustive distribution; the
-/// agent uses run_query for the full GROUP BY when it needs it. The LIMIT is
-/// wrapped in a subquery because execute_run_query_raw strips a TRAILING
+/// agent uses `run_query` for the full GROUP BY when it needs it. The LIMIT is
+/// wrapped in a subquery because `execute_run_query_raw` strips a TRAILING
 /// `LIMIT n` and re-applies its own 50-row cap — so an un-wrapped `LIMIT 10`
 /// would still return up to 50 task types.
 #[cfg(feature = "duckdb")]
@@ -177,7 +177,7 @@ fn overview_task_distribution(duckdb_path: &str, out: &mut String) {
            GROUP BY title ORDER BY cnt DESC LIMIT 10\
          ) s",
     )
-    .unwrap_or_else(|e| format!("[{{\"error\": {:?}}}]", e));
+    .unwrap_or_else(|e| format!("[{{\"error\": {e:?}}}]"));
     out.push_str(&format!("## Top Task Types (by count, top 10)\n{dist}\n\n"));
 }
 
@@ -189,7 +189,7 @@ fn overview_slots_by_kind(duckdb_path: &str, out: &mut String) {
         "SELECT parent_slug, COUNT(*) AS slot_cnt FROM entries WHERE type = 'slot' \
          GROUP BY parent_slug ORDER BY parent_slug",
     )
-    .unwrap_or_else(|e| format!("[{{\"error\": {:?}}}]", e));
+    .unwrap_or_else(|e| format!("[{{\"error\": {e:?}}}]"));
     out.push_str(&format!("## Slots by Kind\n{slots}\n\n"));
 }
 
@@ -200,7 +200,7 @@ fn overview_slots_by_kind(duckdb_path: &str, out: &mut String) {
 /// The Schema section already lists the columns; a 4-column projection still
 /// shows the populated STRUCT SHAPE (a lifecycle struct + a cross-ref struct)
 /// without the dump. Full rows are one `run_query` away.
-/// The inner LIMIT 1 is wrapped in a subquery: execute_run_query_raw strips a
+/// The inner LIMIT 1 is wrapped in a subquery: `execute_run_query_raw` strips a
 /// TRAILING `LIMIT n` and re-applies its 50-row cap, so a bare `... LIMIT 1`
 /// would return 50 FULL rows (the ~63 KB dump).
 #[cfg(feature = "duckdb")]
@@ -211,7 +211,7 @@ fn overview_sample_item(duckdb_path: &str, out: &mut String) {
            SELECT * FROM items WHERE running IS NOT NULL LIMIT 1\
          ) s",
     )
-    .unwrap_or_else(|e| format!("[{{\"error\": {:?}}}]", e));
+    .unwrap_or_else(|e| format!("[{{\"error\": {e:?}}}]"));
     out.push_str(&format!(
         "## Sample Item Row (shape; SELECT * via run_query)\n{sample}\n\n"
     ));
@@ -236,29 +236,37 @@ fn overview_profile_classification(duckdb_path: &str, out: &mut String) {
                 if let Some(row) = parsed.first() {
                     let gpu = row
                         .get("gpu_device_count")
-                        .and_then(|v| v.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0);
-                    let cpu = row.get("cpu_count").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let util = row.get("util_count").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let nodes = row.get("node_count").and_then(|v| v.as_u64()).unwrap_or(1);
+                    let cpu = row
+                        .get("cpu_count")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0);
+                    let util = row
+                        .get("util_count")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0);
+                    let nodes = row
+                        .get("node_count")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(1);
                     let profile_type = if gpu > 0 { "GPU-present" } else { "CPU-only" };
                     let node_str = if nodes <= 1 {
                         "single-node".to_string()
                     } else {
-                        format!("{}-node", nodes)
+                        format!("{nodes}-node")
                     };
                     out.push_str(&format!(
-                        "- Type: {} {}\n- GPUs: {} | CPUs: {} | Utility procs: {}\n",
-                        profile_type, node_str, gpu, cpu, util
+                        "- Type: {profile_type} {node_str}\n- GPUs: {gpu} | CPUs: {cpu} | Utility procs: {util}\n"
                     ));
                 } else {
                     out.push_str("(no data)\n");
                 }
             } else {
-                out.push_str(&format!("{}\n", json_str));
+                out.push_str(&format!("{json_str}\n"));
             }
         }
-        Err(e) => out.push_str(&format!("(error: {})\n", e)),
+        Err(e) => out.push_str(&format!("(error: {e})\n")),
     }
     out.push('\n');
 }
@@ -281,25 +289,24 @@ fn overview_tracing_status(duckdb_path: &str, out: &mut String) {
                 if let Some(row) = parsed.first() {
                     let rpt = row
                         .get("replay_trace_count")
-                        .and_then(|v| v.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0);
                     let mapper = row
                         .get("mapper_call_count")
-                        .and_then(|v| v.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0);
                     out.push_str(&format!(
-                        "- Replay Physical Trace tasks: {}\n\
-                         - Mapper calls: {}\n",
-                        rpt, mapper
+                        "- Replay Physical Trace tasks: {rpt}\n\
+                         - Mapper calls: {mapper}\n"
                     ));
                 } else {
                     out.push_str("(no data)\n");
                 }
             } else {
-                out.push_str(&format!("{}\n", json_str));
+                out.push_str(&format!("{json_str}\n"));
             }
         }
-        Err(e) => out.push_str(&format!("(error: {})\n", e)),
+        Err(e) => out.push_str(&format!("(error: {e})\n")),
     }
     out.push('\n');
 }
@@ -342,28 +349,30 @@ fn overview_per_kind_utilization(duckdb_path: &str, out: &mut String) {
             if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
                 for row in &parsed {
                     let kind = row.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
-                    let count = row.get("proc_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let count = row
+                        .get("proc_count")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0);
                     let avg = row
                         .get("avg_util_pct")
-                        .and_then(|v| v.as_f64())
+                        .and_then(serde_json::Value::as_f64)
                         .unwrap_or(0.0);
                     let max = row
                         .get("max_util_pct")
-                        .and_then(|v| v.as_f64())
+                        .and_then(serde_json::Value::as_f64)
                         .unwrap_or(0.0);
                     out.push_str(&format!(
-                        "- {}: {} proc(s), avg {:.1}% util, max {:.1}%\n",
-                        kind, count, avg, max
+                        "- {kind}: {count} proc(s), avg {avg:.1}% util, max {max:.1}%\n"
                     ));
                 }
                 if parsed.is_empty() {
                     out.push_str("(no utilization data)\n");
                 }
             } else {
-                out.push_str(&format!("{}\n", json_str));
+                out.push_str(&format!("{json_str}\n"));
             }
         }
-        Err(e) => out.push_str(&format!("(error: {})\n", e)),
+        Err(e) => out.push_str(&format!("(error: {e})\n")),
     }
     out.push('\n');
 }
@@ -387,32 +396,31 @@ fn overview_deferred_health(duckdb_path: &str, out: &mut String) {
                 if let Some(row) = parsed.first() {
                     let avg = row
                         .get("avg_deferred_ms")
-                        .and_then(|v| v.as_f64())
+                        .and_then(serde_json::Value::as_f64)
                         .unwrap_or(0.0);
                     let p10 = row
                         .get("p10_deferred_ms")
-                        .and_then(|v| v.as_f64())
+                        .and_then(serde_json::Value::as_f64)
                         .unwrap_or(0.0);
                     let p50 = row
                         .get("p50_deferred_ms")
-                        .and_then(|v| v.as_f64())
+                        .and_then(serde_json::Value::as_f64)
                         .unwrap_or(0.0);
                     let under_100us = row
                         .get("items_under_100us")
-                        .and_then(|v| v.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0);
                     out.push_str(&format!(
-                        "- Avg: {:.2}ms | P10: {:.2}ms | P50: {:.2}ms | Items <100us: {}\n",
-                        avg, p10, p50, under_100us
+                        "- Avg: {avg:.2}ms | P10: {p10:.2}ms | P50: {p50:.2}ms | Items <100us: {under_100us}\n"
                     ));
                 } else {
                     out.push_str("(no deferred data)\n");
                 }
             } else {
-                out.push_str(&format!("{}\n", json_str));
+                out.push_str(&format!("{json_str}\n"));
             }
         }
-        Err(e) => out.push_str(&format!("(error: {})\n", e)),
+        Err(e) => out.push_str(&format!("(error: {e})\n")),
     }
     out.push('\n');
 }
@@ -450,8 +458,14 @@ fn overview_utility_breakdown(duckdb_path: &str, out: &mut String) {
                 let mut mapper_pct = 0.0_f64;
                 for row in &parsed {
                     let cat = row.get("category").and_then(|v| v.as_str()).unwrap_or("?");
-                    let ms = row.get("total_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let pct = row.get("pct").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let ms = row
+                        .get("total_ms")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(0.0);
+                    let pct = row
+                        .get("pct")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(0.0);
                     let label = match cat {
                         "analysis" => "Analysis (dependence/disjointness)",
                         "mapper" => "Mapper calls",
@@ -459,7 +473,7 @@ fn overview_utility_breakdown(duckdb_path: &str, out: &mut String) {
                         "scheduling" => "Scheduling (scheduler/prepipeline)",
                         _ => "Other meta-tasks",
                     };
-                    out.push_str(&format!("- {}: {:.1}% ({:.1}ms)\n", label, pct, ms));
+                    out.push_str(&format!("- {label}: {pct:.1}% ({ms:.1}ms)\n"));
                     if cat == "trace_replay" && pct > 0.0 {
                         has_trace_replay = true;
                     }
@@ -472,10 +486,10 @@ fn overview_utility_breakdown(duckdb_path: &str, out: &mut String) {
                     out.push_str("(no utility items)\n");
                 }
             } else {
-                out.push_str(&format!("{}\n", json_str));
+                out.push_str(&format!("{json_str}\n"));
             }
         }
-        Err(e) => out.push_str(&format!("(error: {})\n", e)),
+        Err(e) => out.push_str(&format!("(error: {e})\n")),
     }
     out.push('\n');
 }
@@ -497,13 +511,24 @@ fn overview_mapper_calls(duckdb_path: &str, out: &mut String) {
         Ok(json_str) => {
             if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
                 if let Some(row) = parsed.first() {
-                    let count = row.get("call_count").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let avg = row.get("avg_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let p95 = row.get("p95_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let max = row.get("max_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let count = row
+                        .get("call_count")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0);
+                    let avg = row
+                        .get("avg_ms")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(0.0);
+                    let p95 = row
+                        .get("p95_ms")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(0.0);
+                    let max = row
+                        .get("max_ms")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(0.0);
                     out.push_str(&format!(
-                        "- {} mapper calls | avg: {:.2}ms | P95: {:.2}ms | max: {:.2}ms\n",
-                        count, avg, p95, max
+                        "- {count} mapper calls | avg: {avg:.2}ms | P95: {p95:.2}ms | max: {max:.2}ms\n"
                     ));
                     if max > 10.0 {
                         out.push_str(
@@ -520,10 +545,10 @@ fn overview_mapper_calls(duckdb_path: &str, out: &mut String) {
                     out.push_str("(no data)\n");
                 }
             } else {
-                out.push_str(&format!("{}\n", json_str));
+                out.push_str(&format!("{json_str}\n"));
             }
         }
-        Err(e) => out.push_str(&format!("(error: {})\n", e)),
+        Err(e) => out.push_str(&format!("(error: {e})\n")),
     }
     out.push('\n');
 }
@@ -551,32 +576,31 @@ fn overview_task_granularity(duckdb_path: &str, out: &mut String) {
                 if let Some(row) = parsed.first() {
                     let count = row
                         .get("app_task_count")
-                        .and_then(|v| v.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0);
                     let avg = row
                         .get("avg_run_ms")
-                        .and_then(|v| v.as_f64())
+                        .and_then(serde_json::Value::as_f64)
                         .unwrap_or(0.0);
                     let min = row
                         .get("min_run_ms")
-                        .and_then(|v| v.as_f64())
+                        .and_then(serde_json::Value::as_f64)
                         .unwrap_or(0.0);
                     let median = row
                         .get("median_run_ms")
-                        .and_then(|v| v.as_f64())
+                        .and_then(serde_json::Value::as_f64)
                         .unwrap_or(0.0);
                     out.push_str(&format!(
-                        "- {} app tasks | median: {:.3}ms | avg: {:.3}ms | min: {:.3}ms\n",
-                        count, median, avg, min
+                        "- {count} app tasks | median: {median:.3}ms | avg: {avg:.3}ms | min: {min:.3}ms\n"
                     ));
                 } else {
                     out.push_str("(no data)\n");
                 }
             } else {
-                out.push_str(&format!("{}\n", json_str));
+                out.push_str(&format!("{json_str}\n"));
             }
         }
-        Err(e) => out.push_str(&format!("(error: {})\n", e)),
+        Err(e) => out.push_str(&format!("(error: {e})\n")),
     }
     out.push('\n');
 }
@@ -585,7 +609,7 @@ fn overview_task_granularity(duckdb_path: &str, out: &mut String) {
 ///
 /// Copies live on %chan% slots and carry their cost in `lifetime` + `size`,
 /// NEVER `running` (title = "Copy") — filtering on `running` reports zero
-/// copies and zero comm time. Dedup by item_uid: a multi-hop copy appears
+/// copies and zero comm time. Dedup by `item_uid`: a multi-hop copy appears
 /// on several chan slots but must be counted once (the regression test pins
 /// the numbers). Byte volume is intentionally omitted here: `size` is a
 /// unit-suffixed TEXT column, and summing it across hops double-counts
@@ -607,14 +631,16 @@ fn overview_channel_copies(duckdb_path: &str, out: &mut String) {
         Ok(json_str) => {
             if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
                 if let Some(row) = parsed.first() {
-                    let count = row.get("copy_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let count = row
+                        .get("copy_count")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0);
                     let ms = row
                         .get("total_copy_ms")
-                        .and_then(|v| v.as_f64())
+                        .and_then(serde_json::Value::as_f64)
                         .unwrap_or(0.0);
                     out.push_str(&format!(
-                        "- {} copies | total comm time (lifetime): {:.1}ms\n",
-                        count, ms
+                        "- {count} copies | total comm time (lifetime): {ms:.1}ms\n"
                     ));
                     // Volume lives in "Data-Size Evidence" below (unit-aware
                     // parsing of the suffixed `size` strings — B/KiB/MiB/GiB).
@@ -625,23 +651,23 @@ fn overview_channel_copies(duckdb_path: &str, out: &mut String) {
                     out.push_str("(no data)\n");
                 }
             } else {
-                out.push_str(&format!("{}\n", json_str));
+                out.push_str(&format!("{json_str}\n"));
             }
         }
-        Err(e) => out.push_str(&format!("(error: {})\n", e)),
+        Err(e) => out.push_str(&format!("(error: {e})\n")),
     }
     out.push('\n');
 }
 
-/// Overview section: Data-Size Evidence (MiniAero guardrail: verify sizing verdicts vs DATA).
+/// Overview section: Data-Size Evidence (`MiniAero` guardrail: verify sizing verdicts vs DATA).
 ///
 /// Root cause of the one recorded WRONG live verdict ("under-sized mesh, grow
-/// it" on MiniAero 160³): the agent had 167–176 MiB ghost-exchange copies in
+/// it" on `MiniAero` 160³): the agent had 167–176 MiB ghost-exchange copies in
 /// front of it — evidence that the mesh was already large — and never
 /// reconciled. This section makes that evidence one glance away and carries
 /// the reconcile instruction AT the evidence (result-level reminder, the
 /// proven redundancy lever). `size` is a unit-suffixed STRING ("76.000 KiB",
-/// "175.781 MiB"), so parsing is unit-aware; dedup by item_uid as always.
+/// "175.781 MiB"), so parsing is unit-aware; dedup by `item_uid` as always.
 #[cfg(feature = "duckdb")]
 fn overview_data_size_evidence(duckdb_path: &str, out: &mut String) {
     let evidence = execute_run_query_raw(duckdb_path, DATA_SIZE_EVIDENCE_SQL);
@@ -653,14 +679,23 @@ fn overview_data_size_evidence(duckdb_path: &str, out: &mut String) {
                 if let Some(row) = parsed.first() {
                     let n = row
                         .get("sized_copies")
-                        .and_then(|v| v.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0);
                     if n == 0 {
                         out.push_str("- no sized channel copies in this profile\n");
                     } else {
-                        let max = row.get("max_mib").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                        let p50 = row.get("p50_mib").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                        let mib = row.get("total_mib").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let max = row
+                            .get("max_mib")
+                            .and_then(serde_json::Value::as_f64)
+                            .unwrap_or(0.0);
+                        let p50 = row
+                            .get("p50_mib")
+                            .and_then(serde_json::Value::as_f64)
+                            .unwrap_or(0.0);
+                        let mib = row
+                            .get("total_mib")
+                            .and_then(serde_json::Value::as_f64)
+                            .unwrap_or(0.0);
                         // Adaptive units so small totals stay PRECISE (channel
                         // volume on bg4N2 is 6.73 MiB — "0.01 GiB" is useless).
                         let total = if mib >= 1024.0 {
@@ -681,8 +716,8 @@ fn overview_data_size_evidence(duckdb_path: &str, out: &mut String) {
                                 .iter()
                                 .take(3)
                                 .filter_map(|r| {
-                                    let mib = r.get("mib").and_then(|v| v.as_f64())?;
-                                    let c = r.get("copies").and_then(|v| v.as_u64())?;
+                                    let mib = r.get("mib").and_then(serde_json::Value::as_f64)?;
+                                    let c = r.get("copies").and_then(serde_json::Value::as_u64)?;
                                     Some(format!("{mib:.1} MiB ×{c}"))
                                 })
                                 .collect::<Vec<_>>()
@@ -696,10 +731,10 @@ fn overview_data_size_evidence(duckdb_path: &str, out: &mut String) {
                     out.push_str("(no data)\n");
                 }
             } else {
-                out.push_str(&format!("{}\n", json_str));
+                out.push_str(&format!("{json_str}\n"));
             }
         }
-        Err(e) => out.push_str(&format!("(error: {})\n", e)),
+        Err(e) => out.push_str(&format!("(error: {e})\n")),
     }
     out.push_str(
         "- GUARDRAIL: before ANY under-/over-sized verdict (mesh, problem size, \
@@ -727,25 +762,33 @@ fn overview_delayed_distribution(duckdb_path: &str, out: &mut String) {
         Ok(json_str) => {
             if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
                 if let Some(row) = parsed.first() {
-                    let p50 = row.get("p50_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let p90 = row.get("p90_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let max = row.get("max_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let p50 = row
+                        .get("p50_ms")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(0.0);
+                    let p90 = row
+                        .get("p90_ms")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(0.0);
+                    let max = row
+                        .get("max_ms")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(0.0);
                     let over_1ms = row
                         .get("items_over_1ms")
-                        .and_then(|v| v.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0);
                     out.push_str(&format!(
-                        "- P50: {:.3}ms | P90: {:.3}ms | max: {:.2}ms | items >1ms: {}\n",
-                        p50, p90, max, over_1ms
+                        "- P50: {p50:.3}ms | P90: {p90:.3}ms | max: {max:.2}ms | items >1ms: {over_1ms}\n"
                     ));
                 } else {
                     out.push_str("(no delayed data)\n");
                 }
             } else {
-                out.push_str(&format!("{}\n", json_str));
+                out.push_str(&format!("{json_str}\n"));
             }
         }
-        Err(e) => out.push_str(&format!("(error: {})\n", e)),
+        Err(e) => out.push_str(&format!("(error: {e})\n")),
     }
     out.push('\n');
 }
@@ -767,24 +810,29 @@ fn overview_triggering_latency(duckdb_path: &str, out: &mut String) {
         Ok(json_str) => {
             if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
                 if let Some(row) = parsed.first() {
-                    let p90 = row.get("p90_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let max = row.get("max_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let p90 = row
+                        .get("p90_ms")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(0.0);
+                    let max = row
+                        .get("max_ms")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(0.0);
                     let over_1ms = row
                         .get("items_over_1ms")
-                        .and_then(|v| v.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0);
                     out.push_str(&format!(
-                        "- P90: {:.3}ms | max: {:.2}ms | items >1ms: {}\n",
-                        p90, max, over_1ms
+                        "- P90: {p90:.3}ms | max: {max:.2}ms | items >1ms: {over_1ms}\n"
                     ));
                 } else {
                     out.push_str("(no triggering latency data)\n");
                 }
             } else {
-                out.push_str(&format!("{}\n", json_str));
+                out.push_str(&format!("{json_str}\n"));
             }
         }
-        Err(e) => out.push_str(&format!("(error: {})\n", e)),
+        Err(e) => out.push_str(&format!("(error: {e})\n")),
     }
     out.push('\n');
 }
@@ -805,12 +853,11 @@ fn overview_python_detection(duckdb_path: &str, out: &mut String) {
                 if let Some(row) = parsed.first() {
                     let count = row
                         .get("py_proc_count")
-                        .and_then(|v| v.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0);
                     if count > 0 {
                         out.push_str(&format!(
-                            "- Python processors: {} (Legate/cuNumeric)\n",
-                            count
+                            "- Python processors: {count} (Legate/cuNumeric)\n"
                         ));
                     } else {
                         out.push_str("- Python processors: 0\n");
@@ -819,10 +866,10 @@ fn overview_python_detection(duckdb_path: &str, out: &mut String) {
                     out.push_str("(no data)\n");
                 }
             } else {
-                out.push_str(&format!("{}\n", json_str));
+                out.push_str(&format!("{json_str}\n"));
             }
         }
-        Err(e) => out.push_str(&format!("(error: {})\n", e)),
+        Err(e) => out.push_str(&format!("(error: {e})\n")),
     }
     out.push('\n');
 }
@@ -849,36 +896,38 @@ fn overview_gc_instance_activity(duckdb_path: &str, out: &mut String) {
         Ok(json_str) => {
             if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
                 if let Some(row) = parsed.first() {
-                    let gc_count = row.get("gc_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let gc_count = row
+                        .get("gc_count")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0);
                     let gc_ms = row
                         .get("gc_total_ms")
-                        .and_then(|v| v.as_f64())
+                        .and_then(serde_json::Value::as_f64)
                         .unwrap_or(0.0);
                     let inst = row
                         .get("instance_items")
-                        .and_then(|v| v.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0);
                     if gc_count > 0 {
                         out.push_str(&format!(
-                            "- GC activity detected: {} events, {:.1}ms — check for memory pressure\n",
-                            gc_count, gc_ms
+                            "- GC activity detected: {gc_count} events, {gc_ms:.1}ms — check for memory pressure\n"
                         ));
                     } else {
                         out.push_str("- No GC activity detected\n");
                     }
-                    out.push_str(&format!("- Instance-related items: {}\n", inst));
+                    out.push_str(&format!("- Instance-related items: {inst}\n"));
                 } else {
                     out.push_str("(no data)\n");
                 }
             } else {
-                out.push_str(&format!("{}\n", json_str));
+                out.push_str(&format!("{json_str}\n"));
             }
         }
         Err(e) => {
             if e.contains("not found") {
                 out.push_str("Not available in this profile\n");
             } else {
-                out.push_str(&format!("(error: {})\n", e));
+                out.push_str(&format!("(error: {e})\n"));
             }
         }
     }
@@ -908,9 +957,9 @@ fn overview_node_utility_balance(duckdb_path: &str, out: &mut String) {
                         let node = row.get("node").and_then(|v| v.as_str()).unwrap_or("?");
                         let ms = row
                             .get("total_busy_ms")
-                            .and_then(|v| v.as_f64())
+                            .and_then(serde_json::Value::as_f64)
                             .unwrap_or(0.0);
-                        out.push_str(&format!("- {}: {:.1}ms utility busy\n", node, ms));
+                        out.push_str(&format!("- {node}: {ms:.1}ms utility busy\n"));
                     }
                 } else {
                     let mut min_ms = f64::MAX;
@@ -921,9 +970,9 @@ fn overview_node_utility_balance(duckdb_path: &str, out: &mut String) {
                         let node = row.get("node").and_then(|v| v.as_str()).unwrap_or("?");
                         let ms = row
                             .get("total_busy_ms")
-                            .and_then(|v| v.as_f64())
+                            .and_then(serde_json::Value::as_f64)
                             .unwrap_or(0.0);
-                        out.push_str(&format!("- {}: {:.1}ms utility busy\n", node, ms));
+                        out.push_str(&format!("- {node}: {ms:.1}ms utility busy\n"));
                         if ms < min_ms {
                             min_ms = ms;
                             min_node = node.to_string();
@@ -935,22 +984,21 @@ fn overview_node_utility_balance(duckdb_path: &str, out: &mut String) {
                     }
                     let ratio = max_ms / min_ms.max(0.1);
                     out.push_str(&format!(
-                        "- Utility-work spread: {:.1}x (busiest {}, lightest {})\n",
-                        ratio, max_node, min_node
+                        "- Utility-work spread: {ratio:.1}x (busiest {max_node}, lightest {min_node})\n"
                     ));
                 }
                 if parsed.is_empty() {
                     out.push_str("(no utility data)\n");
                 }
             } else {
-                out.push_str(&format!("{}\n", json_str));
+                out.push_str(&format!("{json_str}\n"));
             }
         }
         Err(e) => {
             if e.contains("not found") {
                 out.push_str("Not available in this profile\n");
             } else {
-                out.push_str(&format!("(error: {})\n", e));
+                out.push_str(&format!("(error: {e})\n"));
             }
         }
     }
@@ -960,7 +1008,7 @@ fn overview_node_utility_balance(duckdb_path: &str, out: &mut String) {
 /// Overview section: Channel direction analysis.
 ///
 /// Per-channel comm activity. Copies use `lifetime` (not `running`); dedup by
-/// item_uid, assigning each copy to its min(entry_slug) so the per-channel
+/// `item_uid`, assigning each copy to its `min(entry_slug)` so the per-channel
 /// total matches the whole-run copy figure. Byte volume is reported by the
 /// "Data-Size Evidence" section instead (unit-aware, deduplicated).
 #[cfg(feature = "duckdb")]
@@ -991,8 +1039,14 @@ fn overview_channel_direction(duckdb_path: &str, out: &mut String) {
                             .get("entry_slug")
                             .and_then(|v| v.as_str())
                             .unwrap_or("?");
-                        let copies = row.get("copy_count").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let ms = row.get("total_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let copies = row
+                            .get("copy_count")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0);
+                        let ms = row
+                            .get("total_ms")
+                            .and_then(serde_json::Value::as_f64)
+                            .unwrap_or(0.0);
 
                         // Classify channel direction from slug
                         let direction = classify_channel_slug(slug);
@@ -1004,8 +1058,7 @@ fn overview_channel_direction(duckdb_path: &str, out: &mut String) {
                         }
 
                         out.push_str(&format!(
-                            "- {} [{}]: {} copies, {:.1}ms\n",
-                            slug, direction, copies, ms
+                            "- {slug} [{direction}]: {copies} copies, {ms:.1}ms\n"
                         ));
                     }
                     if parsed.len() > 5 {
@@ -1020,14 +1073,14 @@ fn overview_channel_direction(duckdb_path: &str, out: &mut String) {
                 }
                 let _ = count; // suppress unused warning
             } else {
-                out.push_str(&format!("{}\n", json_str));
+                out.push_str(&format!("{json_str}\n"));
             }
         }
         Err(e) => {
             if e.contains("not found") {
                 out.push_str("Not available in this profile\n");
             } else {
-                out.push_str(&format!("(error: {})\n", e));
+                out.push_str(&format!("(error: {e})\n"));
             }
         }
     }
@@ -1036,13 +1089,13 @@ fn overview_channel_direction(duckdb_path: &str, out: &mut String) {
 
 /// Overview section: Copy-to-compute ratio.
 ///
-/// Copy time = SUM(lifetime.duration) on channels, dedup'd by item_uid: copies
+/// Copy time = SUM(lifetime.duration) on channels, dedup'd by `item_uid`: copies
 /// have no `running`, and a copy's rows are the SAME transfer on 2 channel
 /// slugs sharing ONE lifetime — true duplication, so dedup is required.
 /// Compute time keeps the NAIVE
 /// `SUM(running.duration)` on cpu/gpu non-util (2263.1ms on bg4N2): compute
 /// items repeat as genuine RE-EXECUTIONS (distinct running slices), so the raw
-/// sum is correct and collapsing per item_uid would wrongly drop them.
+/// sum is correct and collapsing per `item_uid` would wrongly drop them.
 #[cfg(feature = "duckdb")]
 fn overview_copy_compute_ratio(duckdb_path: &str, out: &mut String) {
     let copy_ratio = execute_run_query_raw(
@@ -1073,29 +1126,31 @@ fn overview_copy_compute_ratio(duckdb_path: &str, out: &mut String) {
                 if let Some(row) = parsed.first() {
                     let copy_ms = row
                         .get("copy_total_ms")
-                        .and_then(|v| v.as_f64())
+                        .and_then(serde_json::Value::as_f64)
                         .unwrap_or(0.0);
                     let compute_ms = row
                         .get("compute_total_ms")
-                        .and_then(|v| v.as_f64())
+                        .and_then(serde_json::Value::as_f64)
                         .unwrap_or(0.0);
-                    let pct = row.get("copy_pct").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let pct = row
+                        .get("copy_pct")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(0.0);
                     out.push_str(&format!(
-                        "- Copy: {:.1}ms | Compute: {:.1}ms | Copy fraction: {:.1}%\n",
-                        copy_ms, compute_ms, pct
+                        "- Copy: {copy_ms:.1}ms | Compute: {compute_ms:.1}ms | Copy fraction: {pct:.1}%\n"
                     ));
                 } else {
                     out.push_str("(no data)\n");
                 }
             } else {
-                out.push_str(&format!("{}\n", json_str));
+                out.push_str(&format!("{json_str}\n"));
             }
         }
         Err(e) => {
             if e.contains("not found") {
                 out.push_str("Not available in this profile\n");
             } else {
-                out.push_str(&format!("(error: {})\n", e));
+                out.push_str(&format!("(error: {e})\n"));
             }
         }
     }
@@ -1123,32 +1178,31 @@ fn overview_scheduling_overhead(duckdb_path: &str, out: &mut String) {
                 if let Some(row) = parsed.first() {
                     let p90 = row
                         .get("p90_overhead_ms")
-                        .and_then(|v| v.as_f64())
+                        .and_then(serde_json::Value::as_f64)
                         .unwrap_or(0.0);
                     let avg = row
                         .get("avg_overhead_ms")
-                        .and_then(|v| v.as_f64())
+                        .and_then(serde_json::Value::as_f64)
                         .unwrap_or(0.0);
                     let count = row
                         .get("items_with_overhead")
-                        .and_then(|v| v.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0);
                     out.push_str(&format!(
-                        "- P90: {:.2}ms | Avg: {:.2}ms ({} items)\n",
-                        p90, avg, count
+                        "- P90: {p90:.2}ms | Avg: {avg:.2}ms ({count} items)\n"
                     ));
                 } else {
                     out.push_str("(no scheduling overhead data)\n");
                 }
             } else {
-                out.push_str(&format!("{}\n", json_str));
+                out.push_str(&format!("{json_str}\n"));
             }
         }
         Err(e) => {
             if e.contains("not found") {
                 out.push_str("Not available in this profile\n");
             } else {
-                out.push_str(&format!("(error: {})\n", e));
+                out.push_str(&format!("(error: {e})\n"));
             }
         }
     }
@@ -1189,29 +1243,40 @@ fn overview_processor_balance(duckdb_path: &str, out: &mut String) {
             if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
                 for row in &parsed {
                     let kind = row.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
-                    let count = row.get("proc_count").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let min_u = row.get("min_util").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let max_u = row.get("max_util").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let avg_u = row.get("avg_util").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let count = row
+                        .get("proc_count")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0);
+                    let min_u = row
+                        .get("min_util")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(0.0);
+                    let max_u = row
+                        .get("max_util")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(0.0);
+                    let avg_u = row
+                        .get("avg_util")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(0.0);
                     out.push_str(&format!(
-                        "- {}: {} procs, min {:.1}%, max {:.1}%, avg {:.1}%\n",
-                        kind, count, min_u, max_u, avg_u
+                        "- {kind}: {count} procs, min {min_u:.1}%, max {max_u:.1}%, avg {avg_u:.1}%\n"
                     ));
                     let ratio = max_u / min_u.max(0.1);
-                    out.push_str(&format!("  spread: {:.1}x (max/min)\n", ratio));
+                    out.push_str(&format!("  spread: {ratio:.1}x (max/min)\n"));
                 }
                 if parsed.is_empty() {
                     out.push_str("(no application processor data)\n");
                 }
             } else {
-                out.push_str(&format!("{}\n", json_str));
+                out.push_str(&format!("{json_str}\n"));
             }
         }
         Err(e) => {
             if e.contains("not found") {
                 out.push_str("Not available in this profile\n");
             } else {
-                out.push_str(&format!("(error: {})\n", e));
+                out.push_str(&format!("(error: {e})\n"));
             }
         }
     }
@@ -1237,13 +1302,15 @@ fn overview_navigation_anchors(duckdb_path: &str, out: &mut String) {
                 if let Some(row) = parsed.first() {
                     let start = row
                         .get("steady_start")
-                        .and_then(|v| v.as_i64())
+                        .and_then(serde_json::Value::as_i64)
                         .unwrap_or(0);
-                    let end = row.get("steady_end").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let end = row
+                        .get("steady_end")
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or(0);
                     if start > 0 && end > start {
                         out.push_str(&format!(
-                            "- Steady-state zoom (middle 20%%): [{}, {}]\n",
-                            start, end
+                            "- Steady-state zoom (middle 20%%): [{start}, {end}]\n"
                         ));
                     }
                 }
@@ -1251,7 +1318,7 @@ fn overview_navigation_anchors(duckdb_path: &str, out: &mut String) {
         }
         Err(e) => {
             if !e.contains("not found") {
-                out.push_str(&format!("  (midpoint error: {})\n", e));
+                out.push_str(&format!("  (midpoint error: {e})\n"));
             }
         }
     }
@@ -1275,14 +1342,19 @@ fn overview_navigation_anchors(duckdb_path: &str, out: &mut String) {
                         .unwrap_or("?");
                     let ms = row
                         .get("duration_ms")
-                        .and_then(|v| v.as_f64())
+                        .and_then(serde_json::Value::as_f64)
                         .unwrap_or(0.0);
-                    let start = row.get("start_ns").and_then(|v| v.as_i64()).unwrap_or(0);
-                    let stop = row.get("stop_ns").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let start = row
+                        .get("start_ns")
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or(0);
+                    let stop = row
+                        .get("stop_ns")
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or(0);
                     if ms > 0.0 {
                         out.push_str(&format!(
-                            "- Longest mapper call: {:.2}ms at [{}, {}] on {}\n",
-                            ms, start, stop, slug
+                            "- Longest mapper call: {ms:.2}ms at [{start}, {stop}] on {slug}\n"
                         ));
                     }
                 }
@@ -1290,7 +1362,7 @@ fn overview_navigation_anchors(duckdb_path: &str, out: &mut String) {
         }
         Err(e) => {
             if !e.contains("not found") {
-                out.push_str(&format!("  (mapper anchor error: {})\n", e));
+                out.push_str(&format!("  (mapper anchor error: {e})\n"));
             }
         }
     }
@@ -1320,16 +1392,21 @@ fn overview_navigation_anchors(duckdb_path: &str, out: &mut String) {
                         .get("entry_slug")
                         .and_then(|v| v.as_str())
                         .unwrap_or("?");
-                    let ms = row.get("gap_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let ms = row
+                        .get("gap_ms")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(0.0);
                     let start = row
                         .get("gap_start_ns")
-                        .and_then(|v| v.as_i64())
+                        .and_then(serde_json::Value::as_i64)
                         .unwrap_or(0);
-                    let end = row.get("gap_end_ns").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let end = row
+                        .get("gap_end_ns")
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or(0);
                     if ms > 0.0 {
                         out.push_str(&format!(
-                            "- Largest app processor gap: {:.2}ms at [{}, {}] on {}\n",
-                            ms, start, end, slug
+                            "- Largest app processor gap: {ms:.2}ms at [{start}, {end}] on {slug}\n"
                         ));
                     }
                 }
@@ -1337,7 +1414,7 @@ fn overview_navigation_anchors(duckdb_path: &str, out: &mut String) {
         }
         Err(e) => {
             if !e.contains("not found") {
-                out.push_str(&format!("  (gap anchor error: {})\n", e));
+                out.push_str(&format!("  (gap anchor error: {e})\n"));
             }
         }
     }
@@ -1347,11 +1424,11 @@ fn overview_navigation_anchors(duckdb_path: &str, out: &mut String) {
 }
 
 #[cfg(feature = "duckdb")]
-/// Classify a channel entry_slug into a direction label.
+/// Classify a channel `entry_slug` into a direction label.
 ///
 /// Best-effort parsing:
 /// - Two different node prefixes (e.g. "n0" and "n1") → "inter-node"
-/// - Contains both 's' and 'f' components (system mem and framebuffer) → "SYS↔FB (PCIe)"
+/// - Contains both 's' and 'f' components (system mem and framebuffer) → "SYS↔FB (`PCIe`)"
 /// - Otherwise → "local"
 fn classify_channel_slug(slug: &str) -> &'static str {
     // Extract the part after "chan_" (e.g. "n0s0_n1s0" or "fn0s0")

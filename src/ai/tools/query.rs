@@ -1,10 +1,10 @@
-//! DuckDB query execution + hardening, result formatting, and the SQL
+//! `DuckDB` query execution + hardening, result formatting, and the SQL
 //! builders used by the MCP surface.
 
-/// Execute a read-only SQL query against the Legion DuckDB database.
+/// Execute a read-only SQL query against the Legion `DuckDB` database.
 ///
-/// Wraps the user's SQL with DuckDB's `json_group_array(to_json(t))` to serialize
-/// all column types (including STRUCTs like Interval and ItemLink) as JSON.
+/// Wraps the user's SQL with `DuckDB`'s `json_group_array(to_json(t))` to serialize
+/// all column types (including STRUCTs like Interval and `ItemLink`) as JSON.
 /// Execute a query and return the result as a markdown table (for LLM consumption).
 /// Falls back to raw JSON if table formatting fails.
 #[cfg(feature = "duckdb")]
@@ -45,7 +45,7 @@ pub(crate) fn mark_truncation_if_over(result: String) -> String {
 }
 
 /// Execute a query and return raw JSON array string.
-/// Used internally by gather_overview() which parses the JSON itself.
+/// Used internally by `gather_overview()` which parses the JSON itself.
 #[cfg(feature = "duckdb")]
 pub fn execute_run_query_raw(duckdb_path: &str, sql: &str) -> Result<String, String> {
     use duckdb::{AccessMode, Config, Connection};
@@ -70,7 +70,7 @@ pub fn execute_run_query_raw(duckdb_path: &str, sql: &str) -> Result<String, Str
         .enable_external_access(false)
         .map_err(|e| format!("config external_access: {e}"))?;
     let conn = Connection::open_with_flags(duckdb_path, config)
-        .map_err(|e| format!("Failed to open DuckDB '{}': {}", duckdb_path, e))?;
+        .map_err(|e| format!("Failed to open DuckDB '{duckdb_path}': {e}"))?;
 
     // Strip trailing LIMIT clause to avoid LIMIT-inside-LIMIT syntax errors.
     // The agent's LIMIT is respected up to our hard cap of 50 rows.
@@ -100,7 +100,7 @@ pub fn execute_run_query_raw(duckdb_path: &str, sql: &str) -> Result<String, Str
         Ok(result) => Ok(mark_truncation_if_over(result)),
         Err(e) => {
             let err_str = e.to_string();
-            let mut msg = format!("Query failed: {}\n", err_str);
+            let mut msg = format!("Query failed: {err_str}\n");
 
             // Add contextual hints based on common error patterns
             if err_str.contains("not found") || err_str.contains("Referenced column") {
@@ -239,7 +239,7 @@ pub(crate) fn json_array_to_markdown_table(json_str: &str) -> Option<String> {
     let mut out = String::new();
     out.push('|');
     for col in &columns {
-        out.push_str(&format!(" {} |", col));
+        out.push_str(&format!(" {col} |"));
     }
     out.push('\n');
 
@@ -264,7 +264,7 @@ pub(crate) fn json_array_to_markdown_table(json_str: &str) -> Option<String> {
                     serde_json::to_string(v).unwrap_or_default()
                 }
             };
-            out.push_str(&format!(" {} |", cell));
+            out.push_str(&format!(" {cell} |"));
         }
         out.push('\n');
     }

@@ -17,7 +17,7 @@ use crate::timestamp::Interval;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-/// Shared event channel type — receives progressive AgentEvents from the agent thread.
+/// Shared event channel type — receives progressive `AgentEvents` from the agent thread.
 type EventChannel = Arc<Mutex<Option<mpsc::Receiver<AgentEvent>>>>;
 
 // ── Public types ────────────────────────────────────────────────────────────
@@ -191,7 +191,7 @@ pub enum ChatMessageKind {
 ///
 /// CHANNEL-LIFETIME CONTRACT (load-bearing): the Native arm
 /// keeps the existing PER-TURN `(event_tx, event_rx)` swap in
-/// `trigger_diagnosis`. The ClaudeCode arm must create its channels ONCE at
+/// `trigger_diagnosis`. The `ClaudeCode` arm must create its channels ONCE at
 /// child spawn and keep them for the child's lifetime — follow-up turns only
 /// write to the existing stdin. Sharing the per-turn swap would disconnect the
 /// subprocess reader on turn 2 (`poll_events` would see `Disconnected`).
@@ -210,7 +210,7 @@ pub struct ChatMessage {
     pub text: String,
     /// Highlights attached to this message (only for Analysis messages).
     pub highlights: Vec<Highlight>,
-    /// Full tool result content (only for System messages from ToolResult events).
+    /// Full tool result content (only for System messages from `ToolResult` events).
     pub expandable_content: Option<String>,
 }
 
@@ -264,7 +264,7 @@ pub enum PendingNavigation {
 #[derive(Clone, Debug)]
 pub struct TimelineSelection {
     pub entry_id: EntryID,
-    /// Human-readable label: "CPU Proc 2" or "n0_cpu_c2"
+    /// Human-readable label: "CPU Proc 2" or "`n0_cpu_c2`"
     pub entry_label: String,
     /// The selected gap/time range
     pub interval: Interval,
@@ -354,7 +354,7 @@ pub struct ChatPanel {
     attachments: Vec<ContextAttachment>,
 
     // ── Tools configuration ──────────────────────────────────────────────
-    /// DuckDB database path — required for `run_query` tool.
+    /// `DuckDB` database path — required for `run_query` tool.
     duckdb_path_buffer: String,
     /// Application code directory — required for `read_code` tool.
     code_path_buffer: String,
@@ -363,21 +363,21 @@ pub struct ChatPanel {
     wiki_path_buffer: String,
 
     // ── Agent state ────────────────────────────────────────────────────────
-    /// API key (from UI field; falls back to ANTHROPIC_API_KEY env var).
+    /// API key (from UI field; falls back to `ANTHROPIC_API_KEY` env var).
     api_key_buffer: String,
     /// Model name: "claude-sonnet-4-6" or "claude-opus-4-8".
     /// Persistent agent session (holds conversation history for follow-ups).
     agent_session: Arc<Mutex<Option<AgentSession>>>,
     /// Whether an agent request is currently in flight.
     pending_request: bool,
-    /// Channel for receiving progressive AgentEvents from the background thread.
+    /// Channel for receiving progressive `AgentEvents` from the background thread.
     event_rx: EventChannel,
-    /// Sender for UiCommand messages back to the agent thread (screenshot data).
+    /// Sender for `UiCommand` messages back to the agent thread (screenshot data).
     ui_command_tx: Option<mpsc::Sender<UiCommand>>,
     /// Pending navigation action from the agent thread, consumed by core.rs.
     /// Set by ScreenshotRequest/ZoomRequest/PanRequest/etc events.
     pending_navigation: Option<PendingNavigation>,
-    /// Pending question from the agent (human-in-the-loop): (request_id, question, options).
+    /// Pending question from the agent (human-in-the-loop): (`request_id`, question, options).
     /// Rendered in the composer; answered via `send_user_answer`.
     pending_question: Option<(u64, String, Vec<String>)>,
     /// True from a Stop click until the interrupted turn's terminal event —
@@ -426,7 +426,7 @@ pub struct ChatPanel {
     /// the settings row shows "takes effect on ↺ New session".
     #[cfg(feature = "viewer-mcp")]
     cc_spawn_root: Option<String>,
-    /// Markdown render cache for analysis messages (egui_commonmark). Arc-shared
+    /// Markdown render cache for analysis messages (`egui_commonmark`). Arc-shared
     /// across panel clones; `CommonMarkCache` is not `Clone`.
     md_cache: Arc<Mutex<egui_commonmark::CommonMarkCache>>,
 }
@@ -825,7 +825,7 @@ impl ChatPanel {
 
     // ── Private helpers ──────────────────────────────────────────────────────
 
-    /// Get the API key: UI field first, then ANTHROPIC_API_KEY env var.
+    /// Get the API key: UI field first, then `ANTHROPIC_API_KEY` env var.
     /// Trims whitespace/newlines that can sneak in via paste.
     fn get_api_key(&self) -> Option<String> {
         let trimmed = self.api_key_buffer.trim();
@@ -839,7 +839,7 @@ impl ChatPanel {
 
     // ── Tool status helpers ────────────────────────────────────────────────
 
-    /// The configured DuckDB path (trimmed, non-empty), if any — the database the
+    /// The configured `DuckDB` path (trimmed, non-empty), if any — the database the
     /// in-viewer MCP server serves `run_query`/`overview`/`find_blockers`
     /// against.
     #[cfg(feature = "viewer-mcp")]
@@ -866,7 +866,7 @@ impl ChatPanel {
 
     /// The LIVE project-root handle shared with the in-viewer MCP server:
     /// the server reads it per request, so a folder set in the panel at ANY time
-    /// reaches read_code/list_files/instructions (never a snapshot at spawn).
+    /// reaches `read_code/list_files/instructions` (never a snapshot at spawn).
     /// The panel keeps it in sync with the (normalized) path buffer each frame.
     #[cfg(feature = "viewer-mcp")]
     pub fn project_root_handle(&self) -> crate::ai::mcp_core::SharedCodeRoot {
@@ -887,7 +887,7 @@ impl ChatPanel {
 
     /// Wire the in-viewer MCP server endpoint — (ACTUAL bound port, per-session
     /// bearer token) — called by `core.rs` right after the server spawns; `None`
-    /// = bind failed. The ClaudeCode backend refuses to start until this is
+    /// = bind failed. The `ClaudeCode` backend refuses to start until this is
     /// `Some`, and builds its `--mcp-config` (URL + `Authorization: Bearer`
     /// header) from exactly this pair.
     #[cfg(feature = "viewer-mcp")]
@@ -908,7 +908,7 @@ impl ChatPanel {
 
     /// Persistence: snapshot the user's AI settings for eframe storage
     /// (called by `ProfApp::save`). The API key is deliberately EXCLUDED —
-    /// eframe storage is plaintext on disk; use ANTHROPIC_API_KEY instead.
+    /// eframe storage is plaintext on disk; use `ANTHROPIC_API_KEY` instead.
     pub fn export_persisted(&self) -> crate::app::PersistedAiSettings {
         crate::app::PersistedAiSettings {
             project_root: self.code_path_buffer.trim().to_owned(),
@@ -940,7 +940,7 @@ impl ChatPanel {
     /// receiver after Complete/Error is correct. The Claude Code backend's channel
     /// is once-at-spawn and must OUTLIVE turns — dropping it would orphan the
     /// persistent child's event stream (turn 2 would never render). Keep the
-    /// receiver installed while a ClaudeCode child is alive.
+    /// receiver installed while a `ClaudeCode` child is alive.
     fn end_of_turn_channel_cleanup(&mut self) {
         #[cfg(feature = "viewer-mcp")]
         if self.cc_agent.lock().unwrap().is_some() {
@@ -951,8 +951,8 @@ impl ChatPanel {
 
     /// Derive the DB tool status from `duckdb_path_buffer`.
     ///
-    /// Accepts any existing non-directory file. DuckDB files may have various
-    /// naming conventions (`.duckdb`, `_duckdb`, etc.). The DuckDB crate will
+    /// Accepts any existing non-directory file. `DuckDB` files may have various
+    /// naming conventions (`.duckdb`, `_duckdb`, etc.). The `DuckDB` crate will
     /// produce a clear error if it can't open the file.
     fn tool_status_db(&self) -> ToolStatus {
         let trimmed = self.duckdb_path_buffer.trim();
@@ -1594,7 +1594,7 @@ impl ChatPanel {
     }
 
     /// The API-key entry popup (opened from the backend pill or the header's
-    /// ⚠ API key warning). Used by the API backend only; ANTHROPIC_API_KEY in
+    /// ⚠ API key warning). Used by the API backend only; `ANTHROPIC_API_KEY` in
     /// the environment works without it. Never persisted to disk.
     fn ui_api_key_popup(&mut self, ctx: &egui::Context) {
         if !self.api_key_popup_open {
@@ -1807,9 +1807,9 @@ impl ChatPanel {
                                 };
                                 let base = format!("{} {}", prefix, m.text);
                                 if let Some(ref content) = m.expandable_content {
-                                    format!("{}\n{}\n", base, content)
+                                    format!("{base}\n{content}\n")
                                 } else {
-                                    format!("{}\n", base)
+                                    format!("{base}\n")
                                 }
                             })
                             .collect();
@@ -1853,7 +1853,7 @@ impl ChatPanel {
     }
 
     /// Context chips above the composer input (Claude-Desktop style): the
-    /// active DuckDB, the project repo, and any attached files — each with an ×.
+    /// active `DuckDB`, the project repo, and any attached files — each with an ×.
     /// The DB/repo chips mirror the SETTINGS buffers (however they were set —
     /// the "+" menu, a CLI flag, or persistence), so what the agent can touch is
     /// always visible right where you type; × genuinely unconfigures the tool.
@@ -2251,7 +2251,7 @@ impl ChatPanel {
     /// Plain ASCII "+" (the fullwidth ＋ and the file-kind emojis are
     /// not in egui's default fonts — they render as tofu boxes), and
     /// the popup is forced to open UPWARD like Claude Desktop's
-    /// (menu_button drops down, straight out of a bottom bar).
+    /// (`menu_button` drops down, straight out of a bottom bar).
     fn ui_plus_menu(&mut self, ui: &mut egui::Ui) {
         let plus_resp = ui
             .button(
@@ -2343,7 +2343,7 @@ impl ChatPanel {
         );
     }
 
-    /// Render the chat panel. Must be called BEFORE CentralPanel in the layout.
+    /// Render the chat panel. Must be called BEFORE `CentralPanel` in the layout.
     pub fn show(&mut self, ctx: &egui::Context) {
         self.poll_events();
         // Keep the MCP server's live project-root handle in sync with the
@@ -2866,7 +2866,7 @@ impl crate::ai::bridge::EventSink for ChatPanel {
 
     /// Claude Code backend: interim assistant narration streamed mid-turn — rendered
     /// immediately as an Analysis bubble so long runs feel alive. The emitter
-    /// (claude_code::map_line) deduplicates the FINAL text against `Complete`.
+    /// (`claude_code::map_line`) deduplicates the FINAL text against `Complete`.
     fn on_interim_text(&mut self, text: String) {
         if !text.trim().is_empty() {
             self.add_message(ChatMessageKind::Analysis, text);

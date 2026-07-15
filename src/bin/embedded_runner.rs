@@ -4,10 +4,10 @@
 //! the oracle-independence invariant holds: grader and gradee share no code.
 //!
 //! Protocol: prompt on STDIN (read to EOF); ONE JSON envelope on STDOUT:
-//!   {"text": ..., "turns_used": N, "queries_executed": N,
-//!    "tools_called": [...], "error": null | "..."}
+//!   {"text": ..., "`turns_used"`: N, "`queries_executed"`: N,
+//!    "`tools_called"`: [...], "error": null | "..."}
 //! Exit codes: 0 = envelope emitted (agent-level errors ride IN the envelope);
-//! 2 = precondition failure (no ANTHROPIC_API_KEY / bad args) with stderr text.
+//! 2 = precondition failure (no `ANTHROPIC_API_KEY` / bad args) with stderr text.
 //!
 //! Headless hazards: a drainer thread auto-replies to the two
 //! blocking event classes — `QuestionForUser` gets a canned `UserAnswer` and
@@ -16,7 +16,7 @@
 //! empty data.") instead of a 10s timeout per call. Replies MUST echo the
 //! event's `request_id` — mismatched ids are discarded by the session. The
 //! drainer also collects tool names for the envelope; it is joined AFTER the
-//! session drops (closing event_tx) so no trailing ToolCall events race.
+//! session drops (closing `event_tx`) so no trailing `ToolCall` events race.
 //!
 //! No tracing subscriber is installed — nothing but the envelope reaches stdout.
 //!

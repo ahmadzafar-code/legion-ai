@@ -472,7 +472,7 @@ fn text_result(text: &str, is_error: bool) -> Value {
 /// [`AgentEvent`](super::agent::AgentEvent) (mirroring `agent.rs` `execute_tool`'s
 /// GUI arms), driving the live viewer over `bridge`, and translating the reply:
 /// a screenshot -> an MCP image block; an `Ack` -> text; a `viewport busy`/timeout
-/// -> `isError:true`. Typed args only (start_uid/entry_slug/range) — no model SQL.
+/// -> `isError:true`. Typed args only (`start_uid/entry_slug/range`) — no model SQL.
 fn visual_tool_result(
     name: &str,
     args: &Value,
@@ -701,7 +701,7 @@ fn get_selection_result(bridge: &super::bridge::UiBridge) -> Value {
     }
 }
 
-/// The request_id carried by any [`UiCommand`](super::agent::UiCommand) reply.
+/// The `request_id` carried by any [`UiCommand`](super::agent::UiCommand) reply.
 fn reply_request_id(cmd: &super::agent::UiCommand) -> Option<u64> {
     use super::agent::UiCommand;
     match cmd {

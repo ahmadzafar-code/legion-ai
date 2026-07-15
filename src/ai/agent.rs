@@ -2,7 +2,7 @@
 //!
 //! The agent runs the agentic loop:
 //! 1. POST messages to `api.anthropic.com/v1/messages`
-//! 2. Execute tool calls returned by Claude (run_query, read_code, etc.)
+//! 2. Execute tool calls returned by Claude (`run_query`, `read_code`, etc.)
 //! 3. Send tool results back, repeat until `stop_reason == "end_turn"`
 //!
 //! Session state persists across turns so follow-up questions continue
@@ -30,7 +30,7 @@ const API_RETRY_CEILING_MS: u64 = 60_000;
 
 /// A timeline highlight returned by the agent.
 ///
-/// `entry_slug` is the DuckDB entry slug (e.g. `"n0_cpu_c6"`).
+/// `entry_slug` is the `DuckDB` entry slug (e.g. `"n0_cpu_c6"`).
 /// Core.rs resolves it to an `EntryID` for overlay rendering.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Highlight {
@@ -79,7 +79,7 @@ struct ApiResponse {
 pub enum AgentEvent {
     /// Agent is about to execute a tool.
     ToolCall { name: String, purpose: String },
-    /// Tool returned a result (summary = first ~100 chars, full_content = complete result).
+    /// Tool returned a result (summary = first ~100 chars, `full_content` = complete result).
     ToolResult {
         name: String,
         summary: String,
@@ -165,7 +165,7 @@ pub enum AgentEvent {
 /// `ScreenshotRequest` or `ZoomRequest`.
 #[derive(Debug)]
 pub enum UiCommand {
-    /// Screenshot data in response to a ScreenshotRequest or ZoomRequest.
+    /// Screenshot data in response to a `ScreenshotRequest` or `ZoomRequest`.
     ScreenshotData {
         request_id: u64,
         png_bytes: Vec<u8>,
@@ -180,7 +180,7 @@ pub enum UiCommand {
     Ack { request_id: u64, message: String },
     /// The human's current timeline selection, in reply to `GetSelection`.
     /// `items` are selected task bars; `range` is the dragged region (entry label,
-    /// start_ns, stop_ns), if any. Both empty/None ⇒ nothing selected.
+    /// `start_ns`, `stop_ns`), if any. Both empty/None ⇒ nothing selected.
     SelectionData {
         request_id: u64,
         items: Vec<SelectedItemInfo>,
@@ -210,11 +210,11 @@ pub struct AgentSession {
     messages: Vec<Value>,
     pub api_key: String,
     pub model: String,
-    /// Path to the Legion DuckDB file.
+    /// Path to the Legion `DuckDB` file.
     pub duckdb_path: String,
-    /// Path to application source code root directory (used by read_code/list_files).
+    /// Path to application source code root directory (used by `read_code/list_files`).
     pub code_path: String,
-    /// Path to the Legion wiki root (used by wiki_index/wiki_read/wiki_search).
+    /// Path to the Legion wiki root (used by `wiki_index/wiki_read/wiki_search`).
     pub wiki_path: String,
     /// Maximum agent turns before forcing a summary response.
     pub max_turns: usize,
@@ -523,7 +523,7 @@ impl AgentSession {
     // ── Private helpers ──────────────────────────────────────────────────────
 
     /// Core agentic loop. Appends `user_message` to history, then iterates:
-    /// tool_use → execute tools → send results → repeat until end_turn.
+    /// `tool_use` → execute tools → send results → repeat until `end_turn`.
     fn run_agent_loop(&mut self, user_message: String) -> Result<AgentResponse, String> {
         // Append the new user message, prepending the running findings (the
         // model's own notes) so they ride at the live edge of context.
@@ -691,7 +691,7 @@ impl AgentSession {
 
         let (content, is_error) = match self.execute_tool(name, &input) {
             Ok(result) => (result, false),
-            Err(e) => (format!("Error: {}", e), true),
+            Err(e) => (format!("Error: {e}"), true),
         };
 
         // Emit progressive status: tool returned
@@ -772,7 +772,7 @@ impl AgentSession {
 
     /// Dispatch a tool call to the appropriate tool function.
     ///
-    /// Screenshot and zoom_to results are returned with a `__IMAGE_BASE64__`
+    /// Screenshot and `zoom_to` results are returned with a `__IMAGE_BASE64__`
     /// prefix so the caller can build an image content block for Claude's
     /// vision capability.
     fn execute_tool(&mut self, name: &str, input: &Value) -> Result<String, String> {
@@ -842,7 +842,7 @@ impl AgentSession {
                     let section = input.get("section").and_then(|v| v.as_str());
                     let max_chars = input
                         .get("max_chars")
-                        .and_then(|v| v.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .map(|n| n as usize);
                     super::tools::wiki_read(&self.wiki_path, path, section, max_chars)
                 }
@@ -853,7 +853,7 @@ impl AgentSession {
                     let tag = input.get("tag").and_then(|v| v.as_str());
                     let limit = input
                         .get("limit")
-                        .and_then(|v| v.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .map(|n| n as usize)
                         .unwrap_or(5);
                     super::tools::wiki_search(&self.wiki_path, query, section, tag, limit)
@@ -864,11 +864,11 @@ impl AgentSession {
                 "zoom_to" => {
                     let start_ns = input
                         .get("start_ns")
-                        .and_then(|v| v.as_i64())
+                        .and_then(serde_json::Value::as_i64)
                         .ok_or("zoom_to requires start_ns (integer)")?;
                     let stop_ns = input
                         .get("stop_ns")
-                        .and_then(|v| v.as_i64())
+                        .and_then(serde_json::Value::as_i64)
                         .ok_or("zoom_to requires stop_ns (integer)")?;
                     self.request_screenshot(Some((start_ns, stop_ns)))
                 }
@@ -883,7 +883,7 @@ impl AgentSession {
                     }
                     let percent = input
                         .get("percent")
-                        .and_then(|v| v.as_f64())
+                        .and_then(serde_json::Value::as_f64)
                         .unwrap_or(25.0)
                         .clamp(1.0, 200.0);
                     let request_id = self.alloc_request_id();
@@ -915,16 +915,16 @@ impl AgentSession {
                 "set_view" => {
                     let start_ns = input
                         .get("start_ns")
-                        .and_then(|v| v.as_i64())
+                        .and_then(serde_json::Value::as_i64)
                         .ok_or("set_view requires start_ns (integer)")?;
                     let stop_ns = input
                         .get("stop_ns")
-                        .and_then(|v| v.as_i64())
+                        .and_then(serde_json::Value::as_i64)
                         .ok_or("set_view requires stop_ns (integer)")?;
                     let entry_slug = input
                         .get("entry_slug")
                         .and_then(|v| v.as_str())
-                        .map(|s| s.to_owned());
+                        .map(std::borrow::ToOwned::to_owned);
                     let str_array = |key: &str| -> Option<Vec<String>> {
                         input.get(key).and_then(|v| v.as_array()).map(|arr| {
                             arr.iter()
@@ -932,7 +932,9 @@ impl AgentSession {
                                 .collect()
                         })
                     };
-                    let vertical_scale = input.get("vertical_scale").and_then(|v| v.as_f64());
+                    let vertical_scale = input
+                        .get("vertical_scale")
+                        .and_then(serde_json::Value::as_f64);
                     let request_id = self.alloc_request_id();
                     self.request_navigation(
                         request_id,
@@ -974,11 +976,11 @@ impl AgentSession {
                         .ok_or("highlight requires entry_slug (string)")?;
                     let start_ns = input
                         .get("start_ns")
-                        .and_then(|v| v.as_i64())
+                        .and_then(serde_json::Value::as_i64)
                         .ok_or("highlight requires start_ns (integer)")?;
                     let stop_ns = input
                         .get("stop_ns")
-                        .and_then(|v| v.as_i64())
+                        .and_then(serde_json::Value::as_i64)
                         .ok_or("highlight requires stop_ns (integer)")?;
                     let severity = input
                         .get("severity")
@@ -1053,7 +1055,7 @@ impl AgentSession {
                         .ok_or("update_findings requires note (string)")?;
                     let replace = input
                         .get("replace")
-                        .and_then(|v| v.as_bool())
+                        .and_then(serde_json::Value::as_bool)
                         .unwrap_or(false);
                     self.add_finding(note, replace);
                     Ok(format!(
@@ -1083,7 +1085,7 @@ impl AgentSession {
     /// POST the current messages to the Claude API with exponential backoff on 429/529.
     ///
     /// When using an Opus model, adaptive thinking (`"type": "adaptive"`) is
-    /// enabled with `output_config.effort = "high"` and max_tokens is doubled to
+    /// enabled with `output_config.effort = "high"` and `max_tokens` is doubled to
     /// 16 000. `claude-opus-4-8` rejects a fixed thinking budget, so we must use
     /// adaptive thinking here. Thinking is NOT added on Sonnet (the fast path) —
     /// the guard is `model.contains("opus")`.
@@ -1263,9 +1265,9 @@ impl AgentSession {
 
 // ── Context compaction ──────────────────────────────────────────────────────
 
-/// Maximum characters kept for a single non-image tool_result before truncation.
+/// Maximum characters kept for a single non-image `tool_result` before truncation.
 const MAX_TOOLRESULT_CHARS: usize = 3000;
-/// How many leading characters to keep when truncating an oversized tool_result.
+/// How many leading characters to keep when truncating an oversized `tool_result`.
 const TRUNCATE_KEEP_CHARS: usize = 2000;
 
 /// Truncate `s` to at most `max` bytes, snapping down to a UTF-8 char boundary.
@@ -1282,9 +1284,9 @@ fn req_str<'a>(input: &'a Value, key: &str) -> Result<&'a str, String> {
 /// growth and context rot. Two transforms, both sparing the most recent turn
 /// (the agent is still reasoning over it):
 ///
-/// 1. Strip the base64 image block from every screenshot tool_result except the
-///    most recent one, leaving its text metadata (visible range + entry_slugs).
-/// 2. Truncate oversized text tool_results (big run_query / overview dumps) to a
+/// 1. Strip the base64 image block from every screenshot `tool_result` except the
+///    most recent one, leaving its text metadata (visible range + `entry_slugs`).
+/// 2. Truncate oversized text `tool_results` (big `run_query` / overview dumps) to a
 ///    head slice plus a marker.
 ///
 /// Returns `(images_stripped, chars_saved)` for logging. Cache-safe: the message

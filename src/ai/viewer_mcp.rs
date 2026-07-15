@@ -16,7 +16,7 @@
 //! backend's tool-approval bridge). The [`spawn`]ed server carries a `UiBridge`,
 //! so visual tools (screenshot/zoom/highlight/…) drive the live timeline. Every
 //! query still routes through the hardened `execute_run_query_raw` (no new
-//! DuckDB connection).
+//! `DuckDB` connection).
 //!
 //! SECURITY: binds 127.0.0.1 ONLY (never 0.0.0.0), rejects any request whose
 //! `Origin` header is present and not a loopback origin (DNS-rebinding / CSRF
@@ -38,7 +38,7 @@ use std::time::Duration;
 /// requested 2025-11-25 but accepted our 2025-03-26 and echoed it thereafter).
 const HTTP_PROTOCOL_VERSION: &str = "2025-03-26";
 
-/// Max request size we will buffer from a single connection (DoS guard).
+/// Max request size we will buffer from a single connection (`DoS` guard).
 const MAX_REQUEST_BYTES: usize = 1_048_576;
 
 /// Well-known port the server tries first, so external `claude mcp add
@@ -255,7 +255,7 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// Is this raw request `POST /approve` (the PreToolUse hook bridge)? Cheap check
+/// Is this raw request `POST /approve` (the `PreToolUse` hook bridge)? Cheap check
 /// on the request line only — full parsing/auth happens in the handler.
 fn is_approve_request(raw: &[u8]) -> bool {
     let mut headers = [httparse::EMPTY_HEADER; 32];
@@ -263,8 +263,8 @@ fn is_approve_request(raw: &[u8]) -> bool {
     req.parse(raw).is_ok() && req.method == Some("POST") && req.path == Some("/approve")
 }
 
-/// The PreToolUse approval bridge. The hook's stdin JSON (tool_name +
-/// tool_input + …) arrives as the POST body; the response body is the
+/// The `PreToolUse` approval bridge. The hook's stdin JSON (`tool_name` +
+/// `tool_input` + …) arrives as the POST body; the response body is the
 /// `hookSpecificOutput` decision JSON the hook prints on stdout. Same Origin +
 /// bearer checks as /mcp (the curl command in the child's settings file carries
 /// the same session token). BLOCKS (up to [`APPROVAL_DEADLINE`]) while the panel
@@ -330,7 +330,7 @@ pub fn handle_approve_request(
 /// reply channel or the egui screenshot slot. The `ViewportToken` additionally
 /// makes the embedded chat agent and this server mutually exclusive. CONTRACT:
 /// single external driver at a time; do NOT make this loop multi-threaded without
-/// per-connection viewport serialization (all MCP requests share MCP_CONSUMER_ID,
+/// per-connection viewport serialization (all MCP requests share `MCP_CONSUMER_ID`,
 /// so concurrent same-id claims would be re-entrant, not mutually exclusive).
 pub fn spawn(
     duckdb_path: String,

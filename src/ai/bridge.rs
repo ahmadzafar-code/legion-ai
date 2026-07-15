@@ -83,7 +83,7 @@ pub trait EventSink {
 }
 
 /// Dispatch one [`AgentEvent`] to `sink`, routing any reply to `reply_tx`. This is
-/// the single source of truth for AgentEvent → UI handling, shared across every
+/// the single source of truth for `AgentEvent` → UI handling, shared across every
 /// event source.
 pub fn apply_agent_event<S: EventSink>(
     sink: &mut S,
