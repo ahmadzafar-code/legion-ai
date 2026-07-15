@@ -3750,17 +3750,45 @@ impl eframe::App for ProfApp {
                     // Gap so the button doesn't sit flush against the window edge
                     // (right_to_left => this space reserves the right margin).
                     ui.add_space(12.0);
-                    // A real button: filled Legion red while the panel is open,
-                    // grey otherwise. (No emoji — 🤖 was a tofu box in egui's
-                    // fonts.) #EC3937 is the flat fill of the Legion brick logo
-                    // (legion/realm/doxygen/logo.png).
-                    let (fill, text_color) = if cx.chat_panel.visible {
-                        (egui::Color32::from_rgb(236, 57, 55), egui::Color32::WHITE)
+                    // Filled Legion red while the panel is open, grey otherwise
+                    // (#EC3937 is the flat fill of the Legion brick logo).
+                    // Instead of a single fixed `.fill()` (which reads as a static
+                    // label), drive the fill from egui's per-state widget visuals
+                    // so it visibly LIGHTENS on hover and DARKENS on press, plus a
+                    // subtle raise — the affordance that says "clickable".
+                    let open = cx.chat_panel.visible;
+                    let (base, hover, press) = if open {
+                        (
+                            egui::Color32::from_rgb(236, 57, 55),
+                            egui::Color32::from_rgb(248, 92, 90),
+                            egui::Color32::from_rgb(205, 44, 42),
+                        )
                     } else {
                         (
                             egui::Color32::from_rgb(232, 234, 238),
-                            egui::Color32::from_rgb(30, 30, 30),
+                            egui::Color32::from_rgb(214, 218, 226),
+                            egui::Color32::from_rgb(198, 202, 212),
                         )
+                    };
+                    let border = egui::Stroke::new(1.0, egui::Color32::from_rgb(180, 185, 196));
+                    {
+                        let w = &mut ui.visuals_mut().widgets;
+                        for (st, fill) in [
+                            (&mut w.inactive, base),
+                            (&mut w.hovered, hover),
+                            (&mut w.active, press),
+                        ] {
+                            st.weak_bg_fill = fill;
+                            st.bg_fill = fill;
+                            st.bg_stroke = border;
+                        }
+                        // A 1px raise on hover reinforces "pressable".
+                        w.hovered.expansion = 1.0;
+                    }
+                    let text_color = if open {
+                        egui::Color32::WHITE
+                    } else {
+                        egui::Color32::from_rgb(30, 30, 30)
                     };
                     let label = egui::RichText::new("Legion AI")
                         .strong()
@@ -3769,11 +3797,6 @@ impl eframe::App for ProfApp {
                     if ui
                         .add(
                             egui::Button::new(label)
-                                .fill(fill)
-                                .stroke(egui::Stroke::new(
-                                    1.0,
-                                    egui::Color32::from_rgb(190, 195, 205),
-                                ))
                                 .rounding(0.0)
                                 // Wider min-size so the red band spreads well past
                                 // the text instead of hugging it.
