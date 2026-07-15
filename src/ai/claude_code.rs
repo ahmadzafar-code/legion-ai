@@ -267,15 +267,15 @@ pub fn preflight_claude() -> Result<String, String> {
         .arg("--version")
         .output()
         .map_err(|_| {
-            "Claude Code (`claude`) was not found on PATH. Install it and log in \
-         (`claude auth login`), or set ANTHROPIC_API_KEY to use the built-in API \
-         engine instead."
+            "Claude Code (`claude`) was not found on PATH. Install it \
+         (https://claude.com/claude-code) and log in with `claude auth login`, \
+         then try again."
                 .to_owned()
         })?;
     if !out.status.success() {
         return Err(format!(
-            "`claude --version` failed (status {}). Reinstall Claude Code, or set \
-             ANTHROPIC_API_KEY to use the built-in API engine instead.",
+            "`claude --version` failed (status {}). Reinstall Claude Code \
+             (https://claude.com/claude-code), then try again.",
             out.status
         ));
     }

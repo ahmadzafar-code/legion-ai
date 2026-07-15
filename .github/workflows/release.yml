@@ -1,7 +1,7 @@
 name: Release
 
 # Build prebuilt Legion AI binaries so testers skip the (~10 min) DuckDB
-# compile. Push a version tag (e.g. `v0.6.2`) to build + attach binaries to a
+# compile. Push a version tag (e.g. `v0.8.1`) to build + attach binaries to a
 # GitHub Release; `workflow_dispatch` builds them without publishing (a dry run).
 on:
   push:

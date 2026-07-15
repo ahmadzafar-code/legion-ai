@@ -3,6 +3,8 @@
 //! (plus `-dirty` for uncommitted changes); on a shallow CI clone it still
 //! returns the SHA, and with no `.git` (a source tarball, `cargo install` from
 //! crates.io) the command fails and the code falls back to `CARGO_PKG_VERSION`.
+//! Runs for all feature combos (build scripts can't be feature-gated cleanly);
+//! the cost is one git invocation, and only AI code reads `LEGION_AI_BUILD`.
 use std::process::Command;
 
 fn main() {

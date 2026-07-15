@@ -1,15 +1,17 @@
 [package]
 name = "legion_prof_viewer"
-version = "0.6.2"
+# Tracks the merged upstream prof-viewer version so the fork never reports an
+# older version than the upstream code it contains.
+version = "0.8.1"
 # Fork of StanfordLegion/prof-viewer (upstream author kept for attribution).
 authors = [
     "Elliott Slaughter <slaughter@cs.stanford.edu>",
     "Ahmad Zafar <ahmadz@stanford.edu>",
 ]
 description = "Profiler UI frontend for Legion Prof, with an AI diagnostic co-pilot (fork)"
-documentation = "https://github.com/ahmadzafar-code/prof-viewer"
-homepage = "https://github.com/ahmadzafar-code/prof-viewer"
-repository = "https://github.com/ahmadzafar-code/prof-viewer"
+documentation = "https://github.com/ahmadzafar-code/legion-ai"
+homepage = "https://github.com/ahmadzafar-code/legion-ai"
+repository = "https://github.com/ahmadzafar-code/legion-ai"
 readme = "README.md"
 keywords = ["legion", "legion-prof", "profiler"]
 categories = ["development-tools::profiling"]
@@ -74,7 +76,8 @@ image = { version = "0.25", default-features = false, features = ["png"], option
 base64 = { version = "0.22", optional = true }
 
 # ai chat panel: proper markdown rendering of analysis messages (headings,
-# lists, fenced code blocks, tables — Claude-Desktop-like). 0.18 = egui 0.29.
+# lists, fenced code blocks, tables — Claude-Desktop-like). 0.19 = egui 0.30;
+# keep in lockstep with the egui bump.
 egui_commonmark = { version = "0.19", optional = true }
 
 # ai agent tracing:

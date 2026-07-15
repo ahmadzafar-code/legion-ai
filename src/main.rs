@@ -1,7 +1,7 @@
 #![warn(clippy::all, rust_2018_idioms)]
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "ai"))]
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
 use legion_prof_viewer::deferred_data::DeferredDataSource;
@@ -18,7 +18,7 @@ fn http_ds(url: Url) -> Box<dyn DeferredDataSource> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn file_ds(path: impl AsRef<std::path::Path>) -> Box<dyn DeferredDataSource> {
+fn file_ds(path: impl AsRef<Path>) -> Box<dyn DeferredDataSource> {
     Box::new(ParallelDeferredDataSource::new(FileDataSource::new(path)))
 }
 
@@ -126,6 +126,13 @@ fn main() {
             Some("--wiki") => {
                 wiki_path = Some(flag_value(&args, i));
                 i += 2;
+            }
+            Some("--help") | Some("-h") => {
+                println!(
+                    "usage: legion_prof_viewer [<profile-path-or-URL>...] \
+                     [--duckdb <path.duckdb>] [--code <dir>] [--wiki <dir>]"
+                );
+                return;
             }
             Some(s) => {
                 match Url::parse(s) {
