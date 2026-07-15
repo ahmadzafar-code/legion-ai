@@ -8,8 +8,8 @@ use std::sync::Mutex;
 
 use legion_prof_viewer::data::{
     self, DataSource, DataSourceDescription, DataSourceInfo, EntryID, EntryInfo, Field, FieldID,
-    FieldSchema, Item, ItemField, ItemMeta, ItemUID, SlotMetaTile, SlotMetaTileData, SlotTile,
-    SlotTileData, SummaryTile, SummaryTileData, TileID, TileSet, UtilPoint,
+    FieldSchema, Item, ItemField, ItemMeta, ItemUID, SampleFormat, SlotMetaTile, SlotMetaTileData,
+    SlotTile, SlotTileData, SummaryTile, SummaryTileData, TileID, UtilPoint,
 };
 
 use legion_prof_viewer::deferred_data::DeferredDataSourceWrapper;
@@ -66,16 +66,18 @@ impl RandomDataSource {
         let info = DataSourceInfo {
             entry_info,
             interval: Self::interval(&mut rng),
-            tile_set: TileSet::default(),
+            tile_set: Default::default(),
             field_schema,
             warning_message: Some("Demo only. The data in this profile is synthetic.".to_string()),
+            nonempty_tiles: Default::default(),
+            sample_format: SampleFormat::Center,
         };
 
         let state = RandomState {
             summary_cache: BTreeMap::new(),
             slot_cache: BTreeMap::new(),
             rng,
-            item_uid_generator: ItemUIDGenerator::default(),
+            item_uid_generator: Default::default(),
         };
 
         Self {

@@ -17,6 +17,7 @@ pub mod merge_data;
 pub mod nvtxw;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod parallel_data;
+pub mod summary;
 pub mod timestamp;
 
 #[cfg(feature = "ai")]

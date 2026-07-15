@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use crate::data::{
     self, DataSourceDescription, DataSourceInfo, EntryID, EntryIndex, EntryInfo, Field, ItemField,
-    ItemLink, ItemUID, SlotMetaTile, SlotTile, SummaryTile, TileID,
+    ItemLink, ItemUID, NonemptyTiles, SlotMetaTile, SlotTile, SummaryTile, TileID,
 };
 use crate::deferred_data::{
     DeferredDataSource, SlotMetaTileResponse, SlotTileResponse, SummaryTileResponse,
@@ -59,6 +59,13 @@ impl MergeDeferredDataSource {
         }
     }
 
+    fn merge_tiles(mut first: NonemptyTiles, mut second: NonemptyTiles) -> NonemptyTiles {
+        let expected_len = first.len() + second.len();
+        first.append(&mut second);
+        assert_eq!(first.len(), expected_len);
+        first
+    }
+
     fn compute_mapping(source_infos: &[DataSourceInfo]) -> Vec<u64> {
         // Compute the mapping from old to new entries (basically the offset
         // of each initial slot)
@@ -91,11 +98,13 @@ impl MergeDeferredDataSource {
         let tile_set = first_info.tile_set.clone();
         let field_schema = first_info.field_schema.clone();
         let warning_message = first_info.warning_message.clone();
+        let sample_format = first_info.sample_format;
 
         for info in &source_infos {
             assert_eq!(tile_set, info.tile_set);
             assert_eq!(field_schema, info.field_schema);
             assert_eq!(warning_message, info.warning_message);
+            assert_eq!(sample_format, info.sample_format);
         }
 
         // Merge remaining fields
@@ -110,6 +119,11 @@ impl MergeDeferredDataSource {
             .map(|info| info.entry_info.clone())
             .reduce(Self::merge_entry)
             .unwrap();
+        let nonempty_tiles = source_infos
+            .iter()
+            .map(|info| info.nonempty_tiles.clone())
+            .reduce(Self::merge_tiles)
+            .unwrap();
 
         DataSourceInfo {
             entry_info,
@@ -117,6 +131,8 @@ impl MergeDeferredDataSource {
             tile_set,
             field_schema,
             warning_message,
+            nonempty_tiles,
+            sample_format,
         }
     }
 
@@ -305,7 +321,7 @@ impl DeferredDataSource for MergeDeferredDataSource {
 mod tests {
     use super::*;
 
-    use crate::data::{FieldSchema, TileSet};
+    use crate::data::{FieldSchema, SampleFormat, TileSet};
     use crate::timestamp::Timestamp;
 
     #[test]
@@ -391,6 +407,8 @@ mod tests {
             tile_set: TileSet { tiles: Vec::new() },
             field_schema: FieldSchema::new(),
             warning_message: None,
+            nonempty_tiles: NonemptyTiles::new(),
+            sample_format: SampleFormat::Start,
         };
         let second = DataSourceInfo {
             entry_info: EntryInfo::Panel {
@@ -407,6 +425,8 @@ mod tests {
             tile_set: TileSet { tiles: Vec::new() },
             field_schema: FieldSchema::new(),
             warning_message: None,
+            nonempty_tiles: NonemptyTiles::new(),
+            sample_format: SampleFormat::Start,
         };
 
         let infos = vec![first, second];
