@@ -208,6 +208,8 @@ fn http_response(code: u16, content_type: &str, body: &[u8]) -> Vec<u8> {
         401 => "Unauthorized",
         403 => "Forbidden",
         405 => "Method Not Allowed",
+        408 => "Request Timeout",
+        500 => "Internal Server Error",
         _ => "OK",
     };
     let mut out = format!(
@@ -373,8 +375,27 @@ pub fn spawn(
                 .with_ui_bridge(bridge)
                 .with_auth_token(Some(ctx_token.clone()));
             for mut stream in listener.incoming().flatten() {
-                let Ok(buf) = read_request(&mut stream) else {
-                    continue;
+                let buf = match read_request(&mut stream) {
+                    Ok(buf) => buf,
+                    Err(e) => {
+                        // The ONLY path that would otherwise drop the peer with no HTTP
+                        // response at all — which a client (Node/undici) surfaces as a
+                        // bare "socket connection was closed unexpectedly". Always answer,
+                        // and log the errno so an intermittent read failure (5s timeout,
+                        // reset, partial request) is diagnosable instead of silent.
+                        // Best-effort: the socket may already be gone.
+                        eprintln!(
+                            "[legion-viewer] read_request failed: kind={:?} err={e}",
+                            e.kind()
+                        );
+                        let _ = stream.write_all(&http_response(
+                            408,
+                            "text/plain",
+                            b"request read timeout",
+                        ));
+                        let _ = stream.flush();
+                        continue;
+                    }
                 };
                 if is_approve_request(&buf) {
                     // An approval blocks for MINUTES on a human verdict — hand it to
@@ -391,8 +412,12 @@ pub fn spawn(
                         });
                 } else {
                     let resp = handle_http_request(&buf, &ctx);
-                    let _ = stream.write_all(&resp);
-                    let _ = stream.flush();
+                    if let Err(e) = stream.write_all(&resp).and_then(|()| stream.flush()) {
+                        eprintln!(
+                            "[legion-viewer] /mcp response write failed: kind={:?} err={e}",
+                            e.kind()
+                        );
+                    }
                 }
             }
         })?;
