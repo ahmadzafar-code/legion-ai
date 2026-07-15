@@ -45,6 +45,8 @@ SELECT COUNT(*) AS sized_copies, \
   ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY mib), 3) AS p50_mib, \
   ROUND(SUM(mib), 2) AS total_mib \
 FROM sized WHERE mib IS NOT NULL";
+// total is in MiB (rendered adaptively as GiB when large): rounding to GiB in
+// SQL destroyed small totals — bg4N2's 6.73 MiB became a useless "0.01 GiB".
 
 /// Companion to [`DATA_SIZE_EVIDENCE_SQL`]: the 3 largest DISTINCT copy sizes
 /// with counts — the per-copy figures a sizing verdict must reconcile against
@@ -62,16 +64,19 @@ pub const DATA_SIZE_TOP_SQL: &str = "WITH sized AS ( \
 SELECT ROUND(mib, 1) AS mib, COUNT(*) AS copies \
 FROM sized WHERE mib IS NOT NULL \
 GROUP BY ROUND(mib, 1) ORDER BY mib DESC";
+// NOTE: no trailing LIMIT — execute_run_query_raw STRIPS trailing LIMITs (its
+// 50-row probe owns the cap), so the top-3 cut happens at render time in Rust.
 
 /// Gather a pre-computed overview of the profiling database.
 ///
 /// Runs several SQL queries and combines results into a structured text summary
 /// (~4–8 KB) suitable for the agent's initial context message. Each section is
 /// appended by one `overview_*` helper below, in the order the agent reads them.
-#[cfg(feature = "duckdb")]
+///
 /// # Errors
 /// Returns `Err` if the DuckDB file cannot be opened. Individual section
 /// failures are folded into the returned text rather than propagated.
+#[cfg(feature = "duckdb")]
 pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     let mut out = String::with_capacity(8192);
     overview_schema(&mut out);
