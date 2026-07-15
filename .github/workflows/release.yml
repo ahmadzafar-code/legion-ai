@@ -1,0 +1,46 @@
+name: Release
+
+# Build prebuilt Legion AI binaries so testers skip the (~10 min) DuckDB
+# compile. Push a version tag (e.g. `v0.6.2`) to build + attach binaries to a
+# GitHub Release; `workflow_dispatch` builds them without publishing (a dry run).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-x86_64
+          - os: macos-latest
+            name: macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux GUI deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libxkbcommon-dev libssl-dev
+      - name: Build (full AI layer)
+        run: cargo build --release --features viewer-mcp
+      - name: Package
+        run: tar czf legion-ai-${{ matrix.name }}.tar.gz -C target/release legion_prof_viewer
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: legion-ai-${{ matrix.name }}.tar.gz
+      - name: Upload dry-run artifact
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: legion-ai-${{ matrix.name }}
+          path: legion-ai-${{ matrix.name }}.tar.gz

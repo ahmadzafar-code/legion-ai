@@ -48,8 +48,20 @@ with a deliberately shaped surface:
   (`Task`, `Skill`, `SlashCommand`, `KillShell`) are not advertised at all —
   they could route around per-call gating.
 - **Read tier** (`Read`/`Glob`/`Grep` + the viewer's MCP tools) runs without
-  prompts. Reading is ingestion; harm requires an action, and every action is
-  gated:
+  prompts. Two important caveats on reading:
+  - The viewer's MCP `read_code`/`list_files` are root-confined (see *Source
+    access* above), but the harness's own `Read`/`Glob`/`Grep` are **not** — they
+    can read any file your user account can read, not only the `--add-dir` root.
+  - Reading is an **egress channel**, not just ingestion: whatever the agent
+    reads becomes conversation context sent to the model provider (Anthropic) and
+    is also written to the local session trace. A prompt-injection in profile
+    data or source could therefore make the agent read an unrelated host file and
+    exfiltrate it via the provider/trace, *without* tripping the action gate.
+  - Current posture: reads are **ungated by design** (an approval prompt on every
+    file read would train users to click *Always allow* — arguably worse). The
+    mitigations are to point the co-pilot only at profiles and code you trust,
+    and that every *action* (below) is gated. Path-scoped gating of out-of-root
+    reads is a considered future hardening (tracked in TODO).
 - **Action tier** (`Bash`, `Edit`, `Write`, `NotebookEdit`, `WebFetch`,
   `WebSearch`) triggers a **Deny / Allow / Always allow** dialog in the viewer
   for every call, showing the full untruncated command / path / URL with a

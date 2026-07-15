@@ -89,6 +89,11 @@ legion_prof duckdb  -o myrun_db      prof_*.gz
 #      "Give me an overview of this profile"
 ```
 
+**Prefer a prebuilt binary?** Tagged releases attach Linux (x86_64) and macOS
+(arm64) binaries on the [Releases page](https://github.com/ahmadzafar-code/legion-ai/releases) —
+download, `tar xzf`, and run, skipping the ~10-minute first-build DuckDB
+compile. Building from source (above) is always available.
+
 If the welcome screen says Claude Code isn't signed in, run `claude auth login` in
 any terminal — the hint flips to ready within seconds, no restart needed.
 

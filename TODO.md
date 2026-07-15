@@ -67,3 +67,6 @@
 - [ ] Take subprocess work off the egui frame path (concurrency-lifecycle#3): background `preflight_claude`, detached reaper on ↺, condvar-wakeable watchdog instead of the 500ms sleep tick.
 - [ ] Live DB-path switching (ux-product#3): `+ → Connect DuckDB…` mid-session should re-point the MCP server (mirror the SharedCodeRoot handle) instead of querying the snapshot-at-spawn DB.
 - [ ] Schema-driven overview (ux-product#4): derive the overview's Schema section from `information_schema` so an old `legion_prof duckdb` doesn't silently mismatch.
+- [ ] Read-egress gating (security#2): decide whether to path-scope the harness Read/Glob/Grep to the connected root(s) (out-of-root reads prompt) vs the current documented accept; needs the tryout-environment scope. Then align code + SECURITY.md.
+- [ ] cargo-deny licenses gate (testing-ci#6): curate deny.toml `[licenses] allow` against a first `cargo deny check licenses` run, then add `licenses` to the CI check.
+- [ ] Commit or CI-fetch the bg4N2 eval fixture (testing-ci#2): ~27 tests soft-skip when ../multinoderuns/bg4N2/*.duckdb is absent (it is in CI); either vendor the 4.7 MB fixture or fetch it by the sha the eval already pins.
