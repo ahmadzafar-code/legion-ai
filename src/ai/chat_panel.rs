@@ -40,17 +40,25 @@ const NATIVE_ENGINE_ENABLED: bool = false;
 pub enum ModelChoice {
     #[default]
     Default,
+    Fable,
     Opus,
     Sonnet,
     Haiku,
 }
 
 impl ModelChoice {
-    const ALL: [Self; 4] = [Self::Default, Self::Opus, Self::Sonnet, Self::Haiku];
+    const ALL: [Self; 5] = [
+        Self::Default,
+        Self::Fable,
+        Self::Opus,
+        Self::Sonnet,
+        Self::Haiku,
+    ];
 
     fn label(self) -> &'static str {
         match self {
             Self::Default => "Default",
+            Self::Fable => "Fable",
             Self::Opus => "Opus",
             Self::Sonnet => "Sonnet",
             Self::Haiku => "Haiku",
@@ -61,16 +69,19 @@ impl ModelChoice {
     fn blurb(self) -> &'static str {
         match self {
             Self::Default => "Your Claude Code's own configured model",
-            Self::Opus => "Deepest reasoning, slowest",
+            Self::Fable => "Most capable — above Opus (Claude 5)",
+            Self::Opus => "Deepest reasoning of the 4.x line",
             Self::Sonnet => "Balanced — a good default for most diagnoses",
             Self::Haiku => "Fastest, lightest",
         }
     }
 
-    /// `--model` alias for the Claude Code CLI; `None` = inherit its default.
+    /// `--model` value for the Claude Code CLI; `None` = inherit its default.
+    /// Fable has no short alias, so it uses the full model id.
     fn cc_alias(self) -> Option<&'static str> {
         match self {
             Self::Default => None,
+            Self::Fable => Some("claude-fable-5"),
             Self::Opus => Some("opus"),
             Self::Sonnet => Some("sonnet"),
             Self::Haiku => Some("haiku"),
@@ -81,6 +92,7 @@ impl ModelChoice {
     fn native_id(self) -> &'static str {
         match self {
             Self::Default | Self::Sonnet => NATIVE_MODEL,
+            Self::Fable => "claude-fable-5",
             Self::Opus => "claude-opus-4-8",
             Self::Haiku => "claude-haiku-4-5-20251001",
         }
@@ -92,6 +104,7 @@ impl ModelChoice {
 
     fn from_persisted(s: &str) -> Self {
         match s {
+            "fable" | "claude-fable-5" => Self::Fable,
             "opus" => Self::Opus,
             "sonnet" => Self::Sonnet,
             "haiku" => Self::Haiku,
@@ -3171,6 +3184,7 @@ mod backend_resolution_tests {
     #[test]
     fn model_and_effort_choices_map_and_round_trip() {
         assert_eq!(ModelChoice::Default.cc_alias(), None);
+        assert_eq!(ModelChoice::Fable.cc_alias(), Some("claude-fable-5"));
         assert_eq!(ModelChoice::Opus.cc_alias(), Some("opus"));
         assert_eq!(ModelChoice::Sonnet.cc_alias(), Some("sonnet"));
         assert_eq!(ModelChoice::Haiku.cc_alias(), Some("haiku"));
