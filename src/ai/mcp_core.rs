@@ -4,16 +4,17 @@
 //! `(&Value, &ServerCtx) -> Option<Value>` request handler plus the tool-list and
 //! tool-call builders. Two transports wrap it unchanged:
 //!   - `src/bin/mcp.rs` — a hand-rolled synchronous stdio JSON-RPC server (data
-//!     tools only).
+//!     + wiki tools; no GUI, so no visual tools).
 //!   - `ai/viewer_mcp.rs` — the in-viewer HTTP server (feature `viewer-mcp`).
 //!
 //! The advertised surface is CTX-GATED, never re-implemented here: the headless
 //! data tools (run_query / overview / find_blockers / read_code / list_files /
-//! final_answer) always; `wiki_*` when a wiki root is set; the 9 VISUAL tools
-//! ONLY when a [`UiBridge`](super::bridge::UiBridge) is attached (the in-viewer
-//! server) — they drive the live timeline over the bridge. Every query routes
-//! through the hardened `execute_run_query_raw`; this file never opens its own
-//! DuckDB connection. Feature-gated `duckdb`.
+//! final_answer) always; `wiki_*` always (the corpus is embedded in the binary;
+//! `wiki_root` merely overrides the source); the 9 VISUAL tools ONLY when a
+//! [`UiBridge`](super::bridge::UiBridge) is attached (the in-viewer server) —
+//! they drive the live timeline over the bridge. Every query routes through
+//! the hardened `execute_run_query_raw`; this file never opens its own DuckDB
+//! connection. Feature-gated `duckdb`.
 
 use super::tools::{
     execute_list_files, execute_read_code, execute_run_query_raw, find_blockers_sql,
@@ -44,8 +45,9 @@ const VISUAL_TOOLS: &[&str] = &[
     "clear_highlights",
 ];
 
-/// The JIT wiki tools advertised ONLY when a `wiki_root` is configured. They give
-/// the client on-demand retrieval over the Legion knowledge wiki.
+/// The JIT wiki tools — always advertised: the Legion knowledge corpus is
+/// embedded in the binary (see `tools/wiki.rs`), so retrieval works with no
+/// configuration; `wiki_root` merely overrides the source directory.
 const WIKI_TOOLS: &[&str] = &["wiki_index", "wiki_read", "wiki_search"];
 
 /// Valid `answer_type` values for the `final_answer` tool (the eval grader pins
@@ -68,8 +70,10 @@ pub struct ServerCtx {
     /// Live project root (see [`SharedCodeRoot`]). Read per-request via
     /// [`Self::code_root`] — never cache the inner value across requests.
     pub code_root: SharedCodeRoot,
-    /// Legion wiki root. When set, the `wiki_*` tools are advertised + routed
-    /// (mirrors `code_root` gating `read_code`).
+    /// Legion wiki root OVERRIDE. `None` (the default) serves the corpus
+    /// embedded in the binary at build time (see `tools/wiki.rs`); `Some(dir)`
+    /// reads that directory instead — corpus development without a rebuild.
+    /// The `wiki_*` tools are always advertised either way.
     pub wiki_root: Option<String>,
     pub protocol_version: &'static str,
     /// Present only on the in-viewer HTTP server: enables the VISUAL tools, which
@@ -136,7 +140,8 @@ impl ServerCtx {
         self
     }
 
-    /// Attach a Legion wiki root, enabling the `wiki_*` tools.
+    /// Override the wiki source with an on-disk directory (`--wiki`). `None` /
+    /// empty keeps the embedded corpus — the `wiki_*` tools work either way.
     pub fn with_wiki_root(mut self, wiki_root: Option<String>) -> Self {
         self.wiki_root = wiki_root.filter(|r| !r.is_empty());
         self
@@ -205,15 +210,14 @@ fn server_instructions(ctx: &ServerCtx) -> String {
              computes or why it is slow."
         ));
     }
-    if ctx.wiki_root.is_some() {
-        parts.push(
-            "A curated Legion wiki is available via wiki_index / wiki_read / wiki_search. \
-             BEFORE asserting a Legion concept, a flag's meaning, or a diagnostic verdict \
-             (compute-/communication-/runtime-bound, mapper stall, lifecycle phases such as \
-             waiting vs deferred), consult it and follow the page's Related links."
-                .to_owned(),
-        );
-    }
+    // The wiki ships embedded in the binary, so this guidance is unconditional.
+    parts.push(
+        "A curated Legion wiki is available via wiki_index / wiki_read / wiki_search. \
+         BEFORE asserting a Legion concept, a flag's meaning, or a diagnostic verdict \
+         (compute-/communication-/runtime-bound, mapper stall, lifecycle phases such as \
+         waiting vs deferred), consult it and follow the page's Related links."
+            .to_owned(),
+    );
     parts.join("\n\n")
 }
 
@@ -240,7 +244,6 @@ fn initialize_result(params: &Value, ctx: &ServerCtx) -> Value {
 /// definitions. Code tools are omitted unless a `code_root` was configured.
 fn tools_list_result(ctx: &ServerCtx) -> Value {
     let has_code = ctx.code_root().is_some();
-    let has_wiki = ctx.wiki_root.is_some();
     let has_bridge = ctx.ui_bridge.is_some();
     let mut tools: Vec<Value> = tool_definitions(true, true, true)
         .into_iter()
@@ -249,8 +252,8 @@ fn tools_list_result(ctx: &ServerCtx) -> Value {
             // Data tools (code tools only with a code root) ...
             (HEADLESS_TOOLS.contains(&name)
                 && (has_code || (name != "list_files" && name != "read_code")))
-                // ... the JIT wiki tools when a wiki root is configured ...
-                || (has_wiki && WIKI_TOOLS.contains(&name))
+                // ... the wiki tools always (the corpus is embedded) ...
+                || WIKI_TOOLS.contains(&name)
                 // ... plus the VISUAL tools when a UI bridge is attached.
                 || (has_bridge && VISUAL_TOOLS.contains(&name))
         })
@@ -410,51 +413,38 @@ fn tools_call_result(params: &Value, ctx: &ServerCtx) -> Value {
                 true,
             ),
         },
-        "wiki_index" => match &ctx.wiki_root {
-            Some(root) => {
+        // Wiki tools: an unset root ("") serves the corpus embedded in the
+        // binary; a configured root reads that directory instead (--wiki).
+        "wiki_index" => {
+            let root = ctx.wiki_root.as_deref().unwrap_or("");
+            let section = args.get("section").and_then(Value::as_str);
+            into_tool_result(super::tools::wiki_index(root, section))
+        }
+        "wiki_read" => match args.get("path").and_then(Value::as_str) {
+            Some(path) => {
+                let root = ctx.wiki_root.as_deref().unwrap_or("");
                 let section = args.get("section").and_then(Value::as_str);
-                into_tool_result(super::tools::wiki_index(root, section))
+                let max_chars = args
+                    .get("max_chars")
+                    .and_then(Value::as_u64)
+                    .map(|n| n as usize);
+                into_tool_result(super::tools::wiki_read(root, path, section, max_chars))
             }
-            None => (
-                "wiki_index unavailable: server started without a wiki root.".to_owned(),
-                true,
-            ),
+            None => ("wiki_read requires path (string).".to_owned(), true),
         },
-        "wiki_read" => match &ctx.wiki_root {
-            Some(root) => match args.get("path").and_then(Value::as_str) {
-                Some(path) => {
-                    let section = args.get("section").and_then(Value::as_str);
-                    let max_chars = args
-                        .get("max_chars")
-                        .and_then(Value::as_u64)
-                        .map(|n| n as usize);
-                    into_tool_result(super::tools::wiki_read(root, path, section, max_chars))
-                }
-                None => ("wiki_read requires path (string).".to_owned(), true),
-            },
-            None => (
-                "wiki_read unavailable: server started without a wiki root.".to_owned(),
-                true,
-            ),
-        },
-        "wiki_search" => match &ctx.wiki_root {
-            Some(root) => match args.get("query").and_then(Value::as_str) {
-                Some(query) => {
-                    let section = args.get("section").and_then(Value::as_str);
-                    let tag = args.get("tag").and_then(Value::as_str);
-                    let limit = args
-                        .get("limit")
-                        .and_then(Value::as_u64)
-                        .map(|n| n as usize)
-                        .unwrap_or(5);
-                    into_tool_result(super::tools::wiki_search(root, query, section, tag, limit))
-                }
-                None => ("wiki_search requires query (string).".to_owned(), true),
-            },
-            None => (
-                "wiki_search unavailable: server started without a wiki root.".to_owned(),
-                true,
-            ),
+        "wiki_search" => match args.get("query").and_then(Value::as_str) {
+            Some(query) => {
+                let root = ctx.wiki_root.as_deref().unwrap_or("");
+                let section = args.get("section").and_then(Value::as_str);
+                let tag = args.get("tag").and_then(Value::as_str);
+                let limit = args
+                    .get("limit")
+                    .and_then(Value::as_u64)
+                    .map(|n| n as usize)
+                    .unwrap_or(5);
+                into_tool_result(super::tools::wiki_search(root, query, section, tag, limit))
+            }
+            None => ("wiki_search requires query (string).".to_owned(), true),
         },
         "final_answer" => final_answer_result(&args),
         other => (format!("unknown tool: {other}"), true),
@@ -819,8 +809,9 @@ mod tests {
         assert_eq!(resp["result"]["protocolVersion"], "2025-03-26");
     }
 
-    /// initialize_result must carry an `instructions` briefing; the source-root and
-    /// wiki clauses are conditional on those roots being configured.
+    /// initialize_result must carry an `instructions` briefing; the source-root
+    /// clause is conditional on a code root, while the wiki clause is ALWAYS
+    /// present (the corpus is embedded in the binary).
     #[test]
     fn test_initialize_instructions_both_roots() {
         let ctx = ServerCtx::new("db".to_owned(), Some("/app/src".to_owned()))
@@ -850,7 +841,8 @@ mod tests {
 
     #[test]
     fn test_initialize_instructions_no_roots() {
-        // dummy_ctx() has code_root=None, wiki_root=None.
+        // dummy_ctx() has code_root=None, wiki_root=None — the wiki clause must
+        // STILL brief the agent (embedded corpus; no configuration required).
         let resp = handle_request(&req("initialize", json!({})), &dummy_ctx()).unwrap();
         let instr = resp["result"]["instructions"]
             .as_str()
@@ -861,12 +853,8 @@ mod tests {
             "no source clause without code_root"
         );
         assert!(
-            !instr.contains("wiki_index"),
-            "no wiki clause without wiki_root"
-        );
-        assert!(
-            !instr.contains("curated Legion wiki"),
-            "no wiki clause without wiki_root"
+            instr.contains("wiki_index") && instr.contains("curated Legion wiki"),
+            "wiki clause must be present even with no wiki_root (embedded corpus)"
         );
         // MiniAero guardrail (verify-verdict-vs-data): sizing claims must be
         // reconciled against the overview's Data-Size Evidence.
@@ -878,7 +866,7 @@ mod tests {
 
     #[test]
     fn test_initialize_instructions_single_root() {
-        // Only wiki configured.
+        // Wiki override configured: clause present (as always), source absent.
         let wiki_only =
             ServerCtx::new("db".to_owned(), None).with_wiki_root(Some("/wiki".to_owned()));
         let i = handle_request(&req("initialize", json!({})), &wiki_only).unwrap()["result"]
@@ -892,7 +880,8 @@ mod tests {
             "no source clause without code_root"
         );
 
-        // Only code configured (vice-versa).
+        // Only code configured: source clause present, wiki clause STILL present
+        // (embedded corpus is not conditional on a root).
         let code_only = ServerCtx::new("db".to_owned(), Some("/only/code".to_owned()));
         let j = handle_request(&req("initialize", json!({})), &code_only).unwrap()["result"]
             ["instructions"]
@@ -901,8 +890,8 @@ mod tests {
             .to_owned();
         assert!(j.contains("/only/code"), "source clause with path expected");
         assert!(
-            !j.contains("wiki_index"),
-            "no wiki clause without wiki_root"
+            j.contains("wiki_index"),
+            "wiki clause must be present without an explicit wiki_root"
         );
     }
 
@@ -1066,9 +1055,10 @@ mod tests {
     }
 
     #[test]
-    fn test_tools_list_wiki_gated_on_wiki_root() {
-        // WITHOUT a wiki root: the wiki tools are not advertised.
-        let names_no_wiki: Vec<String> =
+    fn test_tools_list_wiki_always_advertised() {
+        // WITHOUT a wiki root: the wiki tools are STILL advertised — the corpus
+        // is embedded in the binary, so retrieval needs no configuration.
+        let names_no_root: Vec<String> =
             handle_request(&req("tools/list", json!({})), &dummy_ctx()).unwrap()["result"]["tools"]
                 .as_array()
                 .unwrap()
@@ -1077,12 +1067,12 @@ mod tests {
                 .collect();
         for w in ["wiki_index", "wiki_read", "wiki_search"] {
             assert!(
-                !names_no_wiki.contains(&w.to_owned()),
-                "wiki tool {w} leaked without a wiki root"
+                names_no_root.contains(&w.to_owned()),
+                "wiki tool {w} must be advertised without a wiki root (embedded corpus)"
             );
         }
 
-        // WITH a wiki root: all three appear, with camelCase inputSchema (no leak).
+        // WITH a wiki-root override: still all three, camelCase inputSchema (no leak).
         let ctx = ServerCtx::new("unused".to_owned(), None).with_wiki_root(Some("/tmp".to_owned()));
         let tools = handle_request(&req("tools/list", json!({})), &ctx).unwrap()["result"]["tools"]
             .as_array()
@@ -1114,11 +1104,9 @@ mod tests {
 
     #[test]
     fn test_wiki_call_routes_to_index() {
-        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../wiki-legion/wiki");
-        if !p.is_dir() {
-            eprintln!("skipping: wiki root absent");
-            return;
-        }
+        // Explicit on-disk root (the in-repo committed corpus).
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("wiki");
+        assert!(p.is_dir(), "in-repo wiki/ corpus missing");
         let ctx = ServerCtx::new("unused".to_owned(), None)
             .with_wiki_root(Some(p.to_string_lossy().into_owned()));
         let (text, is_error) = call(&ctx, "wiki_index", json!({ "section": "pitfalls" }));
@@ -1128,15 +1116,16 @@ mod tests {
             "wiki_index output unexpected: {text:.80}"
         );
 
-        // Routed without a wiki root => a clear isError result, not a protocol error.
-        let (text2, is_error2) = call(&dummy_ctx(), "wiki_index", json!({}));
+        // Routed WITHOUT a wiki root: served from the embedded corpus — same
+        // sections, no error.
+        let (text2, is_error2) = call(&dummy_ctx(), "wiki_index", json!({ "section": "pitfalls" }));
         assert!(
-            is_error2,
-            "wiki_index without a wiki root must be an error result"
+            !is_error2,
+            "wiki_index without a wiki root must serve the embedded corpus: {text2}"
         );
-        assert!(
-            text2.contains("without a wiki root"),
-            "unexpected msg: {text2}"
+        assert_eq!(
+            text, text2,
+            "embedded corpus must match the committed wiki/ tree"
         );
     }
 

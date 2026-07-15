@@ -991,14 +991,15 @@ impl ChatPanel {
         ToolStatus::Ready
     }
 
-    /// Wiki tool status: green only when the configured root is a real
-    /// directory (the value the `wiki_*` tools actually serve from). Empty =
-    /// Off — the wiki is optional and auto-detected at `wiki-legion/wiki`
-    /// relative to the launch directory.
+    /// Wiki tool status. Empty path = Ready (the corpus embedded at build time
+    /// serves the `wiki_*` tools); a non-empty `--wiki` override is green only
+    /// when it names a real directory.
     fn tool_status_wiki(&self) -> ToolStatus {
         let trimmed = self.wiki_path_buffer.trim();
         if trimmed.is_empty() {
-            return ToolStatus::Off;
+            // No override configured: the corpus embedded at build time serves
+            // the wiki_* tools, so the wiki is always Ready.
+            return ToolStatus::Ready;
         }
         if std::path::Path::new(trimmed).is_dir() {
             ToolStatus::Ready
@@ -1504,11 +1505,17 @@ impl ChatPanel {
                 .on_hover_text(&code_hover);
 
             // Wiki chip — the Legion knowledge corpus behind the wiki_* tools.
+            // Built in (embedded at compile time), so Off is unreachable; a
+            // --wiki override that names a missing folder still surfaces as ×.
             let (wiki_label, wiki_color, wiki_hover) = match &wiki_status {
                 ToolStatus::Ready => (
                     "Wiki •",
                     egui::Color32::from_rgb(34, 139, 34),
-                    "Legion knowledge wiki connected".to_string(),
+                    if self.wiki_path_buffer.trim().is_empty() {
+                        "Legion knowledge wiki (built in)".to_string()
+                    } else {
+                        format!("Legion knowledge wiki: {}", self.wiki_path_buffer.trim())
+                    },
                 ),
                 ToolStatus::Error(msg) => (
                     "Wiki ×",
@@ -1518,7 +1525,7 @@ impl ChatPanel {
                 ToolStatus::Off => (
                     "Wiki ○",
                     egui::Color32::from_rgb(160, 160, 160),
-                    "Optional — pass --wiki <dir> (auto-detected at wiki-legion/wiki)".to_string(),
+                    "Unavailable".to_string(),
                 ),
             };
             ui.label(egui::RichText::new(wiki_label).size(13.5).color(wiki_color))

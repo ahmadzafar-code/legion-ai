@@ -260,7 +260,7 @@ Synopsis:
 legion_prof_viewer <archive-dir-or-URL> \
     [--duckdb <path.duckdb>]   # profile database (skip if auto-detected)
     [--code   <dir>]           # profiled application's source
-    [--wiki   <dir>]           # Legion knowledge wiki (optional)
+    [--wiki   <dir>]           # override the built-in Legion knowledge wiki
 ```
 
 Everything passed by flag can also be connected later from the panel's +
@@ -281,13 +281,16 @@ The DuckDB writer is shared with upstream prof-viewer (this fork does not
 modify it), so any recent `legion_prof` produces a database with the schema
 the tools expect.
 
-### Optional knowledge wiki
+### Knowledge wiki
 
-The `wiki_*` tools serve a curated Legion-concepts corpus (task lifecycle,
-mapper behavior, common bottleneck patterns) that the agent consults when
-diagnosing. Point `--wiki <dir>` at a corpus; `wiki-legion/wiki` relative to
-the launch directory is auto-detected. The corpus used during development is
-published separately — see this fork's release notes.
+The `wiki_*` tools serve a curated Legion-concepts corpus — task lifecycle,
+mapper behavior, common bottleneck patterns — that the agent consults when
+diagnosing. The corpus lives in this repository under [`wiki/`](wiki/) and is
+embedded into the binary at build time, so it is available in every AI build
+(including prebuilt release binaries) with no configuration. Pass
+`--wiki <dir>` to serve a different corpus from disk instead; edits to that
+directory take effect without a rebuild, which is the workflow for corpus
+development.
 
 ### Using your own agent over MCP (BYOA)
 

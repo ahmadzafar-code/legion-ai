@@ -32,8 +32,9 @@ The following files are new to the fork; review them as ordinary new code:
 | `src/ai/agent.rs` | the built-in direct-API engine, currently disabled (`chat_panel::NATIVE_ENGINE_ENABLED = false`); retained for the eval harness |
 | `src/ai/trace.rs` | default-on local session transcripts (JSONL, 0600/0700) |
 | `src/app/core/legion_ai.rs` | every AI addition to the viewer core; see The `core.rs` arrangement below |
-| `src/bin/{mcp,eval,embedded_runner}.rs` | stdio MCP server; eval harness; eval gradee |
-| `build.rs`, `check.sh`, `deny.toml`, `SECURITY.md`, `docs/` | build identity, verify script, supply-chain policy, threat model, docs |
+| `src/bin/{mcp,eval,embedded_runner}.rs` | stdio MCP server (data + wiki tools); eval harness; eval gradee |
+| `wiki/` | the Legion knowledge corpus (144 markdown pages) served by the `wiki_*` tools; embedded into AI builds by `build.rs` |
+| `build.rs`, `check.sh`, `deny.toml`, `SECURITY.md`, `docs/` | build identity + wiki embedding, verify script, supply-chain policy, threat model, docs |
 
 ### Modified upstream files
 

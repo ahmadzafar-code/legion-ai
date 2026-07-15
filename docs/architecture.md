@@ -61,9 +61,11 @@ Claude Code is the only interactive agent.
 (`AccessMode::ReadOnly` plus `enable_external_access(false)`) with a 50-row
 cap and `LIMIT` stripping; `source.rs` is a sandboxed source reader;
 `overview.rs` produces roughly 25 pre-computed diagnostic signal sections;
-`wiki.rs` retrieves Legion knowledge; `defs.rs` holds the tool schemas. Both
-engines call exactly these implementations — no tool has a second
-implementation anywhere in the crate.
+`wiki.rs` retrieves Legion knowledge from the corpus in the repository's
+`wiki/` directory, which `build.rs` embeds into the binary (an on-disk
+`--wiki` root overrides it for corpus development); `defs.rs` holds the tool
+schemas. Both engines call exactly these implementations — no tool has a
+second implementation anywhere in the crate.
 
 ## Engines
 

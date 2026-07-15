@@ -81,9 +81,10 @@ fn main() {
 /// URL/path arguments:
 ///   --duckdb <path.duckdb>   profile database for the data tools
 ///   --code <dir>             profiled application's source (read_code root)
-///   --wiki <dir>             Legion knowledge wiki root
-/// A missing --duckdb is auto-detected next to an opened profile; a missing
-/// --wiki auto-detects `wiki-legion/wiki` relative to the launch directory.
+///   --wiki <dir>             OVERRIDE the built-in Legion knowledge wiki
+/// A missing --duckdb is auto-detected next to an opened profile. The wiki is
+/// embedded in the binary at build time; --wiki (or an in-repo `wiki/` next to
+/// the launch directory) overrides it for corpus development.
 #[cfg(all(not(target_arch = "wasm32"), feature = "ai"))]
 fn main() {
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
@@ -175,16 +176,24 @@ fn main() {
         println!("Legion AI code root: {code}");
     }
 
-    // Auto-detect the Legion wiki at `wiki-legion/wiki` (relative to the launch
-    // dir) when no --wiki was given, so the knowledge tools work out of the box.
+    // The wiki ships EMBEDDED in the binary; no path is required. A live
+    // checkout's `wiki/` (or the legacy `wiki-legion/wiki` dev workspace) is
+    // auto-adopted as an override when present, so corpus edits are served
+    // without a rebuild.
     if wiki_path.is_none() {
-        let cand = Path::new("wiki-legion").join("wiki");
-        if cand.is_dir() {
-            wiki_path = Some(cand.to_string_lossy().into_owned());
+        for cand in [
+            Path::new("wiki").to_path_buf(),
+            Path::new("wiki-legion").join("wiki"),
+        ] {
+            if cand.is_dir() {
+                wiki_path = Some(cand.to_string_lossy().into_owned());
+                break;
+            }
         }
     }
-    if let Some(ref wiki) = wiki_path {
-        println!("Legion AI wiki root: {wiki}");
+    match &wiki_path {
+        Some(wiki) => println!("Legion AI wiki root: {wiki} (overrides the built-in corpus)"),
+        None => println!("Legion AI wiki: built-in corpus"),
     }
 
     legion_prof_viewer::app::start_with_options(

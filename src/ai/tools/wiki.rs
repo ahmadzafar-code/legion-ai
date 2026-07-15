@@ -1,10 +1,20 @@
 //! The Legion knowledge wiki: corpus loader/cache and the `wiki_index` /
 //! `wiki_read` / `wiki_search` tools.
+//!
+//! The corpus ships INSIDE the binary: `build.rs` embeds every page under the
+//! repo's `wiki/` directory into [`WIKI_EMBEDDED`], so the wiki tools work in
+//! every AI build — including prebuilt release binaries — with nothing to
+//! locate at run time. An EMPTY `wiki_root` selects the embedded corpus; a
+//! non-empty root reads that directory from disk instead (the `--wiki`
+//! override, for corpus development without a rebuild).
 
 use super::source::SKIP_DIRS;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
+
+// (rel_path, content) for every `wiki/**/*.md`, sorted by path. Generated.
+include!(concat!(env!("OUT_DIR"), "/wiki_embedded.rs"));
 
 /// Default per-read character budget for `wiki_read`. Chosen from the corpus size
 /// distribution (median ~5.7 KB, p90 ~7.2 KB, max ~40 KB): `12_000` chars (~3K
@@ -159,6 +169,33 @@ fn wiki_cap_with_marker(text: &str, max_chars: usize) -> String {
     )
 }
 
+/// Parse one page's metadata from its relative path + content (shared by the
+/// filesystem walk and the embedded corpus).
+fn page_from_content(rel: &str, content: &str) -> WikiPage {
+    let name = rel.rsplit('/').next().unwrap_or(rel).to_owned();
+    let section = rel.split('/').next().unwrap_or("").to_owned();
+    let (title, summary, tags) = parse_frontmatter(content);
+    let title = title
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| filename_to_title(&name));
+    let summary = summary
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| title.clone());
+    let tldr_lc = extract_section(content, "TL;DR")
+        .unwrap_or_default()
+        .to_lowercase();
+    let tier = wiki_tier(&section);
+    WikiPage {
+        path: rel.to_owned(),
+        section,
+        title,
+        summary,
+        tags,
+        tldr_lc,
+        tier,
+    }
+}
+
 /// Walk `dir` recursively, collecting every `.md` page's metadata into `out`.
 fn collect_wiki_pages(root: &Path, dir: &Path, out: &mut Vec<WikiPage>) {
     let rd = match std::fs::read_dir(dir) {
@@ -178,50 +215,38 @@ fn collect_wiki_pages(root: &Path, dir: &Path, out: &mut Vec<WikiPage>) {
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .replace('\\', "/");
-            let section = rel.split('/').next().unwrap_or("").to_owned();
             let content = std::fs::read_to_string(&path).unwrap_or_default();
-            let (title, summary, tags) = parse_frontmatter(&content);
-            let title = title
-                .filter(|t| !t.is_empty())
-                .unwrap_or_else(|| filename_to_title(&name));
-            let summary = summary
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| title.clone());
-            let tldr_lc = extract_section(&content, "TL;DR")
-                .unwrap_or_default()
-                .to_lowercase();
-            let tier = wiki_tier(&section);
-            out.push(WikiPage {
-                path: rel,
-                section,
-                title,
-                summary,
-                tags,
-                tldr_lc,
-                tier,
-            });
+            out.push(page_from_content(&rel, &content));
         }
     }
 }
 
-/// Build (and memoize) the page-metadata corpus for `wiki_root`. Err if the root
-/// is missing/not-a-directory or contains no pages.
+/// Build (and memoize) the page-metadata corpus for `wiki_root`. An EMPTY root
+/// selects the embedded corpus (the shipped default); a non-empty root walks
+/// that directory instead. Err if a directory root is missing or has no pages.
 fn wiki_corpus(wiki_root: &str) -> Result<Arc<Vec<WikiPage>>, String> {
-    if wiki_root.is_empty() {
-        return Err("Wiki path not configured.".into());
-    }
     let cache = WIKI_CORPUS_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(c) = cache.lock().unwrap().get(wiki_root) {
         return Ok(c.clone());
     }
-    let root = Path::new(wiki_root);
-    if !root.is_dir() {
-        return Err(format!("Wiki root '{wiki_root}' is not a directory."));
-    }
     let mut pages = Vec::new();
-    collect_wiki_pages(root, root, &mut pages);
-    if pages.is_empty() {
-        return Err(format!("No .md pages found under wiki root '{wiki_root}'."));
+    if wiki_root.is_empty() {
+        for (rel, content) in WIKI_EMBEDDED {
+            pages.push(page_from_content(rel, content));
+        }
+        if pages.is_empty() {
+            // Only possible if the crate was built without a `wiki/` directory.
+            return Err("Embedded wiki corpus is empty (crate built without wiki/).".into());
+        }
+    } else {
+        let root = Path::new(wiki_root);
+        if !root.is_dir() {
+            return Err(format!("Wiki root '{wiki_root}' is not a directory."));
+        }
+        collect_wiki_pages(root, root, &mut pages);
+        if pages.is_empty() {
+            return Err(format!("No .md pages found under wiki root '{wiki_root}'."));
+        }
     }
     pages.sort_by(|a, b| a.path.cmp(&b.path));
     let arc = Arc::new(pages);
@@ -298,9 +323,18 @@ pub fn wiki_read(
             "Unknown wiki page '{path}'. Use wiki_index or wiki_search to find valid paths."
         ));
     }
-    let full = Path::new(wiki_root).join(&norm);
-    let content = std::fs::read_to_string(&full)
-        .map_err(|e| format!("Cannot read '{}': {}", full.display(), e))?;
+    let content = if wiki_root.is_empty() {
+        // Embedded corpus: the table is sorted by path (build.rs), so look up
+        // by binary search.
+        WIKI_EMBEDDED
+            .binary_search_by(|(p, _)| p.cmp(&norm.as_str()))
+            .map(|i| WIKI_EMBEDDED[i].1.to_owned())
+            .map_err(|_| format!("Embedded wiki page '{norm}' missing from the table."))?
+    } else {
+        let full = Path::new(wiki_root).join(&norm);
+        std::fs::read_to_string(&full)
+            .map_err(|e| format!("Cannot read '{}': {}", full.display(), e))?
+    };
 
     let body = match section {
         Some(header) => extract_section(&content, header).ok_or_else(|| {
@@ -407,16 +441,49 @@ pub fn wiki_search(
 }
 
 /// Wiki-tool tests. NOT gated on `duckdb` — the `wiki_*` tools are pure file/string
-/// helpers and must work under `{ai}` alone. Soft-skip when the wiki tree is absent
-/// (it is an untracked fixture one level above the crate dir).
+/// helpers and must work under `{ai}` alone. The corpus is the in-repo `wiki/`
+/// directory (committed, always present), so nothing soft-skips; the `Option`
+/// shape of `wiki_root()` is kept only to leave the guard sites untouched.
 #[cfg(test)]
 mod wiki_tests {
     use super::*;
 
-    /// The Legion wiki root (`wiki-legion/wiki`, one level above the crate dir).
+    /// The Legion wiki root: the crate's own committed `wiki/` corpus.
     fn wiki_root() -> Option<String> {
-        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../wiki-legion/wiki");
-        p.is_dir().then(|| p.to_string_lossy().into_owned())
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("wiki");
+        assert!(p.is_dir(), "in-repo wiki/ corpus missing");
+        Some(p.to_string_lossy().into_owned())
+    }
+
+    /// The embedded corpus (empty root) must load and match the on-disk corpus
+    /// it was built from: same page set, same index rows.
+    #[test]
+    fn test_wiki_embedded_matches_fs_corpus() {
+        let fs_root = wiki_root().unwrap();
+        let embedded_idx = wiki_index("", None).unwrap();
+        let fs_idx = wiki_index(&fs_root, None).unwrap();
+        assert_eq!(
+            embedded_idx, fs_idx,
+            "embedded corpus diverges from the committed wiki/ tree"
+        );
+    }
+
+    /// An embedded read (empty root) returns the same bytes as the fs read.
+    #[test]
+    fn test_wiki_embedded_read_matches_fs_read() {
+        let fs_root = wiki_root().unwrap();
+        let page = concept_with_debug_signals(&fs_root).expect("a concept page exists");
+        let emb = wiki_read("", &page, None, Some(usize::MAX)).unwrap();
+        let fs = wiki_read(&fs_root, &page, None, Some(usize::MAX)).unwrap();
+        assert_eq!(emb, fs, "embedded page content diverges: {page}");
+    }
+
+    /// Path safety holds for the embedded corpus too.
+    #[test]
+    fn test_wiki_embedded_read_path_safety() {
+        assert!(wiki_read("", "../Cargo.toml", None, None).is_err());
+        assert!(wiki_read("", "/etc/hosts", None, None).is_err());
+        assert!(wiki_read("", "concepts/does-not-exist.md", None, None).is_err());
     }
 
     /// First listed concept page that has BOTH a `## TL;DR` and a `## Debug signals`

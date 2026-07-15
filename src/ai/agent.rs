@@ -275,8 +275,9 @@ impl AgentSession {
     ) -> Self {
         let has_duckdb = cfg!(feature = "duckdb") && !duckdb_path.is_empty();
         let has_code = !code_path.is_empty();
-        let has_wiki = !wiki_path.is_empty();
-        let tools = super::tools::tool_definitions(has_duckdb, has_code, has_wiki);
+        // Wiki tools are unconditional: an empty wiki_path serves the corpus
+        // embedded in the binary (see tools/wiki.rs).
+        let tools = super::tools::tool_definitions(has_duckdb, has_code, true);
 
         let system_prompt = build_system_prompt(has_code);
 
@@ -369,8 +370,8 @@ impl AgentSession {
         self.code_path = code_path.to_owned();
         let has_duckdb = cfg!(feature = "duckdb") && !self.duckdb_path.is_empty();
         let has_code = !self.code_path.is_empty();
-        let has_wiki = !self.wiki_path.is_empty();
-        self.tools = super::tools::tool_definitions(has_duckdb, has_code, has_wiki);
+        // Wiki tools unconditional (embedded corpus; empty path = embedded).
+        self.tools = super::tools::tool_definitions(has_duckdb, has_code, true);
         self.system_prompt = build_system_prompt(has_code);
     }
 
