@@ -827,6 +827,22 @@ impl ChatPanel {
         ToolStatus::Ready
     }
 
+    /// Wiki tool status: green only when the configured root is a real
+    /// directory (the value the `wiki_*` tools actually serve from). Empty =
+    /// Off — the wiki is optional and auto-detected at `wiki-legion/wiki`
+    /// relative to the launch directory.
+    fn tool_status_wiki(&self) -> ToolStatus {
+        let trimmed = self.wiki_path_buffer.trim();
+        if trimmed.is_empty() {
+            return ToolStatus::Off;
+        }
+        if std::path::Path::new(trimmed).is_dir() {
+            ToolStatus::Ready
+        } else {
+            ToolStatus::Error("Folder not found".into())
+        }
+    }
+
     /// Poll for progressive agent events (non-blocking).
     ///
     /// Two-phase approach: drain all available events under the lock into a
@@ -1226,6 +1242,7 @@ impl ChatPanel {
         // Tool status chips row
         let db_status = self.tool_status_db();
         let code_status = self.tool_status_code();
+        let wiki_status = self.tool_status_wiki();
         let visual_status = self.tool_status_visual();
         let has_key = self.get_api_key().is_some();
 
@@ -1273,6 +1290,27 @@ impl ChatPanel {
             };
             ui.label(egui::RichText::new(code_label).size(13.5).color(code_color))
                 .on_hover_text(&code_hover);
+
+            // Wiki chip — the Legion knowledge corpus behind the wiki_* tools.
+            let (wiki_label, wiki_color, wiki_hover) = match &wiki_status {
+                ToolStatus::Ready => (
+                    "Wiki •",
+                    egui::Color32::from_rgb(34, 139, 34),
+                    "Legion knowledge wiki connected".to_string(),
+                ),
+                ToolStatus::Error(msg) => (
+                    "Wiki ×",
+                    egui::Color32::from_rgb(220, 60, 60),
+                    format!("Error: {msg}"),
+                ),
+                ToolStatus::Off => (
+                    "Wiki ○",
+                    egui::Color32::from_rgb(160, 160, 160),
+                    "Optional — pass --wiki <dir> (auto-detected at wiki-legion/wiki)".to_string(),
+                ),
+            };
+            ui.label(egui::RichText::new(wiki_label).size(13.5).color(wiki_color))
+                .on_hover_text(&wiki_hover);
 
             // Visual chip
             let (vis_label, vis_color) = match &visual_status {
