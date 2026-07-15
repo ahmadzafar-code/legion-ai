@@ -111,7 +111,10 @@ impl SessionTrace {
         home: Option<&Path>,
     ) -> Option<PathBuf> {
         if matches!(
-            toggle.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+            toggle
+                .map(str::trim)
+                .map(str::to_ascii_lowercase)
+                .as_deref(),
             Some("off" | "0" | "false" | "no")
         ) {
             return None;
@@ -124,18 +127,43 @@ impl SessionTrace {
 
     /// Open a session transcript in `dir` (creating it). `None` on any I/O
     /// failure — tracing is best-effort, never a startup blocker.
+    ///
+    /// Traces record untruncated tool inputs/outputs — full SQL, Bash commands
+    /// and their output, source snippets the agent read — so on unix the
+    /// directory is created `0700` and each file `0600`: a co-tenant on a shared
+    /// login node must not be able to read another user's session.
     pub fn open_in(dir: &Path) -> Option<Arc<Self>> {
-        fs::create_dir_all(dir).ok()?;
+        Self::create_dir_private(dir).ok()?;
         let path = dir.join(format!("session_{}.jsonl", new_session_id()));
-        let file = OpenOptions::new()
-            .create_new(true)
-            .append(true)
-            .open(&path)
-            .ok()?;
+        let mut opts = OpenOptions::new();
+        opts.create_new(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let file = opts.open(&path).ok()?;
         Some(Arc::new(SessionTrace {
             file: Mutex::new(file),
             path,
         }))
+    }
+
+    /// Create `dir` (and parents) owner-only (`0700`) on unix; a plain
+    /// create_dir_all elsewhere. Idempotent — an existing dir is fine.
+    fn create_dir_private(dir: &Path) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir)
+        }
+        #[cfg(not(unix))]
+        {
+            fs::create_dir_all(dir)
+        }
     }
 
     /// Open per the environment (default ON; see module docs). `None` when
@@ -243,6 +271,22 @@ mod tests {
         assert_ne!(a, b, "session IDs should differ across calls");
     }
 
+    /// Traces hold sensitive command/output/source data — on unix the dir must
+    /// be 0700 and each session file 0600 so a co-tenant cannot read them.
+    #[cfg(unix)]
+    #[test]
+    fn session_trace_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("legion_trace_perm_{}", new_session_id()));
+        let t = SessionTrace::open_in(&dir).expect("open");
+        t.event("user_turn", json!({ "text": "secret query" }));
+        let dir_mode = fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        let file_mode = fs::metadata(&t.path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700, "trace dir must be owner-only");
+        assert_eq!(file_mode, 0o600, "trace file must be owner-only");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// Env resolution: kill-switch beats everything, explicit dir beats the
     /// home default, home default is the documented path, no home -> None.
     #[test]
@@ -272,7 +316,10 @@ mod tests {
     fn session_trace_writes_parseable_jsonl() {
         let dir = std::env::temp_dir().join(format!("legion_trace_test_{}", new_session_id()));
         let t = SessionTrace::open_in(&dir).expect("open");
-        t.event("user_turn", json!({ "text": "why slow?", "backend": "claude-code" }));
+        t.event(
+            "user_turn",
+            json!({ "text": "why slow?", "backend": "claude-code" }),
+        );
         t.event("stop_click", Value::Null);
         let body = fs::read_to_string(&t.path).unwrap();
         let lines: Vec<Value> = body

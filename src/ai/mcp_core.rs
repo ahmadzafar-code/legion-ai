@@ -828,10 +828,7 @@ mod tests {
             .expect("instructions present");
         assert!(!instr.is_empty(), "instructions must be non-empty");
         // Always-framing.
-        assert!(
-            instr.contains("Legion AI"),
-            "missing framing"
-        );
+        assert!(instr.contains("Legion AI"), "missing framing");
         assert!(
             instr.contains("run_query"),
             "missing the verify-with-run_query rule"
@@ -855,10 +852,7 @@ mod tests {
         let instr = resp["result"]["instructions"]
             .as_str()
             .expect("instructions present");
-        assert!(
-            instr.contains("Legion AI"),
-            "framing must still be present"
-        );
+        assert!(instr.contains("Legion AI"), "framing must still be present");
         assert!(
             !instr.contains("Application source root"),
             "no source clause without code_root"

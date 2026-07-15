@@ -596,10 +596,7 @@ mod tests {
         let instr = v["result"]["instructions"]
             .as_str()
             .expect("instructions over HTTP");
-        assert!(
-            instr.contains("Legion AI"),
-            "framing must reach the client"
-        );
+        assert!(instr.contains("Legion AI"), "framing must reach the client");
         assert!(
             !instr.contains("Application source root"),
             "no source clause without a code root"

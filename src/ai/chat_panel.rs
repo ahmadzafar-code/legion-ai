@@ -188,6 +188,11 @@ pub struct ChatPanel {
     /// hint — (value, when checked). Recomputed at most every few seconds
     /// while the welcome screen is visible (~/.claude.json can be megabytes).
     cc_auth_cache: Option<(bool, std::time::Instant)>,
+    /// Why the Claude Code engine was skipped (the `preflight_claude` error),
+    /// captured at backend resolution so the panel can explain the fallback to
+    /// the built-in API engine instead of silently demanding a key. `None` when
+    /// Claude Code is in use or the reason hasn't been computed yet.
+    claude_unavailable: Option<String>,
     /// The session reasoning transcript (default-ON; see `trace.rs`). Opened
     /// lazily on the FIRST user turn so sessions that never touch the agent
     /// leave no file. Arc-shared with the Claude Code stdout pump.
@@ -289,6 +294,7 @@ impl Clone for ChatPanel {
             api_key_popup_open: self.api_key_popup_open,
             resolved_backend: self.resolved_backend,
             cc_auth_cache: self.cc_auth_cache,
+            claude_unavailable: self.claude_unavailable.clone(),
             session_trace: self.session_trace.clone(),
             session_trace_opened: self.session_trace_opened,
             attachments: self.attachments.clone(),
@@ -357,6 +363,7 @@ impl ChatPanel {
             api_key_popup_open: false,
             resolved_backend: None,
             cc_auth_cache: None,
+            claude_unavailable: None,
             session_trace: None,
             session_trace_opened: false,
             attachments: Vec::new(),
@@ -920,7 +927,7 @@ impl ChatPanel {
                     let truncated = if content.len() > max_per_file {
                         format!(
                             "{}…\n(truncated at {} bytes)",
-                            &content[..max_per_file],
+                            crate::ai::truncate_on_boundary(&content, max_per_file),
                             max_per_file
                         )
                     } else {
@@ -951,9 +958,21 @@ impl ChatPanel {
             return b;
         }
         // Claude Code is "available" only when the backend can run at all
-        // (viewer-mcp builds) AND `claude` passes preflight.
+        // (viewer-mcp builds) AND `claude` passes preflight. Capture WHY it was
+        // skipped so the panel can explain the API-engine fallback rather than
+        // silently demanding a key (a subscription-only tester launched without
+        // `claude` on PATH would otherwise see a broken first run).
         #[cfg(feature = "viewer-mcp")]
-        let claude_available = crate::ai::claude_code::preflight_claude().is_ok();
+        let claude_available = match crate::ai::claude_code::preflight_claude() {
+            Ok(_) => {
+                self.claude_unavailable = None;
+                true
+            }
+            Err(e) => {
+                self.claude_unavailable = Some(e);
+                false
+            }
+        };
         #[cfg(not(feature = "viewer-mcp"))]
         let claude_available = false;
         let b = pick_backend(claude_available);
@@ -1328,21 +1347,38 @@ impl ChatPanel {
                     ChatBackendKind::ClaudeCode => "Claude Code",
                     ChatBackendKind::Native => "API",
                 };
+                // When we fell back to the API engine because Claude Code failed
+                // preflight, say so on hover — otherwise the fallback looks like
+                // an arbitrary key demand.
+                let engine_hover = match (engine, self.claude_unavailable.as_deref()) {
+                    (ChatBackendKind::Native, Some(reason)) => {
+                        format!("Using the built-in API engine — Claude Code unavailable: {reason}")
+                    }
+                    (ChatBackendKind::Native, None) => {
+                        "Using the built-in API engine (Anthropic API key).".to_string()
+                    }
+                    (ChatBackendKind::ClaudeCode, _) => {
+                        "Using your Claude Code — no API key needed.".to_string()
+                    }
+                };
                 if has_key || engine == ChatBackendKind::ClaudeCode {
                     ui.label(
                         egui::RichText::new(engine_label)
                             .small()
                             .color(egui::Color32::from_rgb(100, 100, 100)),
-                    );
+                    )
+                    .on_hover_text(&engine_hover);
                 } else {
-                    let key_btn = ui.add(
-                        egui::Button::new(
-                            egui::RichText::new("⚠ API key")
-                                .small()
-                                .color(egui::Color32::from_rgb(200, 120, 20)),
+                    let key_btn = ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("⚠ API key")
+                                    .small()
+                                    .color(egui::Color32::from_rgb(200, 120, 20)),
+                            )
+                            .frame(false),
                         )
-                        .frame(false),
-                    );
+                        .on_hover_text(&engine_hover);
                     if key_btn.clicked() {
                         self.api_key_popup_open = true;
                     }
@@ -1364,6 +1400,7 @@ impl ChatPanel {
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .frame(light_window_frame(ctx))
             .open(&mut open)
             .show(ctx, |ui| {
                 ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(30, 30, 30));
@@ -1459,7 +1496,8 @@ impl ChatPanel {
                     egui::Stroke::new(1.5, egui::Color32::from_rgb(236, 57, 55)),
                 );
             }
-            resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+            resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
         };
 
         ui.vertical_centered(|ui| {
@@ -1835,7 +1873,11 @@ impl ChatPanel {
             } else {
                 egui::CursorIcon::Default
             })
-            .on_hover_text(if active { "Stop generating" } else { "Stopping…" });
+            .on_hover_text(if active {
+                "Stop generating"
+            } else {
+                "Stopping…"
+            });
         if active && resp.clicked() {
             // Scope the lock: add_message needs &mut self after it.
             let err = {
@@ -1879,6 +1921,15 @@ impl ChatPanel {
         let plus_menu_id = ui.make_persistent_id("plus_context_menu");
         if plus_resp.clicked() {
             ui.memory_mut(|m| m.toggle_popup(plus_menu_id));
+        }
+        // The popup frame follows the OS theme by default (dark fill in dark
+        // mode), but its rows force near-black text — force a light fill so the
+        // menu is legible in both themes, consistent with the panel surfaces.
+        {
+            let v = ui.style_mut();
+            v.visuals.window_fill = light_panel_fill();
+            v.visuals.window_stroke =
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(205, 205, 205));
         }
         egui::popup::popup_above_or_below_widget(
             ui,
@@ -2101,6 +2152,7 @@ impl ChatPanel {
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .frame(light_window_frame(ctx))
             .show(ctx, |ui| {
                 ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(30, 30, 30));
                 ui.set_max_width(520.0);
@@ -2320,9 +2372,7 @@ fn claude_looks_authenticated() -> bool {
     if std::env::var("ANTHROPIC_API_KEY").is_ok_and(|v| !v.trim().is_empty()) {
         return true;
     }
-    let Some(home) =
-        std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
-    else {
+    let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) else {
         return false;
     };
     std::fs::read_to_string(std::path::Path::new(&home).join(".claude.json"))
@@ -2340,6 +2390,26 @@ fn menu_row_visuals(ui: &mut egui::Ui) {
     v.widgets.hovered.bg_stroke = egui::Stroke::NONE;
     v.widgets.active.weak_bg_fill = egui::Color32::from_rgb(222, 222, 222);
     v.widgets.active.bg_stroke = egui::Stroke::NONE;
+}
+
+/// A light window frame for the panel's floating surfaces (approval dialog,
+/// API-key popup, + menu). The panel forces near-black text everywhere; egui's
+/// default Window/popup fill follows the OS theme, so on a dark-mode machine
+/// (the default for many developers) that near-black text lands on a near-black
+/// fill and is illegible — for the approval dialog that means Allow/Deny-ing a
+/// shell command you cannot read. Forcing a light fill keeps the forced-dark
+/// text readable in both themes.
+fn light_panel_fill() -> egui::Color32 {
+    egui::Color32::from_rgb(250, 250, 250)
+}
+
+fn light_window_frame(ctx: &egui::Context) -> egui::Frame {
+    egui::Frame::window(&ctx.style())
+        .fill(light_panel_fill())
+        .stroke(egui::Stroke::new(
+            1.0,
+            egui::Color32::from_rgb(205, 205, 205),
+        ))
 }
 
 /// The engine decision, pure: the user's own Claude Code when it is
@@ -2455,7 +2525,7 @@ impl crate::ai::bridge::EventSink for ChatPanel {
         let display = if response.text.len() > 10_000 {
             format!(
                 "{}…\n\n*(truncated — full response was {} chars)*",
-                &response.text[..10_000],
+                crate::ai::truncate_on_boundary(&response.text, 10_000),
                 response.text.len()
             )
         } else {
@@ -2705,6 +2775,7 @@ mod channel_cleanup_tests {
         let agent = crate::ai::claude_code::ClaudeCodeAgent::spawn_with_command(
             Command::new("cat"),
             cfg.clone(),
+            None,
             None,
             None,
             event_tx,

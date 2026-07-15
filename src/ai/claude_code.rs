@@ -154,6 +154,42 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// Process-unique stamp for temp filenames: `<pid>_<secs>_<seq>`. The atomic
+/// sequence guarantees uniqueness even for two spawns in the same second (rapid
+/// ↺), so the `create_new` in [`write_private`] never collides with itself.
+fn temp_stamp() -> String {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "{}_{}_{}",
+        std::process::id(),
+        now_secs(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+/// Write `contents` to `path` readable/writable by the OWNER ONLY, with no
+/// world-readable window. On unix the file is created atomically at `0600`
+/// (`create_new` + `mode`) so there is no write-then-chmod TOCTOU during which a
+/// co-tenant could read a bearer token; elsewhere it falls back to a plain
+/// create+write. `create_new` also refuses to clobber an existing file (see
+/// [`temp_stamp`] for the uniqueness that keeps this from ever tripping).
+fn write_private(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(contents.as_bytes())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, contents)
+    }
+}
+
 // Unix process-group signal: the child is spawned as its own group leader
 // (`process_group(0)` at spawn), so signalling the GROUP (`killpg`, negative pgid)
 // reaps Bash grandchildren too. `child.kill()` alone SIGKILLs only `claude`, and a
@@ -244,8 +280,11 @@ pub struct ClaudeCodeAgent {
     /// source tree, whose `.claude/` could inject settings; removed on Drop.
     cwd_dir: Option<PathBuf>,
     /// Viewer-owned `--settings` file carrying the PreToolUse approval hook
-    /// (0600 — the curl command embeds the bearer token); deleted on Drop.
+    /// (0600 — references the curl-config file below, NOT the token); deleted on Drop.
     settings_path: Option<PathBuf>,
+    /// Viewer-owned `0600` curl-config file holding the bearer token OUT of the
+    /// hook's argv (see [`hook_curl_config`]); deleted on Drop.
+    hook_curl_cfg_path: Option<PathBuf>,
     /// True from `send_turn` until the turn's `result` line — scopes the
     /// watchdog and the "exited mid-turn" error.
     turn_in_flight: Arc<AtomicBool>,
@@ -270,35 +309,30 @@ impl ClaudeCodeAgent {
         event_tx: Sender<AgentEvent>,
         trace: Option<Arc<super::trace::SessionTrace>>,
     ) -> Result<Arc<Self>, String> {
-        // Private 0600 mcp-config carrying the Authorization header.
-        let cfg_path = std::env::temp_dir().join(format!(
-            "legion_cc_backend_{}_{}.json",
-            std::process::id(),
-            now_secs()
-        ));
+        // Private 0600 mcp-config carrying the Authorization header. Created
+        // atomically at 0600 (write_private) — no world-readable window in which
+        // a co-tenant could read the bearer token.
+        let stamp = temp_stamp();
+        let cfg_path = std::env::temp_dir().join(format!("legion_cc_backend_{stamp}.json"));
         let cfg = json!({ "mcpServers": { MCP_SERVER_NAME: {
             "type": "http",
             "url": format!("http://127.0.0.1:{port}/mcp"),
             "headers": { "Authorization": format!("Bearer {token}") }
         }}});
-        std::fs::write(&cfg_path, cfg.to_string()).map_err(|e| format!("write mcp-config: {e}"))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&cfg_path, std::fs::Permissions::from_mode(0o600));
-        }
+        write_private(&cfg_path, &cfg.to_string()).map_err(|e| format!("write mcp-config: {e}"))?;
 
         // Neutral scratch cwd: NEVER cwd into the profiled application's source
         // tree — that tree is attacker-influenceable and Claude Code auto-discovers a
         // project `.claude/` from cwd. We isolate settings with `--setting-sources ""`
         // AND keep cwd on a viewer-owned empty dir (belt & braces). The user's project
         // is reached via `--add-dir` below, not by making it the cwd.
-        let cwd_dir = std::env::temp_dir().join(format!(
-            "legion_cc_cwd_{}_{}",
-            std::process::id(),
-            now_secs()
-        ));
-        let _ = std::fs::create_dir_all(&cwd_dir);
+        let cwd_dir = std::env::temp_dir().join(format!("legion_cc_cwd_{stamp}"));
+        // Propagate the failure (don't swallow): a full/read-only/cleaned temp
+        // dir otherwise surfaces later as a misleading "claude not installed".
+        std::fs::create_dir_all(&cwd_dir).map_err(|e| {
+            let _ = std::fs::remove_file(&cfg_path);
+            format!("create scratch cwd {}: {e}", cwd_dir.display())
+        })?;
 
         // Auto-approve the MCP surface AND the read-only built-ins so neither prompts in
         // headless mode (read-only tools are permissionless anyway, but naming them
@@ -311,27 +345,34 @@ impl ClaudeCodeAgent {
             .collect::<Vec<_>>()
             .join(",");
 
+        // 0600 curl-config file carrying the bearer token OUT of the hook's argv
+        // (see hook_curl_config). Created before the settings file, which
+        // references its path.
+        let hook_curl_cfg_path =
+            std::env::temp_dir().join(format!("legion_cc_curlcfg_{stamp}.conf"));
+        write_private(&hook_curl_cfg_path, &hook_curl_config(token)).map_err(|e| {
+            let _ = std::fs::remove_file(&cfg_path);
+            let _ = std::fs::remove_dir_all(&cwd_dir);
+            format!("write hook curl config: {e}")
+        })?;
+
         // Viewer-owned --settings carrying the PreToolUse approval hook (a curl
-        // POST to this server's /approve route, same bearer token). 0600 like the
-        // mcp-config — the token is in the command string. Because we also pass
+        // POST to this server's /approve route, reading the token from the 0600
+        // curl-config above — NOT from argv). Because we also pass
         // `--setting-sources ""`, this file is the ONLY settings source the child
         // loads (verified empirically), so no workspace or user `.claude/`
         // settings can inject hooks or permissions.
-        let settings_path = std::env::temp_dir().join(format!(
-            "legion_cc_settings_{}_{}.json",
-            std::process::id(),
-            now_secs()
-        ));
-        std::fs::write(&settings_path, build_hook_settings(port, token)).map_err(|e| {
+        let settings_path = std::env::temp_dir().join(format!("legion_cc_settings_{stamp}.json"));
+        write_private(
+            &settings_path,
+            &build_hook_settings(port, &hook_curl_cfg_path),
+        )
+        .map_err(|e| {
             let _ = std::fs::remove_file(&cfg_path);
+            let _ = std::fs::remove_dir_all(&cwd_dir);
+            let _ = std::fs::remove_file(&hook_curl_cfg_path);
             format!("write hook settings: {e}")
         })?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ =
-                std::fs::set_permissions(&settings_path, std::fs::Permissions::from_mode(0o600));
-        }
 
         let mut cmd = Command::new("claude");
         cmd.arg("-p")
@@ -370,6 +411,7 @@ impl ClaudeCodeAgent {
             cfg_path,
             Some(cwd_dir),
             Some(settings_path),
+            Some(hook_curl_cfg_path),
             event_tx,
             trace.clone(),
         )?;
@@ -395,6 +437,7 @@ impl ClaudeCodeAgent {
         cfg_path: PathBuf,
         cwd_dir: Option<PathBuf>,
         settings_path: Option<PathBuf>,
+        hook_curl_cfg_path: Option<PathBuf>,
         event_tx: Sender<AgentEvent>,
         trace: Option<Arc<super::trace::SessionTrace>>,
     ) -> Result<Arc<Self>, String> {
@@ -415,6 +458,9 @@ impl ClaudeCodeAgent {
             }
             if let Some(s) = &settings_path {
                 let _ = std::fs::remove_file(s);
+            }
+            if let Some(c) = &hook_curl_cfg_path {
+                let _ = std::fs::remove_file(c);
             }
             format!(
                 "could not start `claude` ({e}). Install Claude Code and ensure it is on \
@@ -555,6 +601,7 @@ impl ClaudeCodeAgent {
             cfg_path,
             cwd_dir,
             settings_path,
+            hook_curl_cfg_path,
             turn_in_flight,
             last_activity,
             stopping,
@@ -759,6 +806,9 @@ impl Drop for ClaudeCodeAgent {
         if let Some(s) = &self.settings_path {
             let _ = std::fs::remove_file(s);
         }
+        if let Some(c) = &self.hook_curl_cfg_path {
+            let _ = std::fs::remove_file(c);
+        }
     }
 }
 
@@ -774,16 +824,31 @@ const HOOK_TIMEOUT_SECS: u64 = 300;
 /// the race against the hook-timeout error path.
 pub const APPROVAL_DEADLINE: Duration = Duration::from_secs(280);
 
+/// The curl-config file body carrying the bearer token OUT of argv. The token
+/// must never appear on the `curl` command line: a process's arguments are
+/// world-readable to co-tenants (`/proc/<pid>/cmdline`, `ps`), so an argv token
+/// hands a shared-machine adversary the key to the loopback MCP server. `curl
+/// --config <file>` reads the `Authorization` header from this `0600` file
+/// instead. `"`/`\` in the value are escaped for curl's config quoting.
+fn hook_curl_config(token: &str) -> String {
+    let escaped = token.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("header = \"Authorization: Bearer {escaped}\"\n")
+}
+
 /// Viewer-owned `--settings` JSON: a PreToolUse hook matching exactly the
 /// hook-gated tier, whose command POSTs the hook's stdin (the tool-call JSON) to
 /// this server's `/approve` route and emits the server's decision JSON on stdout.
 /// `curl` ships with macOS, Linux distros, and Windows 10+. `--max-time` bounds
-/// curl below the hook timeout so a dead server can't wedge the hook.
-pub fn build_hook_settings(port: u16, token: &str) -> String {
+/// curl below the hook timeout so a dead server can't wedge the hook. The bearer
+/// token rides in `curl_cfg_path` (a `0600` config file, see [`hook_curl_config`])
+/// — NOT in argv — so it can't be read from the process arguments by another
+/// local user.
+pub fn build_hook_settings(port: u16, curl_cfg_path: &std::path::Path) -> String {
     let curl = format!(
-        "curl -sS --max-time {} -X POST -H \"Authorization: Bearer {token}\" \
+        "curl -sS --max-time {} --config \"{}\" -X POST \
          --data-binary @- http://127.0.0.1:{port}/approve",
-        HOOK_TIMEOUT_SECS - 10
+        HOOK_TIMEOUT_SECS - 10,
+        curl_cfg_path.display()
     );
     json!({
         "hooks": {
@@ -1277,7 +1342,7 @@ mod tests {
                 "{t} cannot be both auto-approved and hook-gated"
             );
         }
-        let settings = build_hook_settings(8765, "tok");
+        let settings = build_hook_settings(8765, std::path::Path::new("/tmp/curlcfg.conf"));
         let v: Value = serde_json::from_str(&settings).unwrap();
         let matcher = v
             .pointer("/hooks/PreToolUse/0/matcher")
@@ -1296,19 +1361,28 @@ mod tests {
         }
     }
 
-    /// The hook settings must carry the curl bridge with the bearer token, the
-    /// /approve URL, and a human-scale timeout.
+    /// The hook settings carry the curl bridge (via --config, NOT the token in
+    /// argv), the /approve URL, and a human-scale timeout.
     #[test]
-    fn hook_settings_carry_curl_bridge_token_and_timeout() {
-        let s = build_hook_settings(12345, "sekrit-tok");
+    fn hook_settings_carry_curl_bridge_and_timeout() {
+        let cfg = std::path::Path::new("/tmp/legion_cc_curlcfg_test.conf");
+        let s = build_hook_settings(12345, cfg);
         let v: Value = serde_json::from_str(&s).unwrap();
         let cmd = v
             .pointer("/hooks/PreToolUse/0/hooks/0/command")
             .and_then(Value::as_str)
             .expect("command");
         assert!(cmd.starts_with("curl "), "hook command must be curl");
-        assert!(cmd.contains("Bearer sekrit-tok"));
         assert!(cmd.contains("http://127.0.0.1:12345/approve"));
+        // SECURITY: the token must NOT be in argv — only a --config file ref.
+        assert!(
+            cmd.contains("--config"),
+            "must read auth from a config file"
+        );
+        assert!(
+            cmd.contains("legion_cc_curlcfg_test.conf"),
+            "must reference the curl-config path"
+        );
         let timeout = v
             .pointer("/hooks/PreToolUse/0/hooks/0/timeout")
             .and_then(Value::as_u64)
@@ -1318,6 +1392,32 @@ mod tests {
             APPROVAL_DEADLINE.as_secs() < timeout,
             "parent deadline must answer before the hook times out"
         );
+    }
+
+    /// The bearer token lives in the curl-config body (never in the hook argv),
+    /// as a curl `header` directive, with quotes/backslashes escaped.
+    #[test]
+    fn hook_curl_config_carries_token_out_of_argv() {
+        let body = hook_curl_config("sekrit-tok");
+        assert!(body.contains("header = \"Authorization: Bearer sekrit-tok\""));
+        // Escaping: a token with a quote/backslash must not break the directive.
+        let weird = hook_curl_config("a\"b\\c");
+        assert!(weird.contains("Bearer a\\\"b\\\\c"), "escaped: {weird}");
+    }
+
+    /// write_private creates the file 0600 with no world-readable window.
+    #[cfg(unix)]
+    #[test]
+    fn write_private_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let p = std::env::temp_dir().join(format!("legion_wp_test_{}.tmp", temp_stamp()));
+        write_private(&p, "secret").unwrap();
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "must be owner-only");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "secret");
+        // create_new refuses to clobber.
+        assert!(write_private(&p, "x").is_err());
+        let _ = std::fs::remove_file(&p);
     }
 
     // ── Approval broker ──────────────────────────────────────────────────────
@@ -1591,7 +1691,10 @@ mod tests {
         ));
         let t = crate::ai::trace::SessionTrace::open_in(&dir).expect("open trace");
         let long_sql = format!("SELECT {} FROM items", "running.duration, ".repeat(30));
-        assert!(long_sql.len() > 120, "test premise: input beyond UI preview");
+        assert!(
+            long_sql.len() > 120,
+            "test premise: input beyond UI preview"
+        );
         let line1 = format!(
             r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"tu1","name":"mcp__legion-viewer__run_query","input":{{"sql":"{long_sql}"}}}},{{"type":"text","text":"Let me check."}}]}}}}"#
         );
@@ -1617,7 +1720,10 @@ mod tests {
         assert_eq!(lines[0]["input"]["sql"].as_str().unwrap(), long_sql);
         assert_eq!(lines[1]["kind"], "assistant_text");
         assert_eq!(lines[2]["kind"], "tool_result");
-        assert!(!body.contains("4AAQ"), "screenshot base64 must not reach the trace");
+        assert!(
+            !body.contains("4AAQ"),
+            "screenshot base64 must not reach the trace"
+        );
         assert_eq!(lines[3]["kind"], "turn_result");
         assert_eq!(lines[3]["usage"]["output_tokens"], 42);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1645,7 +1751,10 @@ mod tests {
                 let note = r.usage_note.as_deref().expect("usage present -> note");
                 assert!(note.contains("in 1.2K"), "{note}");
                 assert!(note.contains("22.0K cache-read"), "{note}");
-                assert!(!note.contains("cache-write"), "zero component omitted: {note}");
+                assert!(
+                    !note.contains("cache-write"),
+                    "zero component omitted: {note}"
+                );
                 assert!(note.contains("out 1.9K"), "{note}");
                 assert!(note.contains("$0.042"), "{note}");
             }
@@ -1921,6 +2030,7 @@ mod tests {
             Command::new("cat"),
             cfg.clone(),
             Some(scratch.clone()),
+            None,
             None,
             tx,
             None,

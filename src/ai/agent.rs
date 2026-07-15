@@ -8,6 +8,7 @@
 //! Session state persists across turns so follow-up questions continue
 //! the same conversation with full context.
 
+use super::truncate_on_boundary;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::mpsc;
@@ -699,7 +700,7 @@ impl AgentSession {
             summary: if content.starts_with("__IMAGE_BASE64__") {
                 "screenshot captured".to_owned()
             } else if content.len() > 100 {
-                format!("{}…", &content[..100])
+                format!("{}…", truncate_on_boundary(&content, 100))
             } else {
                 content.clone()
             },
@@ -1204,7 +1205,7 @@ impl AgentSession {
                         }
                     }
                     return serde_json::from_str::<ApiResponse>(&text).map_err(|e| {
-                        let preview = &text[..text.len().min(500)];
+                        let preview = truncate_on_boundary(&text, 500);
                         finalize_err(
                             format!("Failed to parse Claude response: {e}\nBody: {preview}"),
                             Some(status),
@@ -1236,7 +1237,7 @@ impl AgentSession {
                 Err(ureq::Error::Status(code, resp)) => {
                     let body = resp.into_string().unwrap_or_default();
                     return Err(finalize_err(
-                        format!("API error {code}: {}", &body[..body.len().min(500)]),
+                        format!("API error {code}: {}", truncate_on_boundary(&body, 500)),
                         Some(code),
                         retries_count,
                     ));
@@ -1275,17 +1276,6 @@ fn req_str<'a>(input: &'a Value, key: &str) -> Result<&'a str, String> {
         .get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| format!("Missing '{key}' parameter"))
-}
-
-fn truncate_on_boundary(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        return s;
-    }
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
 }
 
 /// Shrink the conversation history in place before each model call to curb token
