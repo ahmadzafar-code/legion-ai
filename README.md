@@ -15,6 +15,8 @@ tools available either way. The embedded panel is the default path below;
 for the second, see
 [Using your own agent over MCP](#using-your-own-agent-over-mcp-byoa).
 
+![Legion AI system architecture](docs/img/architecture.png)
+
 > **Important:** This is a modified fork of
 > [StanfordLegion/prof-viewer](https://github.com/StanfordLegion/prof-viewer)
 > (Apache-2.0). A default build (`cargo build`) behaves exactly like upstream;
