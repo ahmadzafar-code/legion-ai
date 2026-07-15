@@ -62,7 +62,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.85.1
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get install libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libxkbcommon-dev libssl-dev
-      - run: cargo test --lib --all-features
+      # --all-targets (not --lib) so bin-target tests run too — the eval binary's
+      # 20 grader/extraction tests were previously excluded from CI.
+      - run: cargo test --all-features --all-targets
+
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Prebuilt binary (no compile — avoids cargo-audit's own MSRV churn).
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      # Scan Cargo.lock against the RustSec advisory DB. A first failure here is
+      # a real signal: fix the dependency or record an ignore in audit.toml.
+      - run: cargo audit
 
   fmt:
     name: Rustfmt
