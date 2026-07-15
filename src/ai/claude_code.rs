@@ -231,6 +231,33 @@ fn kill_child(child: &mut Child) {
     }
 }
 
+/// Best-effort teardown when a spawn fails AFTER the child launched but BEFORE
+/// the `Arc<ClaudeCodeAgent>` (and thus its `Drop`) is constructed — e.g. a
+/// pump thread fails to spawn under resource exhaustion. Reaps the child so it
+/// can't zombie and removes the token-bearing temp files (the mcp-config and
+/// the `0600` curl-config) so they don't linger. Without this, those error
+/// paths would leak exactly the files [`write_private`] took care to protect.
+fn cleanup_partial_spawn(
+    child: &mut Child,
+    cfg_path: &std::path::Path,
+    cwd_dir: &Option<PathBuf>,
+    settings_path: &Option<PathBuf>,
+    hook_curl_cfg_path: &Option<PathBuf>,
+) {
+    kill_child(child);
+    let _ = child.wait();
+    let _ = std::fs::remove_file(cfg_path);
+    if let Some(d) = cwd_dir {
+        let _ = std::fs::remove_dir_all(d);
+    }
+    if let Some(s) = settings_path {
+        let _ = std::fs::remove_file(s);
+    }
+    if let Some(c) = hook_curl_cfg_path {
+        let _ = std::fs::remove_file(c);
+    }
+}
+
 /// Preflight: is `claude` on PATH, and which version? Returns the
 /// version string for the "Started…" message. Deliberately does NOT probe auth
 /// (that would cost a model call) — a missing login surfaces on the first turn
@@ -494,8 +521,20 @@ impl ClaudeCodeAgent {
                     }
                 }
                 // stdin drops here => EOF
-            })
-            .map_err(|e| format!("spawn writer thread: {e}"))?;
+            });
+        let writer = match writer {
+            Ok(h) => h,
+            Err(e) => {
+                cleanup_partial_spawn(
+                    &mut child,
+                    &cfg_path,
+                    &cwd_dir,
+                    &settings_path,
+                    &hook_curl_cfg_path,
+                );
+                return Err(format!("spawn writer thread: {e}"));
+            }
+        };
 
         // Stderr drain — MANDATORY second reader: `--verbose` writes to stderr
         // and an undrained pipe deadlocks the child at the ~64KB pipe buffer
@@ -511,8 +550,20 @@ impl ClaudeCodeAgent {
                     }
                     t.push_back(line);
                 }
-            })
-            .map_err(|e| format!("spawn stderr thread: {e}"))?;
+            });
+        let err_reader = match err_reader {
+            Ok(h) => h,
+            Err(e) => {
+                cleanup_partial_spawn(
+                    &mut child,
+                    &cfg_path,
+                    &cwd_dir,
+                    &settings_path,
+                    &hook_curl_cfg_path,
+                );
+                return Err(format!("spawn stderr thread: {e}"));
+            }
+        };
 
         // Stdout pump — parse each capped line into AgentEvents.
         // The panel repaints continuously while pending_request is set
@@ -592,8 +643,20 @@ impl ClaudeCodeAgent {
                         "claude exited unexpectedly mid-turn. stderr tail:\n{tail}"
                     )));
                 }
-            })
-            .map_err(|e| format!("spawn stdout thread: {e}"))?;
+            });
+        let out_reader = match out_reader {
+            Ok(h) => h,
+            Err(e) => {
+                cleanup_partial_spawn(
+                    &mut child,
+                    &cfg_path,
+                    &cwd_dir,
+                    &settings_path,
+                    &hook_curl_cfg_path,
+                );
+                return Err(format!("spawn stdout thread: {e}"));
+            }
+        };
 
         let agent = Arc::new(ClaudeCodeAgent {
             stdin_tx: Mutex::new(Some(stdin_tx)),

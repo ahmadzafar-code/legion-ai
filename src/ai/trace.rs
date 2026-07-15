@@ -150,15 +150,20 @@ impl SessionTrace {
     }
 
     /// Create `dir` (and parents) owner-only (`0700`) on unix; a plain
-    /// create_dir_all elsewhere. Idempotent — an existing dir is fine.
+    /// create_dir_all elsewhere. Idempotent. On unix the mode is re-applied
+    /// UNCONDITIONALLY after creation: a traces dir left `0755` by an earlier
+    /// build (before this hardening) would otherwise keep its loose mode, and a
+    /// `0700` dir blocks others from traversing in to read even the older
+    /// world-readable `0644` session files inside it.
     fn create_dir_private(dir: &Path) -> std::io::Result<()> {
         #[cfg(unix)]
         {
-            use std::os::unix::fs::DirBuilderExt;
+            use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
             fs::DirBuilder::new()
                 .recursive(true)
                 .mode(0o700)
-                .create(dir)
+                .create(dir)?;
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
         }
         #[cfg(not(unix))]
         {
@@ -284,6 +289,29 @@ mod tests {
         let file_mode = fs::metadata(&t.path).unwrap().permissions().mode() & 0o777;
         assert_eq!(dir_mode, 0o700, "trace dir must be owner-only");
         assert_eq!(file_mode, 0o600, "trace file must be owner-only");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A traces dir left world-readable by an earlier build must be re-tightened
+    /// to 0700 on the next open (a 0700 dir blocks others from reaching even
+    /// older 0644 session files inside it).
+    #[cfg(unix)]
+    #[test]
+    fn preexisting_loose_trace_dir_is_retightened() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("legion_trace_loose_{}", new_session_id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        let _t = SessionTrace::open_in(&dir).expect("open");
+        assert_eq!(
+            fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700,
+            "a pre-existing 0755 dir must be re-tightened to 0700"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

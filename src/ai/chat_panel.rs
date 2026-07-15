@@ -1403,7 +1403,7 @@ impl ChatPanel {
             .frame(light_window_frame(ctx))
             .open(&mut open)
             .show(ctx, |ui| {
-                ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(30, 30, 30));
+                force_light_visuals(ui);
                 ui.set_min_width(320.0);
                 ui.label(
                     egui::RichText::new(
@@ -2033,7 +2033,7 @@ impl ChatPanel {
             )
             .show(ctx, |ui| {
                 // Force dark text throughout this panel
-                ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(30, 30, 30));
+                force_light_visuals(ui);
                 // Larger, more readable text throughout the chat panel.
                 for font_id in ui.style_mut().text_styles.values_mut() {
                     font_id.size *= 1.2;
@@ -2154,7 +2154,7 @@ impl ChatPanel {
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .frame(light_window_frame(ctx))
             .show(ctx, |ui| {
-                ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(30, 30, 30));
+                force_light_visuals(ui);
                 ui.set_max_width(520.0);
                 ui.horizontal(|ui| {
                     egui::Frame::none()
@@ -2410,6 +2410,26 @@ fn light_window_frame(ctx: &egui::Context) -> egui::Frame {
             1.0,
             egui::Color32::from_rgb(205, 205, 205),
         ))
+}
+
+/// Force a light look on `ui`: near-black text AND light control fills. The
+/// panel forces dark text everywhere, but egui's widget fills follow the OS
+/// theme — so on a dark-mode machine a plain button (Copy, and critically the
+/// approval dialog's Allow/Deny) would paint forced-dark text on a dark control
+/// (~1.5:1 contrast, effectively unreadable). Setting the control fills light
+/// keeps every widget legible in both themes; light mode is visually unchanged
+/// (its default fills are already near these grays). Buttons with an explicit
+/// `.fill()` (Send/Stop, suggestion pills) override this and are unaffected.
+fn force_light_visuals(ui: &mut egui::Ui) {
+    let v = ui.visuals_mut();
+    v.override_text_color = Some(egui::Color32::from_rgb(30, 30, 30));
+    let subtle = egui::Stroke::new(1.0, egui::Color32::from_rgb(200, 200, 200));
+    v.widgets.inactive.bg_stroke = subtle;
+    v.widgets.hovered.bg_stroke = subtle;
+    v.widgets.active.bg_stroke = subtle;
+    v.widgets.inactive.weak_bg_fill = egui::Color32::from_rgb(232, 232, 232);
+    v.widgets.hovered.weak_bg_fill = egui::Color32::from_rgb(222, 222, 222);
+    v.widgets.active.weak_bg_fill = egui::Color32::from_rgb(212, 212, 212);
 }
 
 /// The engine decision, pure: the user's own Claude Code when it is
