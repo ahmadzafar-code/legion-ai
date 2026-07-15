@@ -64,7 +64,7 @@ timeline itself.
 | Rust toolchain (stable) | building the viewer | first build compiles DuckDB's C++ — expect 5–10 minutes once, seconds afterwards |
 | Linux GUI libraries | native viewer on Linux | package list in the [upstream README](#upstream-readme) below |
 | `legion_prof` (from the [Legion repo](https://github.com/StanfordLegion/legion)) | producing profile inputs | `cargo install --locked --all-features --path legion/tools/legion_prof_rs` |
-| **Claude Code CLI** ≥ 2.1 (`claude` on PATH) + `curl` | the recommended AI engine | one-time `claude login` (Pro/Max subscription), *or* an `ANTHROPIC_API_KEY` in the environment |
+| **Claude Code CLI** ≥ 2.1 (`claude` on PATH) + `curl` | the recommended AI engine | one-time `claude auth login` (Pro/Max subscription), *or* an `ANTHROPIC_API_KEY` in the environment |
 | — or just an `ANTHROPIC_API_KEY` | the built-in fallback engine | zero extra installs; plain HTTPS to the Anthropic API |
 
 The AI layer is **native-only** (macOS / Linux / Windows). Wasm builds serve
@@ -89,7 +89,7 @@ legion_prof duckdb  -o myrun_db      prof_*.gz
 #      "Give me an overview of this profile"
 ```
 
-If the welcome screen says Claude Code isn't signed in, run `claude login` in
+If the welcome screen says Claude Code isn't signed in, run `claude auth login` in
 any terminal — the hint flips to ready within seconds, no restart needed.
 
 ## Step 1 — Profile your Legion application
@@ -104,6 +104,14 @@ where `<N>` is the number of nodes to profile and `%` expands to the node
 number. This produces the standard `prof_*.gz` logs that every `legion_prof`
 workflow starts from. (See the
 [Legion profiling docs](https://legion.stanford.edu/profiling/) for details.)
+
+**Profiling a Legate / cuNumeric application.** Legate programs run on Legion,
+so the same profiler applies — pass the Legion profiling flags through Legate's
+launcher, e.g. `legate --profile --logging ... your_app.py`, or set the
+`-lg:prof` flags via `LEGATE_CONFIG` / the underlying realm launch. The result
+is the same `prof_*.gz` logs; feed them through Steps 2–3 unchanged. The
+co-pilot detects Python/Legate processors in the profile and factors them into
+its diagnosis (Python task overhead, host-side orchestration, and so on).
 
 ## Step 2 — Generate the viewer inputs
 
@@ -181,7 +189,7 @@ The panel picks its engine automatically from what your machine has:
 
 | You have | Engine used | Auth |
 |---|---|---|
-| `claude` CLI installed | **your Claude Code**, spawned headless against the viewer's local MCP server | one-time `claude login`, *or* `ANTHROPIC_API_KEY` (inherited) |
+| `claude` CLI installed | **your Claude Code**, spawned headless against the viewer's local MCP server | one-time `claude auth login`, *or* `ANTHROPIC_API_KEY` (inherited) |
 | no `claude` | **built-in API loop** | `ANTHROPIC_API_KEY` env var, or the key popup on first use |
 
 The Claude Code engine is preferred when available: it brings the full agent
@@ -191,7 +199,7 @@ your `claude` install is configured for. The built-in engine is the
 zero-install fallback.
 
 The welcome screen tells you where you stand: if Claude Code isn't signed in
-it shows the one-time `claude login` step; once signed in it suggests
+it shows the one-time `claude auth login` step; once signed in it suggests
 connecting your code.
 
 ## Using your own agent over MCP (BYOA)
@@ -287,7 +295,7 @@ Session reasoning traces are ON by default during the test program — see
 
 | Symptom | Fix |
 |---|---|
-| Welcome screen: "Claude Code isn't signed in yet" | run `claude login` in any terminal; the hint updates within seconds |
+| Welcome screen: "Claude Code isn't signed in yet" | run `claude auth login` in any terminal; the hint updates within seconds |
 | First turn errors with 401 | same as above — or export `ANTHROPIC_API_KEY`, then **↺** for a fresh session |
 | `The socket connection was closed unexpectedly` on one tool call | benign transport race between Claude Code's HTTP client and the viewer's one-shot connections; the agent retries and succeeds |
 | First `cargo build` takes ~10 minutes | DuckDB's C++ compiles once and is cached afterwards |

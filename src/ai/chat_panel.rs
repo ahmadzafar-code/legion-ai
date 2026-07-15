@@ -181,7 +181,7 @@ pub struct ChatPanel {
     api_key_popup_open: bool,
     /// Auto-resolved engine (cached): Claude Code when `claude` is installed,
     /// else the native API loop. There is NO user-facing backend choice — the
-    /// user's outside setup (claude login / API key) IS the choice. Re-resolved
+    /// user's outside setup (claude auth login / API key) IS the choice. Re-resolved
     /// on ↺ New session.
     resolved_backend: Option<ChatBackendKind>,
     /// Cached "does `claude` look signed in" heuristic for the welcome-screen
@@ -1023,7 +1023,7 @@ impl ChatPanel {
             // Lazy once-per-session spawn (once-at-spawn channels), with a
             // preflight so "claude isn't installed" is a friendly message, not a
             // spawn error. Auth is deliberately NOT probed (it would cost a model
-            // call) — a missing `claude login` surfaces on the first turn as the
+            // call) — a missing `claude auth login` surfaces on the first turn as the
             // parser's actionable 401 message.
             if self.cc_agent.lock().unwrap().is_none() {
                 let version = match crate::ai::claude_code::preflight_claude() {
@@ -1058,10 +1058,11 @@ impl ChatPanel {
                         self.add_message(
                             ChatMessageKind::System,
                             format!(
-                                "Started your Claude Code ({version}) against the \
-                                 profiler's MCP server (port {port}, bearer-token \
+                                "Legion AI {build} · started your Claude Code ({version}) \
+                                 against the profiler's MCP server (port {port}, bearer-token \
                                  protected). One-time setup if the first turn fails \
-                                 to authenticate: run `claude login` in a terminal."
+                                 to authenticate: run `claude auth login` in a terminal.",
+                                build = crate::ai::build_version()
                             ),
                         );
                     }
@@ -1432,7 +1433,7 @@ impl ChatPanel {
 
     /// The empty-state screen (Claude-Code-style): centered headline + two
     /// Cached [`claude_looks_authenticated`] (recomputed at most every 3 s
-    /// while the welcome screen is visible, so `claude login` in a terminal
+    /// while the welcome screen is visible, so `claude auth login` in a terminal
     /// flips the hint without a restart).
     fn claude_auth_cached(&mut self) -> bool {
         let now = std::time::Instant::now();
@@ -1533,7 +1534,7 @@ impl ChatPanel {
                     "Use + → Connect Code. It allows the AI agent to read your code."
                 } else {
                     "One-time setup: Claude Code isn't signed in yet. Run \
-                     `claude login` in a terminal, then come back and ask away."
+                     `claude auth login` in a terminal, then come back and ask away."
                 };
                 ui.add(
                     egui::Label::new(
@@ -2364,7 +2365,7 @@ fn render_message(
 
 /// Best-effort LOCAL signal that the `claude` CLI has credentials: an
 /// `ANTHROPIC_API_KEY` in the environment, or the `oauthAccount` /
-/// `primaryApiKey` marker `claude login` writes into `~/.claude.json` (on
+/// `primaryApiKey` marker `claude auth login` writes into `~/.claude.json` (on
 /// macOS the tokens themselves live in the keychain, but the marker is
 /// written either way). Powers the welcome-screen hint only — never gates a
 /// turn; a stale/revoked credential still surfaces as the 401 error path.

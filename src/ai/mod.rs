@@ -36,6 +36,16 @@ pub mod viewer_mcp;
 use crate::data::ItemUID;
 use crate::timestamp::Interval;
 
+/// A build identity for bug reports and session traces: the crate version plus
+/// the git commit captured at build time (`build.rs`), e.g. `0.6.2 (a07a5bb)`.
+/// Falls back to just the crate version when built without a git checkout.
+pub fn build_version() -> String {
+    match option_env!("LEGION_AI_BUILD") {
+        Some(commit) => format!("{} ({commit})", env!("CARGO_PKG_VERSION")),
+        None => env!("CARGO_PKG_VERSION").to_owned(),
+    }
+}
+
 /// Truncate `s` to at most `max` bytes, backing up to the nearest UTF-8 char
 /// boundary so the result is always valid UTF-8. A fixed-offset byte slice
 /// (`&s[..max]`) panics — aborting the whole viewer — the instant `max` lands

@@ -12,7 +12,7 @@
 //!   no-human context (no permission stall).
 //! - A logged-in `claude` needs NO control-protocol handling from the parent —
 //!   a plain stdin/stdout pipe suffices (`control_request` only appeared on a
-//!   not-logged-in machine failing to refresh). Surface a "run `claude login` or
+//!   not-logged-in machine failing to refresh). Surface a "run `claude auth login` or
 //!   set ANTHROPIC_API_KEY" error when a `result` carries `api_error_status:401`.
 //! - `--disallowedTools` is a leaky DENYLIST (Claude Code has more built-ins than
 //!   any list will name — e.g. it used `ToolSearch` to discover the MCP tool), so
@@ -268,7 +268,7 @@ pub fn preflight_claude() -> Result<String, String> {
         .output()
         .map_err(|_| {
             "Claude Code (`claude`) was not found on PATH. Install it and log in \
-         (`claude login`), or set ANTHROPIC_API_KEY to use the built-in API \
+         (`claude auth login`), or set ANTHROPIC_API_KEY to use the built-in API \
          engine instead."
                 .to_owned()
         })?;
@@ -447,6 +447,7 @@ impl ClaudeCodeAgent {
                 "session_start",
                 json!({
                     "engine": "claude-code",
+                    "legion_ai_build": super::build_version(),
                     "model": model,
                     "mcp_port": port,
                     "code_root_set": code_root.map(str::trim).is_some_and(|r| !r.is_empty()),
@@ -1324,7 +1325,7 @@ fn map_line(line: &str, st: &mut MapState) -> Vec<AgentEvent> {
                 .to_string();
             if api_status == Some(401) {
                 out.push(AgentEvent::Error(
-                    "Claude Code could not authenticate (401). Run `claude login` in a \
+                    "Claude Code could not authenticate (401). Run `claude auth login` in a \
                      terminal, or set ANTHROPIC_API_KEY, then start a new session."
                         .into(),
                 ));
@@ -1831,7 +1832,7 @@ mod tests {
         let line = r#"{"type":"result","subtype":"success","is_error":true,"api_error_status":401,"num_turns":1,"result":"Failed to authenticate. API Error: 401 Invalid authentication credentials","session_id":"s"}"#;
         let evs = map_line(line, &mut names);
         match &evs[0] {
-            AgentEvent::Error(e) => assert!(e.contains("claude login"), "actionable: {e}"),
+            AgentEvent::Error(e) => assert!(e.contains("claude auth login"), "actionable: {e}"),
             other => panic!("expected Error, got {other:?}"),
         }
     }
