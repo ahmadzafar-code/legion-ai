@@ -39,6 +39,10 @@ for the second, see
 
 ## Quick start
 
+The AI engine is your own Claude Code (≥ 2.1) with a Claude subscription or
+`ANTHROPIC_API_KEY` — see [Launching the viewer](#launching-the-viewer);
+without it, the viewer works as a plain timeline viewer.
+
 ### Building the viewer
 
 Building requires Rust ≥ 1.85 (edition-2024 crate; run `rustup update`) and a
@@ -59,9 +63,10 @@ $ cargo build --release --features viewer-mcp
 The first build compiles DuckDB's C++ and takes 5–10 minutes; the result is
 cached, so later builds are fast.
 
-Tagged releases attach prebuilt Linux (x86_64) and macOS (arm64) binaries —
-the full AI build — on the
-[Releases page](https://github.com/ahmadzafar-code/legion-ai/releases).
+Prebuilt Linux (x86_64) and macOS (arm64) binaries — the full AI build — are
+attached to tagged releases on the
+[Releases page](https://github.com/ahmadzafar-code/legion-ai/releases) as
+they are published.
 
 > **Note:** The macOS binary is unsigned. After extracting, clear quarantine
 > with `xattr -d com.apple.quarantine legion_prof_viewer`, or right-click →
@@ -69,12 +74,16 @@ the full AI build — on the
 
 ### Profiling your application and converting the logs
 
-Log conversion requires `legion_prof` from the Legion repository:
+Log conversion requires `legion_prof`, built from the same Legion source tree
+your application runs on — `legion_prof` rejects logs from a mismatched
+Legion version:
 
 ```sh
-$ git clone https://github.com/StanfordLegion/legion.git
-$ cargo install --locked --all-features --path legion/tools/legion_prof_rs
+$ cargo install --locked --all-features --path <legion-source>/tools/legion_prof_rs
 ```
+
+> **Note:** `--all-features` is required: the `duckdb` subcommand is not in
+> `legion_prof`'s default feature set.
 
 Run your application with Legion's profiler enabled, then convert the logs
 into the viewer's two inputs:
@@ -86,9 +95,10 @@ $ legion_prof archive -o myrun_archive prof_*.gz   # timeline for the viewer
 $ legion_prof duckdb  -o myrun_db      prof_*.gz   # database for the SQL tools
 ```
 
-Name the database `<base>_db` next to `<base>_archive` (or any `*.duckdb` /
-`*_db` file in the same directory); the viewer auto-detects it, so you never
-pass `--duckdb`.
+`archive` writes a directory; `duckdb` writes a single database file. Name
+the database `<base>_db` next to `<base>_archive` and the viewer auto-detects
+it — an exact `<base>_db` match wins; with several `*_db` / `*.duckdb` files
+in one directory the pick is unspecified, so pass `--duckdb` to choose.
 
 Legate and cuNumeric applications run on Legion, so the same flow applies:
 pass the profiling flags through Legate's launcher
@@ -114,6 +124,10 @@ this profile — what ran, where the time went, and anything unusual."
 If the welcome screen says Claude Code isn't signed in, run
 `claude auth login` in any terminal; the hint flips to ready within seconds,
 no restart needed.
+
+If you normally run `legion_prof view`, this binary is the AI-enabled
+replacement for that frontend: it reads the same archives, and the AI tools
+exist only here.
 
 ### Driving it from your own Claude Code instead
 
@@ -197,6 +211,8 @@ Symptoms and fixes:
 | Panel says Claude Code isn't available although it's installed | make sure `claude` resolves on the PATH of the shell that launched the viewer; when launching from Finder or an IDE, start from a terminal instead (or symlink `claude` into `/usr/local/bin`) |
 | `cc` / `c++` not found during first build | `sudo apt-get install build-essential` (Linux) or `xcode-select --install` (macOS) |
 | Error about `edition2024` / rustc version | `rustup update` (needs Rust ≥ 1.85) |
+| `legion_prof duckdb` fails: unknown subcommand, or panics "not built with the duckdb feature" | reinstall with `cargo install --locked --all-features --path <legion-source>/tools/legion_prof_rs` — the `duckdb` feature is not a default, and the subcommand requires a Legion checkout from June 2025 or later |
+| `legion_prof archive` / `duckdb` panics on your logs | `legion_prof` only reads logs from the Legion version it was built from — rebuild it from the source tree your application runs on |
 | First `cargo build` takes ~10 minutes | DuckDB's C++ compiles once and is cached afterwards |
 | No SQL tools / "DB ○" chip gray | pass `--duckdb`, use the naming convention from [the profiling step](#profiling-your-application-and-converting-the-logs), or + → Connect DuckDB… |
 | Port 8765 in use | the viewer picks an ephemeral port and prints it; re-run the printed `claude mcp add` line if you registered an external agent |
@@ -210,8 +226,9 @@ Legion AI runs on your own Claude Code, spawned headless against a local MCP
 server inside the viewer. Authentication is whatever your `claude` already
 uses: a one-time `claude auth login` (Pro/Max subscription) or an
 `ANTHROPIC_API_KEY` in the environment (inherited by the spawned CLI). There
-is no separate account, server, or telemetry. A built-in direct-API engine
-exists in the code but is currently disabled.
+is no separate account or server, and Legion AI itself adds no telemetry
+(the spawned Claude Code CLI's own settings apply). A built-in direct-API
+engine exists in the code but is currently disabled.
 
 Security model, short version (full details in [SECURITY.md](SECURITY.md)):
 
@@ -223,9 +240,9 @@ Security model, short version (full details in [SECURITY.md](SECURITY.md)):
 - The spawned Claude Code child runs with an isolated settings file and a
   neutral working directory, so repository-local `.claude/` configuration is
   never picked up implicitly.
-- Profile data and connected source are sent to the model (Anthropic API) as
-  conversation context — connect only code you're comfortable sharing with
-  your configured provider.
+- Profile data, timeline screenshots, and connected source are sent to the
+  model (Anthropic API) as conversation context — connect only code you're
+  comfortable sharing with your configured provider.
 
 ## Session traces
 

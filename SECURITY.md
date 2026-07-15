@@ -65,7 +65,8 @@ apply to reading:
   are not: they can read any file your user account can read, not only the
   `--add-dir` root.
 - Reading is an egress channel, not just ingestion. Whatever the agent reads
-  becomes conversation context sent to the model provider (Anthropic) and is
+  — query results, source, wiki pages, timeline screenshots — becomes
+  conversation context sent to the model provider (Anthropic) and is
   also written to the local session trace, so a prompt injection in profile
   data or source could make the agent read an unrelated host file and
   exfiltrate it via the provider or the trace, without tripping the action
