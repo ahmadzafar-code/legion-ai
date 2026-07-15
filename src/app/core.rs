@@ -297,6 +297,12 @@ pub struct PersistedAiSettings {
     pub duckdb_path: String,
     #[serde(default)]
     pub wiki_path: String,
+    /// Composer model picker ("", "opus", "sonnet", "haiku").
+    #[serde(default)]
+    pub model: String,
+    /// Composer strength picker ("", "low", "medium", "high", "max").
+    #[serde(default)]
+    pub effort: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]

@@ -332,6 +332,7 @@ impl ClaudeCodeAgent {
         port: u16,
         token: &str,
         model: &str,
+        effort: &str,
         code_root: Option<&str>,
         event_tx: Sender<AgentEvent>,
         trace: Option<Arc<super::trace::SessionTrace>>,
@@ -429,6 +430,11 @@ impl ClaudeCodeAgent {
         if !model.is_empty() {
             cmd.arg("--model").arg(model);
         }
+        // Reasoning strength (the composer's strength picker). Empty = leave the
+        // CLI/model default.
+        if !effort.is_empty() {
+            cmd.arg("--effort").arg(effort);
+        }
         // Grant the harness's file tools access to the user's project source, if set.
         if let Some(root) = code_root.map(str::trim).filter(|r| !r.is_empty()) {
             cmd.arg("--add-dir").arg(root);
@@ -449,6 +455,7 @@ impl ClaudeCodeAgent {
                     "engine": "claude-code",
                     "legion_ai_build": super::build_version(),
                     "model": model,
+                    "effort": effort,
                     "mcp_port": port,
                     "code_root_set": code_root.map(str::trim).is_some_and(|r| !r.is_empty()),
                 }),
@@ -1938,7 +1945,7 @@ mod tests {
         )
         .expect("server");
         let (tx, rx) = mpsc::channel::<AgentEvent>();
-        let agent = ClaudeCodeAgent::spawn(port, &token, "claude-sonnet-4-6", None, tx, None)
+        let agent = ClaudeCodeAgent::spawn(port, &token, "claude-sonnet-4-6", "", None, tx, None)
             .expect("spawn claude");
         agent
             .send_turn("Call the overview tool exactly once, then reply with exactly: DONE")
@@ -2034,7 +2041,7 @@ mod tests {
         let canary = std::env::temp_dir().join(format!("cc_live_approval_{}", std::process::id()));
         let _ = std::fs::remove_file(&canary);
         let (tx, rx) = mpsc::channel::<AgentEvent>();
-        let agent = ClaudeCodeAgent::spawn(port, &token, "claude-sonnet-4-6", None, tx, None)
+        let agent = ClaudeCodeAgent::spawn(port, &token, "claude-sonnet-4-6", "", None, tx, None)
             .expect("spawn claude");
         agent
             .send_turn(&format!(

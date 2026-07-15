@@ -34,6 +34,129 @@ const NATIVE_MODEL: &str = "claude-sonnet-4-6";
 /// rather than being offered an API-key path.
 const NATIVE_ENGINE_ENABLED: bool = false;
 
+/// Model tier chosen in the composer picker (Cursor-style). `Default` inherits
+/// the user's own Claude Code configured model (or the native fallback default).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ModelChoice {
+    #[default]
+    Default,
+    Opus,
+    Sonnet,
+    Haiku,
+}
+
+impl ModelChoice {
+    const ALL: [Self; 4] = [Self::Default, Self::Opus, Self::Sonnet, Self::Haiku];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Default => "Default",
+            Self::Opus => "Opus",
+            Self::Sonnet => "Sonnet",
+            Self::Haiku => "Haiku",
+        }
+    }
+
+    /// One-line hint shown under the row (speed/depth trade-off).
+    fn blurb(self) -> &'static str {
+        match self {
+            Self::Default => "Your Claude Code's own configured model",
+            Self::Opus => "Deepest reasoning, slowest",
+            Self::Sonnet => "Balanced — a good default for most diagnoses",
+            Self::Haiku => "Fastest, lightest",
+        }
+    }
+
+    /// `--model` alias for the Claude Code CLI; `None` = inherit its default.
+    fn cc_alias(self) -> Option<&'static str> {
+        match self {
+            Self::Default => None,
+            Self::Opus => Some("opus"),
+            Self::Sonnet => Some("sonnet"),
+            Self::Haiku => Some("haiku"),
+        }
+    }
+
+    /// Full model id for the built-in API engine (Default -> the native default).
+    fn native_id(self) -> &'static str {
+        match self {
+            Self::Default | Self::Sonnet => NATIVE_MODEL,
+            Self::Opus => "claude-opus-4-8",
+            Self::Haiku => "claude-haiku-4-5-20251001",
+        }
+    }
+
+    fn persisted(self) -> &'static str {
+        self.cc_alias().unwrap_or("")
+    }
+
+    fn from_persisted(s: &str) -> Self {
+        match s {
+            "opus" => Self::Opus,
+            "sonnet" => Self::Sonnet,
+            "haiku" => Self::Haiku,
+            _ => Self::Default,
+        }
+    }
+}
+
+/// Reasoning strength chosen in the composer picker — the Claude Code CLI's
+/// `--effort`. `Default` leaves it unset (the CLI/model decides).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EffortChoice {
+    #[default]
+    Default,
+    Low,
+    Medium,
+    High,
+    Max,
+}
+
+impl EffortChoice {
+    const ALL: [Self; 5] = [
+        Self::Default,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::Max,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Default => "Default",
+            Self::Low => "Low",
+            Self::Medium => "Medium",
+            Self::High => "High",
+            Self::Max => "Max",
+        }
+    }
+
+    /// `--effort` value for the Claude Code CLI; `None` = don't pass it.
+    fn cc_flag(self) -> Option<&'static str> {
+        match self {
+            Self::Default => None,
+            Self::Low => Some("low"),
+            Self::Medium => Some("medium"),
+            Self::High => Some("high"),
+            Self::Max => Some("max"),
+        }
+    }
+
+    fn persisted(self) -> &'static str {
+        self.cc_flag().unwrap_or("")
+    }
+
+    fn from_persisted(s: &str) -> Self {
+        match s {
+            "low" => Self::Low,
+            "medium" => Self::Medium,
+            "high" => Self::High,
+            "max" => Self::Max,
+            _ => Self::Default,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum ChatMessageKind {
     /// Gray italic — system status messages
@@ -200,6 +323,11 @@ pub struct ChatPanel {
     /// the built-in API engine instead of silently demanding a key. `None` when
     /// Claude Code is in use or the reason hasn't been computed yet.
     claude_unavailable: Option<String>,
+    /// Model tier chosen in the composer picker; drives `--model` (Claude Code)
+    /// or the native model id. Applied at the next child spawn.
+    model_choice: ModelChoice,
+    /// Reasoning strength chosen in the composer picker; drives `--effort`.
+    effort_choice: EffortChoice,
     /// The session reasoning transcript (default-ON; see `trace.rs`). Opened
     /// lazily on the FIRST user turn so sessions that never touch the agent
     /// leave no file. Arc-shared with the Claude Code stdout pump.
@@ -302,6 +430,8 @@ impl Clone for ChatPanel {
             resolved_backend: self.resolved_backend,
             cc_auth_cache: self.cc_auth_cache,
             claude_unavailable: self.claude_unavailable.clone(),
+            model_choice: self.model_choice,
+            effort_choice: self.effort_choice,
             session_trace: self.session_trace.clone(),
             session_trace_opened: self.session_trace_opened,
             attachments: self.attachments.clone(),
@@ -371,6 +501,8 @@ impl ChatPanel {
             resolved_backend: None,
             cc_auth_cache: None,
             claude_unavailable: None,
+            model_choice: ModelChoice::default(),
+            effort_choice: EffortChoice::default(),
             session_trace: None,
             session_trace_opened: false,
             attachments: Vec::new(),
@@ -769,6 +901,8 @@ impl ChatPanel {
             project_root: self.code_path_buffer.trim().to_owned(),
             duckdb_path: self.duckdb_path_buffer.trim().to_owned(),
             wiki_path: self.wiki_path_buffer.trim().to_owned(),
+            model: self.model_choice.persisted().to_owned(),
+            effort: self.effort_choice.persisted().to_owned(),
         }
     }
 
@@ -784,6 +918,8 @@ impl ChatPanel {
         if !saved.wiki_path.is_empty() {
             self.wiki_path_buffer = saved.wiki_path.clone();
         }
+        self.model_choice = ModelChoice::from_persisted(&saved.model);
+        self.effort_choice = EffortChoice::from_persisted(&saved.effort);
     }
 
     /// End-of-turn receiver cleanup — CHANNEL-LIFETIME critical (see
@@ -1077,13 +1213,16 @@ impl ChatPanel {
                 // source (via --add-dir), so the Claude Code backend can read code
                 // with the full harness rather than only the MCP read_code tool.
                 let code_root = self.code_path();
-                // No --model: the child uses the user's own Claude Code default
-                // (their install, their model choice).
+                // Model + strength from the composer picker; empty = inherit the
+                // user's own Claude Code default.
+                let model = self.model_choice.cc_alias().unwrap_or("");
+                let effort = self.effort_choice.cc_flag().unwrap_or("");
                 let trace = self.session_trace();
                 match crate::ai::claude_code::ClaudeCodeAgent::spawn(
                     port,
                     &token,
-                    "",
+                    model,
+                    effort,
                     code_root.as_deref(),
                     event_tx,
                     trace,
@@ -1183,7 +1322,7 @@ impl ChatPanel {
         self.add_message(ChatMessageKind::System, format!("Working… ({time_hint})"));
         self.pending_request = true;
 
-        let model = NATIVE_MODEL.to_owned();
+        let model = self.model_choice.native_id().to_owned();
         let session_arc = Arc::clone(&self.agent_session);
         let selection_preamble = self.build_selection_preamble();
         let query_clone = user_query;
@@ -1853,9 +1992,10 @@ impl ChatPanel {
                     self.try_submit();
                 }
 
-                // Bottom row: + add-context | model pill | ⏎ Send / ■ Stop
+                // Bottom row: + add-context | model·strength picker | ⏎ Send / ■ Stop
                 ui.horizontal(|ui| {
                     self.ui_plus_menu(ui);
+                    self.ui_model_picker(ui);
 
                     // Right-aligned: Stop while a Claude Code turn is in flight
                     // (standard chatbot UI), otherwise Send.
@@ -1964,6 +2104,131 @@ impl ChatPanel {
                 Some(e) => {
                     self.add_message(ChatMessageKind::System, format!("Stop failed: {e}"));
                 }
+            }
+        }
+    }
+
+    /// The composer model + strength picker (Cursor-style): a compact frameless
+    /// pill showing the current "Model · Strength" that opens an upward popup to
+    /// choose the model tier and the reasoning effort. A change takes effect on
+    /// the next child spawn (see [`Self::apply_engine_setting_change`]).
+    fn ui_model_picker(&mut self, ui: &mut egui::Ui) {
+        let pill = if self.effort_choice == EffortChoice::Default {
+            self.model_choice.label().to_owned()
+        } else {
+            format!(
+                "{} · {}",
+                self.model_choice.label(),
+                self.effort_choice.label()
+            )
+        };
+        let resp = ui
+            .add(
+                egui::Button::new(
+                    egui::RichText::new(format!("{pill} ⏷"))
+                        .size(12.5)
+                        .color(egui::Color32::from_rgb(90, 90, 90)),
+                )
+                .frame(false),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("Model & reasoning strength — applies to the next message");
+        let popup_id = ui.make_persistent_id("model_picker_popup");
+        if resp.clicked() {
+            ui.memory_mut(|m| m.toggle_popup(popup_id));
+        }
+        // Light popup fill so it stays legible in dark mode (see light_panel_fill).
+        {
+            let v = ui.style_mut();
+            v.visuals.window_fill = light_panel_fill();
+            v.visuals.window_stroke =
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(205, 205, 205));
+        }
+        let mut pick_model: Option<ModelChoice> = None;
+        let mut pick_effort: Option<EffortChoice> = None;
+        egui::popup::popup_above_or_below_widget(
+            ui,
+            popup_id,
+            &resp,
+            egui::AboveOrBelow::Above,
+            egui::PopupCloseBehavior::CloseOnClick,
+            |ui| {
+                ui.set_min_width(240.0);
+                force_light_visuals(ui);
+                ui.label(
+                    egui::RichText::new("MODEL")
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(120, 120, 120)),
+                );
+                for m in ModelChoice::ALL {
+                    let selected = self.model_choice == m;
+                    let mark = if selected { "● " } else { "○ " };
+                    if ui
+                        .selectable_label(
+                            selected,
+                            egui::RichText::new(format!("{mark}{}", m.label()))
+                                .color(egui::Color32::from_rgb(30, 30, 30)),
+                        )
+                        .on_hover_text(m.blurb())
+                        .clicked()
+                    {
+                        pick_model = Some(m);
+                    }
+                }
+                ui.add_space(4.0);
+                ui.separator();
+                ui.label(
+                    egui::RichText::new("REASONING STRENGTH")
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(120, 120, 120)),
+                );
+                ui.horizontal_wrapped(|ui| {
+                    for e in EffortChoice::ALL {
+                        let selected = self.effort_choice == e;
+                        if ui.selectable_label(selected, e.label()).clicked() {
+                            pick_effort = Some(e);
+                        }
+                    }
+                });
+            },
+        );
+        if let Some(m) = pick_model {
+            self.set_model(m);
+        }
+        if let Some(e) = pick_effort {
+            self.set_effort(e);
+        }
+    }
+
+    /// Set the model tier; a change re-spawns the child on the next message.
+    fn set_model(&mut self, m: ModelChoice) {
+        if self.model_choice != m {
+            self.model_choice = m;
+            self.apply_engine_setting_change();
+        }
+    }
+
+    /// Set the reasoning strength; a change re-spawns the child on the next message.
+    fn set_effort(&mut self, e: EffortChoice) {
+        if self.effort_choice != e {
+            self.effort_choice = e;
+            self.apply_engine_setting_change();
+        }
+    }
+
+    /// A model/effort change takes effect at the next child spawn (`--model` /
+    /// `--effort` are fixed per child). If a Claude Code child is running and
+    /// IDLE, evict it so the next message respawns with the new flags — the
+    /// transcript is preserved; only the underlying claude session restarts.
+    /// While a turn is in flight, the change lands on the next new session.
+    fn apply_engine_setting_change(&mut self) {
+        #[cfg(feature = "viewer-mcp")]
+        if !self.pending_request {
+            if let Some(dead) = self.cc_agent.lock().unwrap().take() {
+                std::thread::spawn(move || drop(dead));
+                *self.event_rx.lock().unwrap() = None;
             }
         }
     }
@@ -2899,6 +3164,31 @@ mod backend_resolution_tests {
     fn pick_backend_maps_availability() {
         assert_eq!(pick_backend(true), ChatBackendKind::ClaudeCode);
         assert_eq!(pick_backend(false), ChatBackendKind::Native);
+    }
+
+    /// Model/effort picker choices map to the right CLI flags and persist
+    /// round-trip. Default => no flag (inherit); named tiers => the alias.
+    #[test]
+    fn model_and_effort_choices_map_and_round_trip() {
+        assert_eq!(ModelChoice::Default.cc_alias(), None);
+        assert_eq!(ModelChoice::Opus.cc_alias(), Some("opus"));
+        assert_eq!(ModelChoice::Sonnet.cc_alias(), Some("sonnet"));
+        assert_eq!(ModelChoice::Haiku.cc_alias(), Some("haiku"));
+        assert_eq!(EffortChoice::Default.cc_flag(), None);
+        assert_eq!(EffortChoice::Max.cc_flag(), Some("max"));
+        // persist -> restore is stable for every variant.
+        for m in ModelChoice::ALL {
+            assert_eq!(ModelChoice::from_persisted(m.persisted()), m);
+        }
+        for e in EffortChoice::ALL {
+            assert_eq!(EffortChoice::from_persisted(e.persisted()), e);
+        }
+        // Unknown strings fall back to Default.
+        assert_eq!(ModelChoice::from_persisted("gpt-9"), ModelChoice::Default);
+        assert_eq!(
+            EffortChoice::from_persisted("ludicrous"),
+            EffortChoice::Default
+        );
     }
 
     /// resolve_backend memoizes: while `resolved_backend` is Some it is

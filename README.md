@@ -176,6 +176,7 @@ you can audit exactly which SQL produced which number.
 | **Sidebar** (top bar, left) | shows/hides the controls sidebar — more room for timeline + chat |
 | **DB / Code / Visual chips** | live status of the agent's three tool groups; hover for detail |
 | **+ menu** (composer) | **Connect DuckDB…**, **Connect Code…** (lets the agent read your source), **Add file…** (attach a text file as context) — connected items show as chips with **×** to disconnect |
+| **Model · Strength picker** (composer) | pick the model tier (**Default** / **Opus** / **Sonnet** / **Haiku**) and reasoning strength (**Default** / **Low** / **Medium** / **High** / **Max**). Default inherits your own Claude Code model; a change applies on your next message. Drives the CLI's `--model` / `--effort`. |
 | **Send / Stop button** | send when you've typed something; during a turn it becomes a square **stop** button — one click gracefully interrupts the agent (the session survives, keep chatting) |
 | **↺** (panel header) | hard reset: kills the engine process and starts a fresh session |
 | **Selection chip** | click a task bar or shift-drag a range in the timeline, and your next question includes it |
