@@ -3299,7 +3299,10 @@ impl ProfApp {
             TableBuilder::new(ui)
                 .striped(true)
                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                .column(Column::auto())
+                // Fixed first column so every value starts at the same x. An
+                // auto column let the longest labels overflow and shove their
+                // values right, misaligning the table.
+                .column(Column::exact(230.0))
                 .column(Column::remainder())
                 .body(|mut body| {
                     let mut show_row = |a, b| {
@@ -3317,8 +3320,8 @@ impl ProfApp {
                         "\"Legion AI\" button (top-right)",
                     );
                     show_row("Show / Hide the Sidebar", "\"Sidebar\" button (top-left)");
-                    show_row("Add Context (DB / Code / File)", "+ menu in the composer");
-                    show_row("Model & Reasoning Strength", "Model picker in the composer");
+                    show_row("Add Context", "+ menu: DuckDB, code, or a file");
+                    show_row("Model & Strength", "Model picker in the composer");
                     show_row("Stop a Running Answer", "Stop button while a turn runs");
                     show_row("New Session", "\u{21ba} in the panel header");
                     show_row(
