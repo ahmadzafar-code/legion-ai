@@ -139,6 +139,21 @@ fn main() {
                 match Url::parse(s) {
                     Ok(url) => ds.push(http_ds(url)),
                     Err(_) => {
+                        // A raw profiler log is the most likely wrong input
+                        // from a Legion user — catch it with conversion
+                        // guidance before the viewer aborts on a missing
+                        // archive.
+                        if s.ends_with(".gz") && Path::new(s).is_file() {
+                            eprintln!(
+                                "error: '{s}' is a raw Legion profiler log, not an archive.\n\
+                                 Convert it first with a legion_prof built from the same Legion\n\
+                                 tree as your application:\n\
+                                 \x20 legion_prof archive -o myrun_archive prof_*.gz\n\
+                                 \x20 legion_prof duckdb  -o myrun_db      prof_*.gz\n\
+                                 then open the archive: legion_prof_viewer myrun_archive"
+                            );
+                            std::process::exit(2);
+                        }
                         println!("The argument '{s}' is not a URL. Opening it as a local file...");
                         ds.push(file_ds(s));
                         file_paths.push(s.to_owned());

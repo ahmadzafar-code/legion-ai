@@ -285,6 +285,46 @@ pub(crate) fn json_array_to_markdown_table(json_str: &str) -> Option<String> {
     Some(out)
 }
 
+/// Structural probe of a candidate profile database: confirms the
+/// `legion_prof_viewer` 0.8 schema this fork's tools expect (`entries` with
+/// `entry_slug`, `items` with the lifecycle STRUCT columns). Read-only, cheap
+/// (prepare-only — no rows read), and run ONCE when a database is connected,
+/// never per query.
+///
+/// # Errors
+/// Returns a user-facing message when the file cannot be opened as `DuckDB` or
+/// was written by an incompatible `legion_prof` (missing tables/columns).
+#[cfg(feature = "duckdb")]
+pub fn validate_profile_db(duckdb_path: &str) -> Result<(), String> {
+    use duckdb::{AccessMode, Config, Connection};
+
+    let config = Config::default()
+        .access_mode(AccessMode::ReadOnly)
+        .map_err(|e| format!("config access_mode: {e}"))?
+        .enable_external_access(false)
+        .map_err(|e| format!("config external_access: {e}"))?;
+    let conn = Connection::open_with_flags(duckdb_path, config)
+        .map_err(|e| format!("Not a readable DuckDB database: {e}"))?;
+
+    // Preparing validates tables and columns without reading a row, so an
+    // empty-but-well-formed database still passes.
+    for probe in [
+        "SELECT entry_slug, short_name, parent_slug FROM entries LIMIT 1",
+        "SELECT item_uid, title, running.start, lifetime.duration FROM items LIMIT 1",
+    ] {
+        if let Err(e) = conn.prepare(probe) {
+            return Err(format!(
+                "not a Legion profile database this viewer can use (expected \
+                 the legion_prof_viewer 0.8 schema: entries + items with \
+                 lifecycle STRUCT columns). Regenerate it with a legion_prof \
+                 built from your application's Legion tree, or convert an \
+                 archive with the prof2duckdb example. [{e}]"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// True iff `slug` is a known `entries.entry_slug` in the profile DB. Used to
 /// reject a `highlight` on an unknown row (both the embedded agent and the
 /// in-viewer MCP server). Injection-safe: the slug is NEVER interpolated into SQL
@@ -313,4 +353,70 @@ pub fn slug_exists(duckdb_path: &str, slug: &str) -> bool {
             Some(arr.iter().any(|x| x.as_str() == Some(slug)))
         })
         .unwrap_or(false)
+}
+
+/// Pins `validate_profile_db`: the real fixture passes; a wrong-schema or
+/// non-database file fails with the actionable regenerate message.
+#[cfg(all(test, feature = "duckdb"))]
+mod validate_tests {
+    use super::*;
+
+    /// The sha-pinned eval fixture DB (one level above the crate dir);
+    /// soft-skip when absent so CI without the fixture still passes.
+    fn fixture_db() -> Option<String> {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../multinoderuns/bg4N2/profcbN2g4b.duckdb");
+        p.is_file().then(|| p.to_string_lossy().into_owned())
+    }
+
+    #[test]
+    fn test_validate_accepts_real_profile_db() {
+        let Some(db) = fixture_db() else {
+            eprintln!("skipping: fixture DB absent");
+            return;
+        };
+        validate_profile_db(&db).expect("fixture DB must validate");
+    }
+
+    #[test]
+    fn test_validate_rejects_wrong_schema() {
+        // A real DuckDB file whose `entries` lacks the expected columns.
+        let path = std::env::temp_dir().join(format!(
+            "legion_ai_validate_test_{}.duckdb",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = duckdb::Connection::open(&path).expect("create temp db");
+            conn.execute_batch("CREATE TABLE entries (x INTEGER);")
+                .expect("create wrong-schema table");
+        }
+        let err = validate_profile_db(&path.to_string_lossy())
+            .expect_err("wrong schema must be rejected");
+        assert!(
+            err.contains("not a Legion profile database"),
+            "message must be actionable: {err}"
+        );
+        assert!(
+            err.contains("Regenerate"),
+            "message must say how to fix: {err}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_validate_rejects_non_database_file() {
+        let path = std::env::temp_dir().join(format!(
+            "legion_ai_validate_notdb_{}.duckdb",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"this is not a duckdb file").unwrap();
+        let err = validate_profile_db(&path.to_string_lossy())
+            .expect_err("garbage file must be rejected");
+        assert!(
+            err.contains("Not a readable DuckDB database"),
+            "unexpected message: {err}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
 }

@@ -357,6 +357,11 @@ pub struct ChatPanel {
     // ── Tools configuration ──────────────────────────────────────────────
     /// `DuckDB` database path — required for `run_query` tool.
     duckdb_path_buffer: String,
+    /// One-shot schema probe of the connected database, keyed by
+    /// (path, mtime) so a regenerated file re-probes but the check never
+    /// runs per frame. `Err` = the DB chip's actionable message.
+    #[cfg(feature = "duckdb")]
+    db_probe: Option<(String, Option<std::time::SystemTime>, Result<(), String>)>,
     /// Application code directory — required for `read_code` tool.
     code_path_buffer: String,
     /// Legion wiki root — required for `wiki_index`/`wiki_read`/`wiki_search`.
@@ -450,6 +455,8 @@ impl Clone for ChatPanel {
             session_trace_opened: self.session_trace_opened,
             attachments: self.attachments.clone(),
             duckdb_path_buffer: self.duckdb_path_buffer.clone(),
+            #[cfg(feature = "duckdb")]
+            db_probe: self.db_probe.clone(),
             code_path_buffer: self.code_path_buffer.clone(),
             wiki_path_buffer: self.wiki_path_buffer.clone(),
             api_key_buffer: self.api_key_buffer.clone(),
@@ -521,6 +528,8 @@ impl ChatPanel {
             session_trace_opened: false,
             attachments: Vec::new(),
             duckdb_path_buffer: String::new(),
+            #[cfg(feature = "duckdb")]
+            db_probe: None,
             code_path_buffer: String::new(),
             wiki_path_buffer: String::new(),
             api_key_buffer: String::new(),
@@ -952,20 +961,36 @@ impl ChatPanel {
 
     /// Derive the DB tool status from `duckdb_path_buffer`.
     ///
-    /// Accepts any existing non-directory file. `DuckDB` files may have various
-    /// naming conventions (`.duckdb`, `_duckdb`, etc.). The `DuckDB` crate will
-    /// produce a clear error if it can't open the file.
-    fn tool_status_db(&self) -> ToolStatus {
-        let trimmed = self.duckdb_path_buffer.trim();
+    /// Accepts any existing non-directory file, then (duckdb builds) runs a
+    /// one-shot schema probe so an incompatible database — e.g. written by a
+    /// `legion_prof` from a different Legion version — surfaces as a red chip
+    /// with a regenerate hint instead of cryptic SQL errors mid-diagnosis.
+    /// The probe is cached by (path, mtime): a regenerated file re-probes,
+    /// but nothing runs per frame.
+    fn tool_status_db(&mut self) -> ToolStatus {
+        let trimmed = self.duckdb_path_buffer.trim().to_owned();
         if trimmed.is_empty() {
             return ToolStatus::Off;
         }
-        let path = std::path::Path::new(trimmed);
+        let path = std::path::Path::new(&trimmed);
         if !path.exists() {
             return ToolStatus::Error("File not found".into());
         }
         if path.is_dir() {
             return ToolStatus::Error("Path is a directory, not a file".into());
+        }
+        #[cfg(feature = "duckdb")]
+        {
+            let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+            let cached = matches!(&self.db_probe,
+                Some((p, t, _)) if *p == trimmed && *t == mtime);
+            if !cached {
+                let result = crate::ai::tools::validate_profile_db(&trimmed);
+                self.db_probe = Some((trimmed.clone(), mtime, result));
+            }
+            if let Some((_, _, Err(msg))) = &self.db_probe {
+                return ToolStatus::Error(msg.clone());
+            }
         }
         ToolStatus::Ready
     }
