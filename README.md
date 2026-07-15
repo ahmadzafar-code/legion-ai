@@ -8,6 +8,13 @@ as clickable highlights on the timeline, grounded in a pre-computed overview
 of ~25 diagnostic signal sections; every number the agent states is backed by
 a query you can expand and copy from the transcript.
 
+There are two ways to use it: the embedded chat panel inside the viewer
+(click Legion AI, top right), or your own Claude Code — or any MCP-capable
+agent or LLM IDE — connected to the viewer's local MCP server, with the same
+tools available either way. The embedded panel is the default path below;
+for the second, see
+[Using your own agent over MCP](#using-your-own-agent-over-mcp-byoa).
+
 > **Important:** This is a modified fork of
 > [StanfordLegion/prof-viewer](https://github.com/StanfordLegion/prof-viewer)
 > (Apache-2.0). A default build (`cargo build`) behaves exactly like upstream;
@@ -105,6 +112,14 @@ this profile — what ran, where the time went, and anything unusual."
 If the welcome screen says Claude Code isn't signed in, run
 `claude auth login` in any terminal; the hint flips to ready within seconds,
 no restart needed.
+
+### Driving it from your own Claude Code instead
+
+The embedded panel is optional. At startup the viewer prints a ready-to-paste
+`claude mcp add` registration; run it once and your own Claude Code session —
+or any MCP-capable agent or LLM IDE — gets the same data, source, wiki, and
+visual-timeline tools against the live viewer. See
+[Using your own agent over MCP](#using-your-own-agent-over-mcp-byoa).
 
 ## Capabilities
 
@@ -276,16 +291,20 @@ published separately — see this fork's release notes.
 
 ### Using your own agent over MCP (BYOA)
 
-The viewer runs a loopback-only HTTP MCP server exposing the data, source,
-wiki, and visual-timeline tools. At startup it prints a ready-to-paste
-registration:
+The second way to use Legion AI: skip the embedded panel and drive the
+profiler from the tool you already work in. The viewer runs a loopback-only
+HTTP MCP server exposing the data, source, wiki, and visual-timeline tools;
+at startup it prints a ready-to-paste registration:
 
 ```sh
 $ claude mcp add --transport http legion-viewer \
     http://127.0.0.1:8765/mcp --header "Authorization: Bearer <token>"
 ```
 
-Any MCP-capable agent can drive the profiler through it. The bearer token is
+Any MCP-capable client can drive the profiler through it — Claude Code in a
+terminal, an LLM IDE, or a custom agent. Ask questions in that client and it
+queries, navigates, and highlights the live timeline exactly as the embedded
+panel does. The bearer token is
 random per session; set `LEGION_VIEWER_MCP_TOKEN` for a stable registration.
 Port 8765 is preferred, with an ephemeral fallback (the real port is printed
 at startup).
