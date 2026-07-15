@@ -3281,6 +3281,47 @@ impl ProfApp {
                         });
                 });
             });
+
+        // Legion AI interactions — the controls this fork adds on top of the
+        // upstream viewer. Gated on the `ai` feature so a plain build is unchanged.
+        #[cfg(feature = "ai")]
+        {
+            ui.add_space(10.0);
+            ui.separator();
+            ui.add_space(4.0);
+            ui.strong("Legion AI");
+            ui.add_space(4.0);
+            TableBuilder::new(ui)
+                .striped(true)
+                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                .column(Column::auto())
+                .column(Column::remainder())
+                .body(|mut body| {
+                    let mut show_row = |a, b| {
+                        show_row_ui(&mut body, a, |ui| {
+                            ui.label(b);
+                        });
+                    };
+                    // Timeline gestures that feed the agent context.
+                    show_row("Select a Task", "Click a task bar (click again to clear)");
+                    show_row("Select a Time Region", "Shift + Drag across the timeline");
+                    show_row("Select an Idle Gap", "Shift + Click on empty space");
+                    // Panel + composer controls.
+                    show_row(
+                        "Open / Close the Co-Pilot",
+                        "\"Legion AI\" button (top-right)",
+                    );
+                    show_row("Show / Hide the Sidebar", "\"Sidebar\" button (top-left)");
+                    show_row("Add Context (DB / Code / File)", "+ menu in the composer");
+                    show_row("Model & Reasoning Strength", "Model picker in the composer");
+                    show_row("Stop a Running Answer", "Stop button while a turn runs");
+                    show_row("New Session", "\u{21ba} in the panel header");
+                    show_row(
+                        "Ask About a Selection",
+                        "Select above, then ask \"what's here?\"",
+                    );
+                });
+        }
     }
 
     fn compute_text_height(text: String, width: f32, ui: &mut egui::Ui) -> f32 {
