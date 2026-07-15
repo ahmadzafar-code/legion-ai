@@ -890,13 +890,28 @@ impl ChatPanel {
             crate::ai::bridge::apply_agent_event(self, event, &reply_tx);
         }
 
-        // Handle disconnected channel (agent thread crashed without sending Complete/Error)
-        if disconnected && self.pending_request {
-            self.add_message(
-                ChatMessageKind::System,
-                "Agent thread disconnected unexpectedly.",
-            );
-            self.pending_request = false;
+        // A disconnected channel means the agent's pump thread exited. For the
+        // Claude Code backend the persistent channel only closes when the child
+        // DIES (a normal turn keeps it open), so evict the dead child here — even
+        // if on_error already cleared pending_request above (draining the pump's
+        // "exited unexpectedly" error in the SAME poll flips pending_request
+        // false before this runs). Without eviction, cc_agent stays installed and
+        // the next turn writes into a dead pipe, so recovery took several
+        // confusing resubmits (concurrency-lifecycle#2). Reap OFF the UI thread:
+        // Drop does kill→wait→join (up to one watchdog tick) and must not stall a
+        // frame; the detached thread also keeps Drop off the watchdog thread.
+        if disconnected {
+            #[cfg(feature = "viewer-mcp")]
+            if let Some(dead) = self.cc_agent.lock().unwrap().take() {
+                std::thread::spawn(move || drop(dead));
+            }
+            if self.pending_request {
+                self.add_message(
+                    ChatMessageKind::System,
+                    "Agent thread disconnected unexpectedly.",
+                );
+                self.pending_request = false;
+            }
             *self.event_rx.lock().unwrap() = None;
         }
     }

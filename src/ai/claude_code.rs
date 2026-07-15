@@ -859,9 +859,14 @@ impl Drop for ClaudeCodeAgent {
             let _ = child.wait();
         }
         // 4. Join the pump threads (readers exit on EOF; watchdog on `stopping`
-        // within one tick).
+        // within one tick). SKIP a self-join: Drop can run on the watchdog thread
+        // (it briefly holds a strong Arc via weak.upgrade()), and joining one's
+        // own handle deadlocks — a thread cannot join itself (concurrency-lifecycle#4).
+        let this = std::thread::current().id();
         for t in self.threads.lock().unwrap().drain(..) {
-            let _ = t.join();
+            if t.thread().id() != this {
+                let _ = t.join();
+            }
         }
         let _ = std::fs::remove_file(&self.cfg_path);
         if let Some(d) = &self.cwd_dir {
