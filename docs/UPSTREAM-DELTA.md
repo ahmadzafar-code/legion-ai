@@ -1,37 +1,24 @@
-# Reviewing this fork against upstream
+# Reviewing the fork against upstream
 
-This document orients a reviewer of **legion-ai** (the Legion AI fork of
-[StanfordLegion/prof-viewer](https://github.com/StanfordLegion/prof-viewer))
-to exactly how the fork differs from upstream `master`, and how to convince
-yourself the differences are contained.
+Legion AI is a fork of [StanfordLegion/prof-viewer](https://github.com/StanfordLegion/prof-viewer) that adds an AI diagnostic co-pilot to the Legion Prof viewer. This document maps the fork against upstream `master` for review: every AI addition is feature-gated and off by default, and the changes to upstream-owned files total roughly 700 added lines across the five locations listed under Modified upstream files — everything else is new, fork-owned code.
 
-## What the fork adds, in three sentences
+## What the fork adds
 
-Legion AI is an AI diagnostic co-pilot inside the Legion Prof viewer: the
-user's own **Claude Code** is spawned headless against an **in-viewer,
-loopback-only HTTP MCP server** that exposes read-only SQL over a DuckDB
-export of the profile, sandboxed source/wiki readers, and visual timeline
-tools (screenshot / zoom / highlight). Answers arrive in a chat panel with
-every tool call auditable, and diagnoses land as clickable highlights on the
-timeline. Machine-touching tool calls (shell, file edits, web) block on a
-Deny / Allow / Always-allow dialog rendered by the viewer.
+Legion AI spawns the user's own Claude Code headless against an in-viewer, loopback-only HTTP MCP server. The server exposes read-only SQL over a DuckDB export of the profile, sandboxed source and wiki readers, and visual timeline tools (screenshot, zoom, highlight). Answers arrive in a chat panel with every tool call auditable, diagnoses land as clickable highlights on the timeline, and machine-touching tool calls (shell, file edits, web) block on a Deny / Allow / Always-allow dialog rendered by the viewer.
 
-## Ground rules the diff obeys
+## Containment rules
 
-1. **Everything is feature-gated, all off by default.** Features: `ai`
-   (panel + agent layer), `duckdb` (upstream's existing feature; the data
-   tools require it), `viewer-mcp` (= `ai` + `duckdb` + `httparse`; the MCP
-   server + Claude Code engine), `eval` (oracle-graded eval harness).
-2. **A no-features build is the upstream viewer.** `cargo build` compiles
-   none of the AI layer (module declarations themselves are cfg-gated in
-   `src/lib.rs` / `src/app/mod.rs`).
-3. **Upstream-owned files carry only thin seams.** The pattern throughout:
-   a one-to-four-line `#[cfg(feature = "ai")]`-gated call at the integration
-   point, with the body in a fork-owned file.
+The diff obeys three rules:
+
+- Everything is feature-gated, all off by default. The features are `ai` (panel + agent layer), `duckdb` (upstream's existing feature; the data tools require it), `viewer-mcp` (`ai` + `duckdb` + `httparse`; the MCP server and Claude Code engine), and `eval` (oracle-graded eval harness).
+- A no-features build is the upstream viewer. `cargo build` compiles none of the AI layer, because the module declarations themselves are cfg-gated in `src/lib.rs` and `src/app/mod.rs`.
+- Upstream-owned files carry only thin seams: a one-to-four-line `#[cfg(feature = "ai")]`-gated call at each integration point, with the body in a fork-owned file.
 
 ## Where the code lives
 
-### Additive files (new; review as ordinary new code)
+### New files
+
+The following files are new to the fork; review them as ordinary new code:
 
 | Path | What it is |
 |---|---|
@@ -42,13 +29,15 @@ Deny / Allow / Always-allow dialog rendered by the viewer.
 | `src/ai/mcp_core.rs` | transport-agnostic MCP dispatch (shared by the HTTP server and the stdio `mcp` bin) |
 | `src/ai/tools/{mod,defs,query,source,wiki,overview}.rs` | tool implementations: schemas, hardened read-only DuckDB executor, sandboxed source reader, wiki retrieval, pre-computed diagnostic overview |
 | `src/ai/bridge.rs` | agent/MCP → live-timeline request bridge (viewport token, screenshot round-trip) |
-| `src/ai/agent.rs` | the built-in direct-API engine — currently **disabled** (`chat_panel::NATIVE_ENGINE_ENABLED = false`); retained for the eval harness |
+| `src/ai/agent.rs` | the built-in direct-API engine, currently disabled (`chat_panel::NATIVE_ENGINE_ENABLED = false`); retained for the eval harness |
 | `src/ai/trace.rs` | default-on local session transcripts (JSONL, 0600/0700) |
-| `src/app/core/legion_ai.rs` | **every AI addition to the viewer core** — see below |
+| `src/app/core/legion_ai.rs` | every AI addition to the viewer core; see The `core.rs` arrangement below |
 | `src/bin/{mcp,eval,embedded_runner}.rs` | stdio MCP server; eval harness; eval gradee |
 | `build.rs`, `check.sh`, `deny.toml`, `SECURITY.md`, `docs/` | build identity, verify script, supply-chain policy, threat model, docs |
 
-### Modified upstream files (the actual review surface)
+### Modified upstream files
+
+The modified upstream files are the actual review surface:
 
 | Path | Added lines | Nature of the changes |
 |---|---|---|
@@ -58,63 +47,51 @@ Deny / Allow / Always-allow dialog rendered by the viewer.
 | `Cargo.toml` | ~85 | fork metadata, optional AI dependencies, the three feature definitions |
 | `.github/workflows/*` | ~100 | feature-matrix CI, release binaries, cargo-audit/deny jobs |
 
-## The `core.rs` arrangement (read this before diffing it)
+## The `core.rs` arrangement
 
-All AI code that must live inside the viewer core is in
-**`src/app/core/legion_ai.rs`** — a **child module** of `app::core`. A child
-module can access the parent's private types and fields (`Context`, `Config`,
-`Window`, `Slot`, `ProfApp`), which is what lets the fork extend the core
-**without widening any visibility** and without scattering code through the
-upstream file. `core.rs` itself keeps only:
+Read this section before diffing `src/app/core.rs`. All AI code that must live inside the viewer core is in `src/app/core/legion_ai.rs`, a child module of `app::core`. A child module can access the parent's private types and fields (`Context`, `Config`, `Window`, `Slot`, `ProfApp`), which lets the fork extend the core without widening any visibility and without scattering code through the upstream file. `core.rs` itself keeps only:
 
-- cfg-gated **struct fields** (panel handle, screenshot slots, highlight maps),
-- cfg-gated **one-line calls** into `legion_ai::*` at the integration points
-  (frame services, screenshot pipeline, selection sync, UI seams),
-- two irreducible cfg **expression pairs** in the drag handler, and
+- cfg-gated struct fields (panel handle, screenshot slots, highlight maps),
+- cfg-gated one-line calls into `legion_ai::*` at the integration points (frame services, screenshot pipeline, selection sync, UI seams),
+- two irreducible cfg expression pairs in the drag handler, and
 - the gated `mod legion_ai;` declaration at the bottom.
 
-The one seam that re-indents upstream code (the sidebar-toggle wrap around the
-left panel) is annotated in-source; review that hunk with `git diff -w`.
+> **Note:** One seam re-indents upstream code — the sidebar-toggle wrap around the left panel. The hunk is annotated in-source; review it with `git diff -w`.
 
-## How to review
+## Reviewing the diff
+
+To review the fork, add upstream as a remote and diff against its `master`:
 
 ```sh
-git remote add upstream https://github.com/StanfordLegion/prof-viewer.git
-git fetch upstream master
-
-git diff --stat upstream/master           # the map above
-git diff upstream/master -- src/app/core.rs   # the seams (use -w for the sidebar hunk)
+$ git remote add upstream https://github.com/StanfordLegion/prof-viewer.git
+$ git fetch upstream master
+$ git diff --stat upstream/master
+$ git diff upstream/master -- src/app/core.rs
 ```
 
-Suggested order:
+The `--stat` output reproduces the file map above. The `core.rs` diff shows the seams; add `-w` to collapse the sidebar re-indent hunk to its real content.
 
-1. `Cargo.toml` — features and optional deps (all AI deps are `optional = true`).
-2. `src/lib.rs`, `src/app/mod.rs` — the cfg-gated module declarations (this is
-   the "no features ⇒ no AI code" guarantee).
+Read the diff in this order:
+
+1. `Cargo.toml` — the feature definitions and optional dependencies (all AI dependencies are `optional = true`).
+2. `src/lib.rs` and `src/app/mod.rs` — the cfg-gated module declarations. These carry the guarantee that a no-features build contains no AI code.
 3. `src/app/core.rs` — the seams; then `src/app/core/legion_ai.rs` as a new file.
-4. `src/ai/` bottom-up: `tools/` (pure functions) → `mcp_core.rs` (dispatch) →
-   `viewer_mcp.rs` (transport + auth) → `claude_code.rs` (engine) →
-   `chat_panel.rs` (UI).
+4. `src/ai/` bottom-up: `tools/` (pure functions), then `mcp_core.rs` (dispatch), then `viewer_mcp.rs` (transport and auth), then `claude_code.rs` (engine), then `chat_panel.rs` (UI).
 5. `SECURITY.md` for the threat model; `docs/architecture.md` for the system map.
 
-## Upstream-equivalence check
+## Verifying upstream equivalence
+
+To verify that the feature gating holds, build every configuration:
 
 ```sh
-cargo check --no-default-features --lib   # upstream-equivalent build
-cargo check --all-features --all-targets
-# every feature combo CI enforces:
-for f in ai duckdb ai,duckdb viewer-mcp eval; do cargo check --features $f --all-targets; done
-cargo test --all-features --all-targets
+$ cargo check --no-default-features --lib
+$ cargo check --all-features --all-targets
+$ for f in ai duckdb ai,duckdb viewer-mcp eval; do cargo check --features $f --all-targets; done
+$ cargo test --all-features --all-targets
 ```
 
-CI (`.github/workflows/rust.yml`) runs the full matrix on every push, plus
-clippy `-D warnings`, rustfmt, cargo-audit (informational), and cargo-deny
-(bans + sources).
+The first command is the upstream-equivalent build: no features, and therefore none of the AI layer. The loop checks the five gated feature combinations that CI enforces, one at a time. CI (`.github/workflows/rust.yml`) runs the full matrix on every push, plus clippy with `-D warnings`, rustfmt, cargo-audit (informational), and cargo-deny (bans + sources).
 
 ## Merge posture
 
-The fork tracks upstream `master` (currently merged through 0.8.1 / egui 0.30)
-and versions itself to match the merged upstream version. Because the AI layer
-is additive-plus-seams, an upstream merge typically conflicts only if upstream
-edits the exact lines adjacent to a seam — resolution is re-placing a one-line
-gated call.
+The fork tracks upstream `master` (currently merged through 0.8.1 / egui 0.30) and versions itself to match the merged upstream version. Because the AI layer is additive plus seams, an upstream merge typically conflicts only where upstream edits the exact lines adjacent to a seam; resolution is re-placing a one-line gated call.
