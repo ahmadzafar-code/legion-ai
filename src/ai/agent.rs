@@ -1,12 +1,18 @@
-//! Claude API client and agentic tool-use loop for Legion Prof analysis.
+//! The built-in raw-HTTP API engine: Claude API client + agentic tool-use
+//! loop ([`AgentSession`]), plus the event vocabulary the rest of the AI
+//! layer speaks.
 //!
-//! The agent runs the agentic loop:
-//! 1. POST messages to `api.anthropic.com/v1/messages`
-//! 2. Execute tool calls returned by Claude (`run_query`, `read_code`, etc.)
-//! 3. Send tool results back, repeat until `stop_reason == "end_turn"`
+//! ENGINE STATUS: currently DORMANT — `chat_panel::NATIVE_ENGINE_ENABLED` is
+//! `false`, so Legion AI runs exclusively on the user's Claude Code
+//! (`claude_code.rs`). The loop is retained intact for a one-line re-enable:
+//! POST to `api.anthropic.com/v1/messages`, execute tool calls, repeat until
+//! `end_turn`, session state persisting across turns.
 //!
-//! Session state persists across turns so follow-up questions continue
-//! the same conversation with full context.
+//! LIVE regardless of the engine switch: the shared types [`AgentEvent`],
+//! [`UiCommand`], [`AgentResponse`], [`Highlight`] — the request/reply
+//! vocabulary of `chat_panel`, `bridge`, and the Claude Code backend.
+//!
+//! Feature-gated `ai` (via `lib.rs`).
 
 use super::truncate_on_boundary;
 use serde::{Deserialize, Serialize};
@@ -37,7 +43,8 @@ pub struct Highlight {
     pub entry_slug: String,
     pub start_ns: i64,
     pub stop_ns: i64,
-    /// "critical" | "high" | "medium"
+    /// "critical" | "high" | "medium" — part of the wire format the model
+    /// emits; rendering is uniform regardless (see [`crate::ai::AiHighlight`]).
     pub severity: String,
     pub label: String,
 }

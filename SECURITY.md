@@ -47,8 +47,10 @@ with a deliberately shaped surface:
 - **Availability filter** (`--tools`): sub-agent and command-expansion tools
   (`Task`, `Skill`, `SlashCommand`, `KillShell`) are not advertised at all —
   they could route around per-call gating.
-- **Read tier** (`Read`/`Glob`/`Grep` + the viewer's MCP tools) runs without
-  prompts. Two important caveats on reading:
+- **Read tier** (`Read`/`Glob`/`Grep`/`BashOutput`/`TodoWrite` + the viewer's
+  MCP tools) runs without prompts (`BashOutput` only reads output of
+  already-approved Bash calls; `TodoWrite` writes only harness-internal task
+  state). Two important caveats on reading:
   - The viewer's MCP `read_code`/`list_files` are root-confined (see *Source
     access* above), but the harness's own `Read`/`Glob`/`Grep` are **not** — they
     can read any file your user account can read, not only the `--add-dir` root.

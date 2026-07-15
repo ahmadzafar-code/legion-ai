@@ -11,7 +11,7 @@ viewer**, and everything else is plumbing to make that safe and honest.
                                   └────────┬─────────────────────┘
                                            │ direct calls
                                   ┌────────▼─────────────────────┐
-                                  │  src/ai/tools.rs             │
+                                  │  src/ai/tools/               │
                                   │  ONE tool layer: run_query,  │
                                   │  overview, read_code,        │
                                   │  wiki_*, visual tools        │
@@ -32,16 +32,22 @@ viewer**, and everything else is plumbing to make that safe and honest.
    └──────────────────────────────────────────────┘
 ```
 
+(The Anthropic-API driver is eval-only today: the chat panel ships with the
+built-in engine disabled, so Claude Code is the only interactive agent.)
+
 ## The pieces
 
-- **`tools.rs`** — pure functions over the profile DuckDB (read-only,
-  `enable_external_access(false)`, row caps applied in Rust), the sandboxed
-  source reader, and the wiki retrieval tools. Both agents call exactly these;
-  there is no second implementation of anything.
+- **`tools/`** — ONE tool layer, split by concern: `query.rs` (read-only
+  DuckDB executor: `AccessMode::ReadOnly` + `enable_external_access(false)`,
+  50-row cap with LIMIT stripping), `source.rs` (sandboxed source reader),
+  `overview.rs` (pre-computed diagnostic signals), `wiki.rs` (knowledge
+  retrieval), `defs.rs` (tool schemas). Both agents call exactly these; there
+  is no second implementation of anything.
 - **`agent.rs`** — the built-in engine: a hand-rolled agentic loop over the
   Anthropic API (prompt caching, exponential backoff, extended thinking on
-  Opus). Used when no `claude` CLI is installed, and by the eval harness's
-  `embedded_runner`.
+  Opus). Currently DISABLED in the chat panel (`NATIVE_ENGINE_ENABLED = false`
+  in `chat_panel.rs` — Claude Code is the only interactive engine); kept alive
+  as the eval harness's out-of-process gradee via `bin/embedded_runner`.
 - **`claude_code.rs`** — the Claude Code engine: spawns the user's own
   `claude` headless (`--input-format stream-json`), persistent across turns on
   one stdin. Contains the invocation constants (tool availability/allow
@@ -59,9 +65,21 @@ viewer**, and everything else is plumbing to make that safe and honest.
   token**, a structural single-driver lock so the embedded agent and an MCP
   client can never interleave screenshots/navigation. Guards release on every
   exit path via `Drop`.
+- **`trace.rs`** — default-on session traces: JSONL transcripts of every turn
+  (untruncated tool inputs/outputs, images redacted) under
+  `~/.legion_prof_viewer/traces/` (dir 0700, files 0600);
+  `LEGION_PROF_AI_TRACE=off` disables, `LEGION_PROF_AI_TRACE_DIR` redirects.
+  See [SECURITY.md](../SECURITY.md).
 - **`chat_panel.rs`** — the egui chat UI: ＋ menu (connect DB / repo, attach
   files), context chips, markdown transcript, the approval dialog, engine
-  auto-detection.
+  auto-detection, the model + effort picker (drives the child's
+  `--model`/`--effort`), and Stop (one interrupt per turn).
+- **`app/core/legion_ai.rs`** — the fork's additions to the viewer core, as a
+  *child module* of `core`: the one Rust arrangement that lets this code use
+  `core`'s private types and fields (`ProfApp`, `Window`, `Slot`, `Context`)
+  without widening their visibility. Upstream `core.rs` keeps only thin
+  `#[cfg(feature = "ai")]`-gated one-line seams, so merges from
+  StanfordLegion/prof-viewer barely touch fork code.
 
 ## Load-bearing invariants (each documented at its definition)
 

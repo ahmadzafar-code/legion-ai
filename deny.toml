@@ -1,4 +1,5 @@
-# cargo-deny policy. CI runs: cargo deny check advisories bans sources
+# cargo-deny policy. CI runs: cargo deny check bans sources (advisories are
+# covered by the cargo-audit CI job; licenses staged below, not yet enforced).
 #
 # `licenses` is staged below but NOT yet enforced in CI — the allow-list must be
 # validated against a first `cargo deny check licenses` run (which reports every

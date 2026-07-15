@@ -1,11 +1,16 @@
-//! Tool implementations for Legion Prof AI analysis.
+//! Tool implementations for Legion AI diagnosis: plain, transport-free Rust
+//! functions, split by concern — `defs` (advertised JSON schemas), `query`
+//! (hardened DuckDB execution), `overview` (pre-computed diagnostic signals),
+//! `source` (sandboxed file tools), `wiki` (Legion knowledge corpus).
 //!
-//! Plain Rust functions called directly by the built-in agent (zero overhead).
-//! No MCP protocol layer — external client support can be added later as a
-//! thin wrapper around these same functions.
+//! TWO consumers share these functions and neither re-implements tool logic:
+//! the MCP dispatch core (`mcp_core.rs`, serving Claude Code over stdio/HTTP —
+//! the live path) and the built-in API loop (`agent.rs`, currently dormant).
+//! In particular, every model-authored query funnels through
+//! `query::execute_run_query_raw`.
 //!
-//! The `run_query` and `gather_overview` tools require the `duckdb` feature.
-//! The `read_code` tool requires only the `ai` feature.
+//! `run_query`/`gather_overview` need the `duckdb` feature; the file and wiki
+//! tools need only `ai`.
 
 mod defs;
 mod overview;

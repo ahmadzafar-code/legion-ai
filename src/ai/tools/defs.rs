@@ -1,4 +1,11 @@
 //! The advertised tool definitions (JSON schemas + when-to-use descriptions).
+//!
+//! Consumed by BOTH the built-in loop's `tools` array and `mcp_core`'s
+//! `tools/list` — one source of truth for the advertised surface. The
+//! descriptions are the #1 behavioral lever: they must carry the WHEN/WHEN-NOT
+//! triggers themselves, because MCP `instructions` MAY be ignored by clients.
+//! Every SQL example must use the real schema: `entry_slug` (not proc_id),
+//! STRUCT dot notation (`running.duration`), the `items` table.
 
 /// Return Claude API tool definitions for the agent.
 ///

@@ -1,5 +1,10 @@
 //! `DuckDB` query execution + hardening, result formatting, and the SQL
 //! builders used by the MCP surface.
+//!
+//! INVARIANT: `execute_run_query_raw` is the ONE entry point for model-authored
+//! SQL — read-only connection, external file access disabled, SELECT/WITH-only,
+//! 50-row cap with a visible truncation marker. Nothing else in the codebase
+//! opens a `DuckDB` connection on the model's behalf.
 
 /// Execute a read-only SQL query against the Legion `DuckDB` database.
 ///

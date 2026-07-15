@@ -1,4 +1,9 @@
 //! File / source-tree tools (path-sandboxed `read_code`/`list_files`).
+//!
+//! Sandbox shape: paths must be relative — `..` and absolute prefixes are
+//! rejected up front, and canonicalization catches symlink escapes past the
+//! code root. Both tools are gated on a code root being set: without one they
+//! are neither advertised nor offered.
 
 use std::path::Path;
 

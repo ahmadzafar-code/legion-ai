@@ -1,16 +1,19 @@
-//! Transport-agnostic MCP dispatch core (data tools only).
+//! Transport-agnostic MCP dispatch core.
 //!
 //! This is the durable part of every Legion MCP server: a pure
 //! `(&Value, &ServerCtx) -> Option<Value>` request handler plus the tool-list and
 //! tool-call builders. Two transports wrap it unchanged:
-//!   - `src/bin/mcp.rs` — a hand-rolled synchronous stdio JSON-RPC server.
+//!   - `src/bin/mcp.rs` — a hand-rolled synchronous stdio JSON-RPC server (data
+//!     tools only).
 //!   - `ai/viewer_mcp.rs` — the in-viewer HTTP server (feature `viewer-mcp`).
 //!
-//! It exposes only the HEADLESS DATA tools (run_query / overview / find_blockers /
-//! read_code / list_files / final_answer) by reusing the pure functions in
-//! [`crate::ai::tools`]; it never re-implements tool logic and never opens its own
-//! DuckDB connection (every query routes through the hardened
-//! `execute_run_query_raw`). GUI/view tools are NEVER advertised here.
+//! The advertised surface is CTX-GATED, never re-implemented here: the headless
+//! data tools (run_query / overview / find_blockers / read_code / list_files /
+//! final_answer) always; `wiki_*` when a wiki root is set; the 9 VISUAL tools
+//! ONLY when a [`UiBridge`](super::bridge::UiBridge) is attached (the in-viewer
+//! server) — they drive the live timeline over the bridge. Every query routes
+//! through the hardened `execute_run_query_raw`; this file never opens its own
+//! DuckDB connection. Feature-gated `duckdb`.
 
 use super::tools::{
     execute_list_files, execute_read_code, execute_run_query_raw, find_blockers_sql,

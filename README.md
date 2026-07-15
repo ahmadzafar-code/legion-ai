@@ -1,39 +1,93 @@
 # Legion AI
 
 **Legion AI** is an AI diagnostic co-pilot built into the Legion Prof timeline
-viewer. Open a profile, click **Legion AI**, and ask questions in plain English —
-the agent runs SQL over your profile, looks at the live timeline (it can zoom,
-filter, and take screenshots), reads your application's source if you connect
+viewer. Open a profile, click **Legion AI**, and ask questions in plain
+English — the agent runs SQL over your profile, drives the live timeline
+(zoom, filter, screenshots), reads your application's source if you connect
 it, and answers with root-cause diagnoses and clickable highlights on the
 timeline itself.
 
 > **This is a modified fork of
 > [StanfordLegion/prof-viewer](https://github.com/StanfordLegion/prof-viewer)**
-> (Apache-2.0). All additions live in `src/ai/`, `src/bin/`, and feature-gated
-> blocks of `src/app/core.rs` / `src/main.rs`; a default build (`cargo build`)
-> behaves exactly like upstream. Upstream's original README is preserved at the
-> bottom of this file.
+> (Apache-2.0). A default build (`cargo build`) behaves exactly like upstream;
+> everything else is feature-gated. Reviewers: see
+> [For reviewers & development](#for-reviewers--development) and
+> [docs/UPSTREAM-DELTA.md](docs/UPSTREAM-DELTA.md).
 
 ## Contents
 
-- [What it can do](#what-it-can-do)
-- [Requirements](#requirements)
 - [Quick start](#quick-start)
-- [Step 1 — Profile your Legion application](#step-1--profile-your-legion-application)
-- [Step 2 — Generate the viewer inputs](#step-2--generate-the-viewer-inputs)
-- [Step 3 — Launch the viewer](#step-3--launch-the-viewer)
-- [Step 4 — Ask questions](#step-4--ask-questions)
-- [The chat panel, piece by piece](#the-chat-panel-piece-by-piece)
-- [Engines and authentication](#engines-and-authentication)
-- [Using your own agent over MCP (BYOA)](#using-your-own-agent-over-mcp-byoa)
-- [Optional knowledge wiki](#optional-knowledge-wiki)
-- [Session traces (test program)](#session-traces-test-program)
-- [Security model](#security-model)
-- [Feature flags](#feature-flags)
+- [What it can do](#what-it-can-do)
+- [Using the co-pilot](#using-the-co-pilot)
+- [Connecting your application source](#connecting-your-application-source)
 - [Troubleshooting](#troubleshooting)
-- [Development](#development)
+- [How it works & security](#how-it-works--security)
+- [Session traces (test program)](#session-traces-test-program)
+- [Advanced](#advanced)
+- [For reviewers & development](#for-reviewers--development)
 - [License and acknowledgments](#license-and-acknowledgments)
-- [Upstream README](#upstream-readme)
+
+## Quick start
+
+### 0. Prerequisites (once)
+
+| What | How | Why |
+|---|---|---|
+| Rust ≥ 1.85 | `rustup update` | edition-2024 crate |
+| C / C++ toolchain | Linux: `sudo apt-get install build-essential` · macOS: `xcode-select --install` | first build compiles DuckDB's C++ (~5–10 min once, cached afterwards) |
+| Linux GUI libraries (Linux only) | `sudo apt-get install libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libxkbcommon-dev libssl-dev` | native egui viewer (Fedora list in [Troubleshooting](#troubleshooting)) |
+| `legion_prof` | `git clone https://github.com/StanfordLegion/legion.git && cargo install --locked --all-features --path legion/tools/legion_prof_rs` | converts profiler logs into the viewer's inputs |
+| **Claude Code** ≥ 2.1 + `curl` | install from [claude.com/claude-code](https://claude.com/claude-code) — `npm install -g @anthropic-ai/claude-code` (or the native installer) — then run **`claude auth login`** once | **the AI engine.** Uses your existing Claude subscription (Pro/Max), or an `ANTHROPIC_API_KEY` in the environment (the spawned CLI inherits it) |
+
+### 1. Build (or download) the viewer
+
+```sh
+git clone https://github.com/ahmadzafar-code/legion-ai.git
+cd legion-ai
+cargo build --release --features viewer-mcp
+```
+
+**Prefer a prebuilt binary?** Tagged releases attach Linux (x86_64) and macOS
+(arm64) binaries — the full AI build — on the
+[Releases page](https://github.com/ahmadzafar-code/legion-ai/releases).
+macOS note: the binary is unsigned; after extracting, clear quarantine with
+`xattr -d com.apple.quarantine legion_prof_viewer` (or right-click → Open the
+first time).
+
+### 2. Profile your app and convert the logs
+
+```sh
+# Run with Legion's profiler enabled (Legate: `legate --profile ...`):
+./my_app -lg:prof <N> -lg:prof_logfile prof_%.gz
+
+# Convert the logs into the viewer's two inputs:
+legion_prof archive -o myrun_archive prof_*.gz   # timeline for the viewer
+legion_prof duckdb  -o myrun_db      prof_*.gz   # database for the SQL tools
+```
+
+Name the database `<base>_db` next to `<base>_archive` (or any `*.duckdb` /
+`*_db` file in the same directory) and the viewer **auto-detects** it — you
+never pass `--duckdb`.
+
+### 3. Launch and ask
+
+```sh
+./target/release/legion_prof_viewer myrun_archive
+```
+
+Click **Legion AI** (top right) and ask:
+
+> *"Give me an overview of this profile — what ran, where the time went, and
+> anything unusual."*
+
+If the welcome screen says Claude Code isn't signed in, run `claude auth login`
+in any terminal — the hint flips to ready within seconds, no restart needed.
+
+**Profiling a Legate / cuNumeric application?** Legate programs run on Legion,
+so the same flow applies — pass the profiling flags through Legate's launcher
+(`legate --profile --logging ... your_app.py`) and feed the resulting
+`prof_*.gz` through step 2 unchanged. The co-pilot detects Python/Legate
+processors and factors them into its diagnosis.
 
 ## What it can do
 
@@ -45,121 +99,19 @@ timeline itself.
   a nanosecond range, filter processor kinds, scroll to a row, search, and
   capture screenshots that it reads as images.
 - **Mark what it finds** — diagnoses arrive as timeline **highlights** with
-  severity and labels; manage them in the sidebar's highlight manager and
-  click a chip to zoom to the evidence.
-- **Read your code** — use **+ → Connect Code…** to point it at the profiled
-  application's source; it explains what a slow task actually computes
-  (`--code <dir>` does the same at launch).
-- **Answer about a selection** — click a task bar or shift-drag a time range
-  in the timeline, then ask "what's happening here?"; the selection rides
-  along as context.
+  labels; manage them in the sidebar's highlight manager and click a chip to
+  zoom to the evidence.
+- **Read your code** — connect the profiled application's source and it
+  explains what a slow task actually computes.
+- **Answer about a selection** — click a task bar or shift-drag a time range,
+  then ask "what's happening here?"; the selection rides along as context.
 - **Stay under your control** — a turn in flight can be stopped with the
   square stop button; anything that touches your machine (shell, file edits,
   web) raises a Deny / Allow / Always-allow dialog first.
 
-## Requirements
+## Using the co-pilot
 
-| Requirement | Needed for | Notes |
-|---|---|---|
-| Rust toolchain (stable) | building the viewer | first build compiles DuckDB's C++ — expect 5–10 minutes once, seconds afterwards |
-| Linux GUI libraries | native viewer on Linux | package list in the [upstream README](#upstream-readme) below |
-| `legion_prof` (from the [Legion repo](https://github.com/StanfordLegion/legion)) | producing profile inputs | `cargo install --locked --all-features --path legion/tools/legion_prof_rs` |
-| **Claude Code CLI** ≥ 2.1 (`claude` on PATH) + `curl` | the recommended AI engine | one-time `claude auth login` (Pro/Max subscription), *or* an `ANTHROPIC_API_KEY` in the environment |
-| — or just an `ANTHROPIC_API_KEY` | the built-in fallback engine | zero extra installs; plain HTTPS to the Anthropic API |
-
-The AI layer is **native-only** (macOS / Linux / Windows). Wasm builds serve
-the plain upstream viewer.
-
-## Quick start
-
-```sh
-# 1. Build the viewer with the full AI layer
-git clone https://github.com/ahmadzafar-code/legion-ai.git
-cd legion-ai
-cargo build --release --features viewer-mcp
-
-# 2. Profile your Legion app, then convert the logs (see Steps 1–2)
-legion_prof archive -o myrun_archive prof_*.gz
-legion_prof duckdb  -o myrun_db      prof_*.gz
-
-# 3. Launch — the *_db file is auto-detected next to the *_archive
-./target/release/legion_prof_viewer myrun_archive
-
-# 4. Click "Legion AI" (top right) and ask:
-#      "Give me an overview of this profile"
-```
-
-**Prefer a prebuilt binary?** Tagged releases attach Linux (x86_64) and macOS
-(arm64) binaries on the [Releases page](https://github.com/ahmadzafar-code/legion-ai/releases) —
-download, `tar xzf`, and run, skipping the ~10-minute first-build DuckDB
-compile. Building from source (above) is always available.
-
-If the welcome screen says Claude Code isn't signed in, run `claude auth login` in
-any terminal — the hint flips to ready within seconds, no restart needed.
-
-## Step 1 — Profile your Legion application
-
-Run your application with Legion's profiler enabled, e.g.:
-
-```sh
-./my_app -lg:prof <N> -lg:prof_logfile prof_%.gz
-```
-
-where `<N>` is the number of nodes to profile and `%` expands to the node
-number. This produces the standard `prof_*.gz` logs that every `legion_prof`
-workflow starts from. (See the
-[Legion profiling docs](https://legion.stanford.edu/profiling/) for details.)
-
-**Profiling a Legate / cuNumeric application.** Legate programs run on Legion,
-so the same profiler applies — pass the Legion profiling flags through Legate's
-launcher, e.g. `legate --profile --logging ... your_app.py`, or set the
-`-lg:prof` flags via `LEGATE_CONFIG` / the underlying realm launch. The result
-is the same `prof_*.gz` logs; feed them through Steps 2–3 unchanged. The
-co-pilot detects Python/Legate processors in the profile and factors them into
-its diagnosis (Python task overhead, host-side orchestration, and so on).
-
-## Step 2 — Generate the viewer inputs
-
-The co-pilot uses **two artifacts**, both produced by `legion_prof`:
-
-```sh
-legion_prof archive -o myrun_archive prof_*.gz   # timeline for the viewer
-legion_prof duckdb  -o myrun_db      prof_*.gz   # database for the SQL tools
-```
-
-- The **archive** is what you open in the viewer (same as upstream).
-- The **DuckDB database** is what the agent queries. `legion_prof duckdb` uses
-  the writer this repository ships, so the schema always matches the tools.
-
-**Naming convention worth keeping**: name the database `<base>_db` for an
-archive named `<base>_archive` (as above) — or give it any `*.duckdb` / `*_db`
-name in the same directory — and the viewer **auto-detects** it, so you never
-pass `--duckdb` at all.
-
-Only have an archive (e.g. one someone shared with you)? Convert it directly:
-
-```sh
-cargo run --release --features duckdb --example prof2duckdb -- \
-    myrun_archive -o myrun_db
-```
-
-## Step 3 — Launch the viewer
-
-```sh
-legion_prof_viewer <archive-dir-or-URL> \
-    [--duckdb <path>]   # profile database (skip if auto-detected)
-    [--code   <dir>]    # profiled application's source
-    [--wiki   <dir>]    # Legion knowledge wiki (optional)
-```
-
-Everything passed by flag can also be connected later from inside the panel
-(the **+** menu), and connected paths persist across restarts — CLI flags win
-over persisted values when both exist.
-
-## Step 4 — Ask questions
-
-Open the panel with the **Legion AI** button (top right). Good first
-questions:
+Good first questions:
 
 - *"Give me an overview of this profile — what ran, where the time went, and
   anything unusual."*
@@ -169,74 +121,72 @@ questions:
 - Shift-drag a region on the timeline, then: *"What's happening in this
   region?"*
 
-The agent narrates as it works — every tool call it makes (`run_query`,
-`set_view`, `highlight`, …) appears as an expandable row in the transcript, so
-you can audit exactly which SQL produced which number.
-
-## The chat panel, piece by piece
+The agent narrates as it works — every tool call (`run_query`, `set_view`,
+`highlight`, …) appears as an expandable row in the transcript, so you can
+audit exactly which SQL produced which number.
 
 | Control | What it does |
 |---|---|
 | **Legion AI** (top bar, right) | shows/hides the chat panel |
 | **Sidebar** (top bar, left) | shows/hides the controls sidebar — more room for timeline + chat |
-| **DB / Code / Visual chips** | live status of the agent's three tool groups; hover for detail |
-| **+ menu** (composer) | **Connect DuckDB…**, **Connect Code…** (lets the agent read your source), **Add file…** (attach a text file as context) — connected items show as chips with **×** to disconnect |
-| **Model · Strength picker** (composer) | pick the model tier (**Default** / **Fable** / **Opus** / **Sonnet** / **Haiku**) and reasoning strength (**Default** / **Low** / **Medium** / **High** / **Max**). Default inherits your own Claude Code model; a change applies on your next message. Drives the CLI's `--model` / `--effort`. |
-| **Send / Stop button** | send when you've typed something; during a turn it becomes a square **stop** button — one click gracefully interrupts the agent (the session survives, keep chatting) |
+| **DB / Code / Wiki / Visual chips** | live status of the agent's tool groups; hover for detail |
+| **+ menu** (composer) | **Connect DuckDB…**, **Connect Code…**, **Add file…** (attach a text file as context) — connected items show as chips with **×** to disconnect |
+| **Model · Strength picker** (composer) | model tier (**Default** / **Fable** / **Opus** / **Sonnet** / **Haiku**) and reasoning strength (**Default** / **Low** / **Medium** / **High** / **Max**). Default inherits your own Claude Code configuration; a change applies on your next message |
+| **Send / Stop** | send when you've typed something; during a turn it becomes a square **stop** button — one click gracefully interrupts (the session survives, keep chatting) |
 | **↺** (panel header) | hard reset: kills the engine process and starts a fresh session |
-| **Selection chip** | click a task bar or shift-drag a range in the timeline, and your next question includes it |
+| **Selection chip** | click a task bar or shift-drag a range, and your next question includes it |
 | **Highlights** (left sidebar) | every diagnosis the agent marks lands here — toggle, zoom to, or clear |
 | **Done. (tokens: …)** | per-turn token and cost line, straight from the engine's own usage report |
-| **Copy transcript / Copy** | export the full conversation (screenshots are elided as `[image … KB]` placeholders) |
+| **Copy transcript / Copy** | export the conversation (screenshots elided as `[image … KB]` placeholders) |
 
-## Engines and authentication
+## Connecting your application source
 
-The panel picks its engine automatically from what your machine has:
+Use **+ → Connect Code…** to point the agent at the profiled application's
+source tree (or pass `--code <dir>` at launch). The agent then reads the
+functions behind slow tasks and explains what they actually compute.
+Connected paths persist across restarts; CLI flags win over persisted values.
 
-| You have | Engine used | Auth |
-|---|---|---|
-| `claude` CLI installed | **your Claude Code**, spawned headless against the viewer's local MCP server | one-time `claude auth login`, *or* `ANTHROPIC_API_KEY` (inherited) |
-| no `claude` | **built-in API loop** | `ANTHROPIC_API_KEY` env var, or the key popup on first use |
+Connect only code you're comfortable sending to your configured model
+provider — source the agent reads becomes conversation context.
 
-The Claude Code engine is preferred when available: it brings the full agent
-harness — its own file tools over your connected repo, shell/web behind the
-approval dialog — on your existing subscription or key, with whatever model
-your `claude` install is configured for. The built-in engine is the
-zero-install fallback.
+## Troubleshooting
 
-The welcome screen tells you where you stand: if Claude Code isn't signed in
-it shows the one-time `claude auth login` step; once signed in it suggests
-connecting your code.
+| Symptom | Fix |
+|---|---|
+| Welcome screen: "Claude Code isn't signed in yet" | run `claude auth login` in any terminal; the hint updates within seconds |
+| First turn errors with 401 | same as above, then **↺** for a fresh session |
+| Panel says Claude Code isn't available although it's installed | make sure `claude` resolves on the PATH of the shell that launched the viewer; when launching from Finder/an IDE, start from a terminal instead (or symlink `claude` into `/usr/local/bin`) |
+| `cc` / `c++` not found during first build | `sudo apt-get install build-essential` (Linux) or `xcode-select --install` (macOS) |
+| Error about `edition2024` / rustc version | `rustup update` (needs Rust ≥ 1.85) |
+| First `cargo build` takes ~10 minutes | DuckDB's C++ compiles once and is cached afterwards |
+| No SQL tools / "DB ○" chip gray | pass `--duckdb`, use the naming convention from step 2, or **+ → Connect DuckDB…** |
+| Port 8765 in use | the viewer picks an ephemeral port and prints it; re-run the printed `claude mcp add` line if you registered an external agent |
+| `The socket connection was closed unexpectedly` on one tool call | transient transport error; the viewer now answers 408 and logs the cause to stderr — the agent retries and succeeds |
+| Linux: viewer fails to start | install the GUI packages from [Prerequisites](#0-prerequisites-once); Fedora: `dnf install clang clang-devel clang-tools-extra speech-dispatcher-devel libxkbcommon-devel pkg-config openssl-devel libxcb-devel fontconfig-devel` |
+| macOS: "cannot be opened" on a prebuilt binary | `xattr -d com.apple.quarantine legion_prof_viewer`, or right-click → Open |
 
-## Using your own agent over MCP (BYOA)
+## How it works & security
 
-The viewer runs a loopback-only HTTP MCP server exposing the data, source,
-wiki, and visual-timeline tools. At startup it prints a ready-to-paste
-registration:
+Legion AI runs on **your own Claude Code**, spawned headless against a local
+MCP server inside the viewer. Authentication is whatever your `claude` already
+uses: a one-time `claude auth login` (Pro/Max subscription) or an
+`ANTHROPIC_API_KEY` in the environment (inherited by the spawned CLI). There
+is no separate account, server, or telemetry. (A built-in direct-API engine
+exists in the code but is currently disabled.)
 
-```sh
-claude mcp add --transport http legion-viewer \
-    http://127.0.0.1:8765/mcp --header "Authorization: Bearer <token>"
-```
+Security model, short version (full details in [SECURITY.md](SECURITY.md)):
 
-Any MCP-capable agent can drive the profiler through it. The bearer token is
-random per session; set `LEGION_VIEWER_MCP_TOKEN` for a stable registration
-across restarts. Port 8765 is preferred, with an ephemeral fallback (the real
-port is printed at startup).
-
-A headless stdio variant (data tools only, no GUI) ships as the `mcp` bin:
-
-```sh
-cargo run --features ai,duckdb --bin mcp -- --duckdb <db> [--code-root <dir>]
-```
-
-## Optional knowledge wiki
-
-The `wiki_*` tools serve a curated Legion-concepts corpus (task lifecycle,
-mapper behavior, common bottleneck patterns) that the agent consults when
-diagnosing. Point `--wiki <dir>` at a corpus; `wiki-legion/wiki` relative to
-the launch directory is auto-detected. The corpus used during development is
-published separately — see this fork's release notes.
+- The MCP server binds **127.0.0.1 only**, requires a **per-session bearer
+  token** on every request, and rejects non-local `Origin`s.
+- Engine tool calls that touch your machine (shell, file edits, web fetch)
+  block on a **Deny / Allow / Always-allow** dialog in the viewer, showing the
+  full command — never a truncated preview.
+- The spawned Claude Code child runs with an isolated settings file and a
+  neutral working directory, so repository-local `.claude/` configuration is
+  never picked up implicitly.
+- Profile data and connected source are sent to the model (Anthropic API) as
+  conversation context — connect only code you're comfortable sharing with
+  your configured provider.
 
 ## Session traces (test program)
 
@@ -250,67 +200,91 @@ session it prints where the file lives:
             (set LEGION_PROF_AI_TRACE=off to disable)
 ```
 
-**What's recorded** (JSON Lines, one event per line): your prompts, the
-agent's narration and thinking, every tool call **with its full input**
-(e.g. the exact SQL), tool results, per-turn token usage/cost, stop clicks,
-and errors. **What's not**: screenshot image bytes are replaced with a
-`[image … KB elided]` note, and nothing is uploaded anywhere — the trace is a
-plain local file.
+**What's recorded** (JSON Lines): your prompts, the agent's narration and
+thinking, every tool call **with its full input** (e.g. the exact SQL), tool
+results, per-turn token usage/cost, stop clicks, and errors. **What's not**:
+screenshot image bytes are replaced with a `[image … KB elided]` note, and
+nothing is uploaded anywhere — the trace is a plain local file.
 
 - **Disable**: `LEGION_PROF_AI_TRACE=off` (or `0`/`false`).
 - **Relocate**: `LEGION_PROF_AI_TRACE_DIR=<dir>`.
-- **Share with the team**: zip your `~/.legion_prof_viewer/traces/` folder and
-  attach it to your feedback. Traces contain your prompts, profile-derived
-  numbers, and any source snippets the agent read — skim before sharing if
-  your application code is sensitive.
+- **Share with the team**: zip `~/.legion_prof_viewer/traces/` and attach it
+  to your feedback. Traces contain your prompts, profile-derived numbers, and
+  any source snippets the agent read — skim before sharing if your application
+  code is sensitive.
 
-(Separately, `LEGION_PROF_AI_TRACE_DIR` also enables the low-level span-timing
-log for the built-in engine — `agent_traces/agent.jsonl` — mainly of interest
-to maintainers.)
+## Advanced
 
-## Security model
+### Full CLI
 
-Short version (full details in [SECURITY.md](SECURITY.md)):
+```sh
+legion_prof_viewer <archive-dir-or-URL> \
+    [--duckdb <path.duckdb>]   # profile database (skip if auto-detected)
+    [--code   <dir>]           # profiled application's source
+    [--wiki   <dir>]           # Legion knowledge wiki (optional)
+```
 
-- The MCP server binds **127.0.0.1 only**, requires a **per-session bearer
-  token** on every request, and rejects non-local `Origin`s.
-- Engine tool calls that touch your machine (Bash, file edits, web fetch)
-  block on a **Deny / Allow / Always-allow** dialog in the viewer, showing the
-  full command — never a truncated preview.
-- The spawned Claude Code child runs with an isolated settings file and a
-  neutral working directory, so repository-local `.claude/` configuration is
-  never picked up implicitly.
-- Profile data and connected source are sent to the model (Anthropic API) as
-  conversation context — connect only code you're comfortable sharing with
-  your configured provider.
+Everything passed by flag can also be connected later from the panel's **+**
+menu; connected paths persist across restarts (CLI flags win when both exist).
 
-## Feature flags
+### Only have an archive?
+
+Convert it to a database directly (no `prof_*.gz` needed):
+
+```sh
+cargo run --release --features duckdb --example prof2duckdb -- \
+    myrun_archive -o myrun_db
+```
+
+The DuckDB writer is shared with upstream prof-viewer (this fork does not
+modify it), so any recent `legion_prof` produces a database with the schema
+the tools expect.
+
+### Optional knowledge wiki
+
+The `wiki_*` tools serve a curated Legion-concepts corpus (task lifecycle,
+mapper behavior, common bottleneck patterns) that the agent consults when
+diagnosing. Point `--wiki <dir>` at a corpus; `wiki-legion/wiki` relative to
+the launch directory is auto-detected. The corpus used during development is
+published separately — see this fork's release notes.
+
+### Using your own agent over MCP (BYOA)
+
+The viewer runs a loopback-only HTTP MCP server exposing the data, source,
+wiki, and visual-timeline tools. At startup it prints a ready-to-paste
+registration:
+
+```sh
+claude mcp add --transport http legion-viewer \
+    http://127.0.0.1:8765/mcp --header "Authorization: Bearer <token>"
+```
+
+Any MCP-capable agent can drive the profiler through it. The bearer token is
+random per session; set `LEGION_VIEWER_MCP_TOKEN` for a stable registration.
+Port 8765 is preferred, with an ephemeral fallback (the real port is printed
+at startup).
+
+A headless stdio variant (data tools only, no GUI) ships as the `mcp` bin:
+
+```sh
+cargo run --features ai,duckdb --bin mcp -- --duckdb <db> [--code-root <dir>]
+```
+
+## For reviewers & development
+
+**Fork layout.** All AI code lives in `src/ai/`, `src/bin/`, and
+`src/app/core/legion_ai.rs` (a child module holding every AI addition to the
+viewer core — upstream files carry only thin `#[cfg(feature = "ai")]`-gated
+call sites). [docs/UPSTREAM-DELTA.md](docs/UPSTREAM-DELTA.md) maps the full
+delta against upstream and how to review it.
 
 | Build | What you get |
 |---|---|
 | `cargo build` | the plain upstream viewer (no AI) |
-| `--features ai` | chat panel + built-in API engine (no SQL tools) |
+| `--features ai` | chat panel + UI (the engine requires Claude Code, enabled by `viewer-mcp`) |
 | `--features ai,duckdb` | + DuckDB data tools (`run_query`, overview, …) |
 | `--features viewer-mcp` | + in-viewer MCP server + the Claude Code engine (implies `ai,duckdb`) — **the recommended build** |
 | `--features eval` | + the oracle-graded eval harness (`eval` bin; maintainers) |
-
-Session reasoning traces are ON by default during the test program — see
-[Session traces](#session-traces-test-program).
-
-## Troubleshooting
-
-| Symptom | Fix |
-|---|---|
-| Welcome screen: "Claude Code isn't signed in yet" | run `claude auth login` in any terminal; the hint updates within seconds |
-| First turn errors with 401 | same as above — or export `ANTHROPIC_API_KEY`, then **↺** for a fresh session |
-| `The socket connection was closed unexpectedly` on one tool call | benign transport race between Claude Code's HTTP client and the viewer's one-shot connections; the agent retries and succeeds |
-| First `cargo build` takes ~10 minutes | DuckDB's C++ compiles once and is cached afterwards |
-| Panel uses the built-in engine although `claude` is installed | make sure `claude` resolves on the PATH of the shell that launched the viewer |
-| No SQL tools / "DB ○" chip gray | pass `--duckdb`, use the naming convention from Step 2, or **+ → Connect DuckDB…** |
-| Linux: viewer fails to start | install the GUI packages listed in the [upstream README](#upstream-readme) |
-| Stop button doesn't appear while running | it replaces the send button only for the Claude Code engine; the built-in engine can't be interrupted mid-turn (use **↺**) |
-
-## Development
 
 ```sh
 cargo check --features ai,duckdb
@@ -321,108 +295,14 @@ cargo test  --features viewer-mcp
 ```
 
 All five feature combinations must compile: `{}`, `{ai}`, `{duckdb}`,
-`{ai,duckdb}`, `{viewer-mcp}`. The AI layer lives in `src/ai/` (agent loop,
-tools, chat panel, MCP core + HTTP transport, Claude Code backend); see
-[CONTRIBUTING.md](CONTRIBUTING.md) for the upstream contribution process.
+`{ai,duckdb}`, `{viewer-mcp}`. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License and acknowledgments
 
 Apache-2.0, same as upstream — see [LICENSE.txt](LICENSE.txt). Built on the
 [Legion](https://legion.stanford.edu/) ecosystem and the
 [StanfordLegion/prof-viewer](https://github.com/StanfordLegion/prof-viewer)
-frontend; the AI layer talks to [Anthropic](https://www.anthropic.com/)'s
-Claude models via your own Claude Code install or API key.
-
----
-
-# Upstream README
-
-
-This repository contains the Legion Prof frontend in Rust. The frontend here is
-intended to be used with Legion Prof and is not (typically) used
-standalone. Most users want the integrated version (i.e., that can parse Legion
-Prof logs and generate a visualization). To use the integrated version of
-Legion Prof, clone the [Legion
-repository](https://github.com/StanfordLegion/legion) and run:
-
-```
-git clone https://github.com/StanfordLegion/legion.git
-cargo install --locked --all-features --path legion/tools/legion_prof_rs
-```
-
-To start a native viewer right away, run:
-
-```
-legion_prof view prof_*.gz
-```
-
-To start a server (and attach a viewer to it), run (in separate shells):
-
-```
-legion_prof serve prof_*.gz
-legion_prof attach http://127.0.0.1:8080/
-```
-
-If you really want to run the frontend by itself, continue to the instructions
-below.
-
-## Quickstart
-
-### Native
-
-Run:
-
-```
-cargo run --release <URL>
-```
-
-Ubuntu dependencies:
-
-```
-sudo apt-get install libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libxkbcommon-dev libssl-dev
-```
-
-Fedora Rawhide dependencies:
-
-```
-dnf install clang clang-devel clang-tools-extra speech-dispatcher-devel libxkbcommon-devel pkg-config openssl-devel libxcb-devel fontconfig-devel
-```
-
-### Web Locally
-
-Install dependencies:
-
-```
-cargo install --locked trunk
-```
-
-Then run:
-
-```
-trunk serve
-```
-
-Go to <http://127.0.0.1:8080/#dev> in your browser. (The `#dev` skips
-client-side caching, so that you don't need to clear your browser cache as you
-develop the app.)
-
-### Web Deploy
-
-Install `trunk` as above. Then run:
-
-```
-trunk build --release
-```
-
-This will generate a static site under `dist` that you can upload. Note that
-`trunk` by default assumes the site will live in the root of the domain (e.g.,
-`https://example.com/`). If that is not true, add `--public-url ...` to the
-`trunk` command where `...` is the path the build is hosted under (e.g.,
-`https://example.com/.../`).
-
-### Web Auto-Deploy
-
-This repository is configured via GitHub Actions to deploy automatically on
-each push to the `master` branch. You can test it at
-<https://legion.stanford.edu/prof-viewer/?url=https://...> where
-`https://...` is the URL of the profile to load.
+frontend (original README preserved at
+[docs/UPSTREAM-README.md](docs/UPSTREAM-README.md)); the AI layer talks to
+[Anthropic](https://www.anthropic.com/)'s Claude models via your own Claude
+Code install or API key.

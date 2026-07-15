@@ -1,8 +1,15 @@
-//! AI-powered analysis and highlighting for profiling data.
+//! AI-powered analysis and highlighting for profiling data ("Legion AI").
 //!
 //! This module provides:
-//! - Chat panel UI (`chat_panel`)
-//! - Native Rust AI agent + direct tool calls (`agent`, `tools`)
+//! - Chat panel UI (`chat_panel`) — engines, composer, approval dialog
+//! - The Claude Code engine (`claude_code` + `viewer_mcp`, feature
+//!   `viewer-mcp`): the user's own `claude` driving the viewer over an
+//!   in-process HTTP MCP server
+//! - The built-in API loop (`agent`) — currently disabled, retained for
+//!   re-enable
+//! - Tool implementations (`tools`) + the transport-agnostic MCP core
+//!   (`mcp_core`)
+//! - The agent↔UI bridge (`bridge`) and default-on session traces (`trace`)
 //!
 //! # Conventions
 //!

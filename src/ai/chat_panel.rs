@@ -1,15 +1,16 @@
-//! Chat panel UI for AI-powered performance analysis.
+//! Chat panel UI: the Cursor-style right-side panel that owns the chat
+//! experience — composer + ＋ context menu (plain files attach inline; folders
+//! set the project root; `.duckdb` files set the database), model/effort
+//! picker, Stop button, transcript with live tool-call rows, and the approval
+//! dialog for the Claude Code backend's gated tools.
 //!
-//! Provides a Cursor-inspired toggleable right-side panel where users can:
-//! - Ask questions about their profile in a composer input
-//! - Add context via the ＋ menu (plain files attach inline; folders set the
-//!   project root; `.duckdb` files set the database path)
-//! - View progressive analysis results with markdown rendering
-//! - Enter an API key in a popup when the built-in API engine is active (the
-//!   engine itself is auto-detected: Claude Code when installed, else the API loop)
+//! Engine selection (`resolve_backend`): the user's own Claude Code spawned as
+//! a persistent subprocess against the in-viewer MCP server (`viewer-mcp`
+//! builds) — currently the ONLY active engine. The built-in API loop
+//! (`agent.rs`) is retained but disabled; see `NATIVE_ENGINE_ENABLED` for the
+//! one-line re-enable.
 //!
-//! When built with `--features ai`, the panel calls the native Rust agent
-//! (`agent::AgentSession`) directly — no Python sidecar required.
+//! Feature-gated `ai`; the Claude Code paths are additionally `viewer-mcp`-gated.
 
 use crate::ai::agent::{AgentEvent, AgentResponse, AgentSession, Highlight, UiCommand};
 use crate::data::EntryID;
