@@ -2973,6 +2973,11 @@ impl ProfApp {
             PanDirection::Right => 1,
         };
         let interval = cx.view_interval.translate(duration * sign);
+        // Keep the window in-bounds (preserving its duration), matching the
+        // trackpad / horizontal-scroll-bar paths. Without this an agent `pan`
+        // (or a keyboard arrow-pan) near the profile edge scrolls into empty
+        // space and returns a half-blank screenshot.
+        let interval = Self::clamp_interval(interval, cx.total_interval);
 
         ProfApp::update_view_interval(cx, interval, IntervalOrigin::Pan);
         ProfApp::update_interval_select_state(cx);
