@@ -79,6 +79,18 @@ jobs:
       # a real signal: fix the dependency or record an ignore in audit.toml.
       - run: cargo audit
 
+  deny:
+    name: Cargo Deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      # advisories + bans + sources per deny.toml. `licenses` is intentionally
+      # excluded until its allow-list is curated (see deny.toml).
+      - run: cargo deny check advisories bans sources
+
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest

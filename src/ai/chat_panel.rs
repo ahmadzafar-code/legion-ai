@@ -3227,3 +3227,103 @@ mod backend_resolution_tests {
         assert_eq!(p.resolve_backend(), fresh, "and later calls reuse it");
     }
 }
+
+/// The panel's turn-completion state machine (the `EventSink` terminal events),
+/// which drives what a user sees when a turn ends. Previously untested
+/// (testing-ci#4).
+#[cfg(test)]
+mod event_sink_tests {
+    use super::*;
+    use crate::ai::agent::AgentResponse;
+    use crate::ai::bridge::EventSink;
+
+    /// A panel with tracing pre-disabled so the sink methods never open a real
+    /// `~/.legion_prof_viewer/traces` file during tests.
+    fn idle_panel() -> ChatPanel {
+        let mut p = ChatPanel::new();
+        p.session_trace_opened = true; // session_trace() now returns None
+        p
+    }
+
+    fn resp(text: &str) -> AgentResponse {
+        AgentResponse {
+            text: text.to_owned(),
+            highlights: Vec::new(),
+            queries_executed: 0,
+            turns_used: 1,
+            usage_note: None,
+        }
+    }
+
+    fn last_system(p: &ChatPanel) -> &str {
+        p.messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m.kind, ChatMessageKind::System))
+            .map(|m| m.text.as_str())
+            .unwrap_or("")
+    }
+
+    #[test]
+    fn on_complete_renders_answer_and_clears_state() {
+        let mut p = idle_panel();
+        p.pending_request = true;
+        p.stop_requested = true; // e.g. left set from a prior interaction
+        p.on_complete(resp("the GPUs are idle"));
+        assert!(!p.pending_request, "turn is no longer pending");
+        assert!(!p.stop_requested, "stop flag reset at turn end");
+        assert!(
+            p.messages
+                .iter()
+                .any(|m| matches!(m.kind, ChatMessageKind::Analysis)
+                    && m.text.contains("the GPUs are idle")),
+            "the answer renders as an Analysis bubble"
+        );
+        assert_eq!(last_system(&p), "Done.");
+    }
+
+    #[test]
+    fn on_complete_shows_usage_note_on_done_line() {
+        let mut p = idle_panel();
+        p.pending_request = true;
+        let mut r = resp("ok");
+        r.usage_note = Some("tokens: in 1.2K, out 0.3K, $0.01".to_owned());
+        p.on_complete(r);
+        assert!(last_system(&p).starts_with("Done. (tokens: in 1.2K"));
+    }
+
+    #[test]
+    fn on_complete_skips_empty_bubble() {
+        // Claude Code dedups the final text against streamed interim messages,
+        // so an empty text + no highlights must NOT push an empty Analysis bubble.
+        let mut p = idle_panel();
+        p.on_complete(resp("   "));
+        assert!(
+            !p.messages
+                .iter()
+                .any(|m| matches!(m.kind, ChatMessageKind::Analysis)),
+            "no empty analysis bubble"
+        );
+    }
+
+    #[test]
+    fn on_error_user_stop_says_stopped_not_error() {
+        let mut p = idle_panel();
+        p.pending_request = true;
+        p.stop_requested = true;
+        p.on_error("claude exited mid-turn".to_owned());
+        assert_eq!(last_system(&p), "Stopped.");
+        assert!(!last_system(&p).contains("Error"));
+        assert!(!p.pending_request);
+        assert!(!p.stop_requested);
+    }
+
+    #[test]
+    fn on_error_normal_surfaces_the_error() {
+        let mut p = idle_panel();
+        p.pending_request = true;
+        p.on_error("boom".to_owned());
+        assert_eq!(last_system(&p), "Error: boom");
+        assert!(!p.pending_request);
+    }
+}
