@@ -235,6 +235,8 @@ fn wiki_corpus(wiki_root: &str) -> Result<Arc<Vec<WikiPage>>, String> {
 /// `wiki_index`: a grouped, one-line-per-page table of the whole corpus (or one
 /// section). Each row is `path [tier] — summary`. Scan it, then `wiki_read` the
 /// pages you need.
+/// # Errors
+/// Returns `Err` if the wiki corpus under `wiki_root` cannot be loaded.
 pub fn wiki_index(wiki_root: &str, section: Option<&str>) -> Result<String, String> {
     let corpus = wiki_corpus(wiki_root)?;
 
@@ -275,6 +277,9 @@ pub fn wiki_index(wiki_root: &str, section: Option<&str>) -> Result<String, Stri
 /// block when `section` is given. Capped at `max_chars` (default
 /// [`WIKI_READ_DEFAULT_MAX_CHARS`]) with a truncation marker when cut. Path-safe:
 /// rejects traversal/absolute paths AND requires the path to be an enumerated page.
+/// # Errors
+/// Returns `Err` if the path escapes the wiki root, names a page that does
+/// not exist, or the file cannot be read.
 pub fn wiki_read(
     wiki_root: &str,
     path: &str,
@@ -345,6 +350,8 @@ fn wiki_score(p: &WikiPage, q: &str) -> i64 {
 /// `wiki_search`: rank pages by keyword/substring over titles, summaries, TL;DRs,
 /// and tags (optionally scoped to a section and/or a tag). Returns up to `limit`
 /// `{path, section, tldr, tags, score}` rows as JSON — PATHS to read, not prose.
+/// # Errors
+/// Returns `Err` if the wiki corpus cannot be loaded.
 pub fn wiki_search(
     wiki_root: &str,
     query: &str,

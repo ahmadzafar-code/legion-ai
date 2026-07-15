@@ -69,6 +69,9 @@ GROUP BY ROUND(mib, 1) ORDER BY mib DESC";
 /// (~4–8 KB) suitable for the agent's initial context message. Each section is
 /// appended by one `overview_*` helper below, in the order the agent reads them.
 #[cfg(feature = "duckdb")]
+/// # Errors
+/// Returns `Err` if the DuckDB file cannot be opened. Individual section
+/// failures are folded into the returned text rather than propagated.
 pub fn gather_overview(duckdb_path: &str) -> Result<String, String> {
     let mut out = String::with_capacity(8192);
     overview_schema(&mut out);

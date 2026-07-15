@@ -8,6 +8,9 @@
 /// Execute a query and return the result as a markdown table (for LLM consumption).
 /// Falls back to raw JSON if table formatting fails.
 #[cfg(feature = "duckdb")]
+/// # Errors
+/// Returns `Err` (a model-readable message) if the DuckDB file cannot be
+/// opened read-only or the `SELECT` fails to execute.
 pub fn execute_run_query(duckdb_path: &str, sql: &str) -> Result<String, String> {
     let json_result = execute_run_query_raw(duckdb_path, sql)?;
     match json_array_to_markdown_table(&json_result) {
@@ -47,6 +50,9 @@ pub(crate) fn mark_truncation_if_over(result: String) -> String {
 /// Execute a query and return raw JSON array string.
 /// Used internally by `gather_overview()` which parses the JSON itself.
 #[cfg(feature = "duckdb")]
+/// # Errors
+/// Returns `Err` if the DuckDB file cannot be opened read-only or the query
+/// fails to execute.
 pub fn execute_run_query_raw(duckdb_path: &str, sql: &str) -> Result<String, String> {
     use duckdb::{AccessMode, Config, Connection};
 

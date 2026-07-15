@@ -137,6 +137,9 @@ fn recursive_file_tree(code_root: &str) -> Result<String, String> {
 /// Execute the `list_files` tool: list source files in a subdirectory of the code root.
 ///
 /// If `path` is empty or `"."`, lists from the code root itself.
+/// # Errors
+/// Returns `Err` if the code root is unset, the path escapes it, or the
+/// directory cannot be read.
 pub fn execute_list_files(code_root: &str, path: &str) -> Result<String, String> {
     if code_root.is_empty() {
         return Err(
@@ -164,6 +167,9 @@ pub fn execute_list_files(code_root: &str, path: &str) -> Result<String, String>
 /// Read a source file from the code root directory.
 ///
 /// The path must be relative and within `code_root` — path traversal (`..`) is rejected.
+/// # Errors
+/// Returns `Err` if the path is absolute or escapes the code root, or the
+/// file cannot be read.
 pub fn execute_read_code(code_root: &str, path: &str) -> Result<String, String> {
     if code_root.is_empty() {
         return Err(
