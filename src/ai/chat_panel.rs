@@ -899,7 +899,9 @@ impl ChatPanel {
         // the next turn writes into a dead pipe, so recovery took several
         // confusing resubmits (concurrency-lifecycle#2). Reap OFF the UI thread:
         // Drop does kill→wait→join (up to one watchdog tick) and must not stall a
-        // frame; the detached thread also keeps Drop off the watchdog thread.
+        // frame. (This keeps Drop off the UI thread only — the watchdog can still
+        // win the final Arc decrement and run Drop itself, which is exactly why
+        // ClaudeCodeAgent::Drop keeps its own self-join guard.)
         if disconnected {
             #[cfg(feature = "viewer-mcp")]
             if let Some(dead) = self.cc_agent.lock().unwrap().take() {

@@ -17,8 +17,14 @@ fn main() {
     if let Some(b) = build {
         println!("cargo:rustc-env=LEGION_AI_BUILD={b}");
     }
-    // Rebuild the identity when HEAD moves (only if we're in a git checkout).
-    if std::path::Path::new(".git/HEAD").exists() {
-        println!("cargo:rerun-if-changed=.git/HEAD");
+    // Re-run when HEAD actually moves. `.git/logs/HEAD` (the reflog) is appended
+    // on every commit / checkout / reset / merge / pull — including a same-branch
+    // commit, which leaves `.git/HEAD` (a symref) byte-identical and would NOT
+    // retrigger. Emitting any rerun-if-changed disables Cargo's package-file
+    // fallback, so we must name the file that genuinely changes.
+    for f in [".git/logs/HEAD", ".git/HEAD"] {
+        if std::path::Path::new(f).exists() {
+            println!("cargo:rerun-if-changed={f}");
+        }
     }
 }
