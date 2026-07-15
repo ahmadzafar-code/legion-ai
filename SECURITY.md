@@ -68,11 +68,22 @@ with a deliberately shaped surface:
 - **Process-group kill**: the child is spawned as a process-group leader and
   the whole group is killed on stop, so a mid-run Bash grandchild (or an
   injected `nohup … &`) cannot outlive the viewer.
-- The temp files carrying the MCP config and hook settings (which embed the
-  session token) are created `0600` and deleted on shutdown. After a hard
-  crash (SIGKILL), stale `legion_cc_*` files may remain in the temp dir until
-  the next session; the token inside is already invalid by then (new session,
-  new token) unless you pinned `LEGION_VIEWER_MCP_TOKEN`.
+- **The session token never appears in a process's arguments.** It lives only
+  in two viewer-owned temp files — the `--mcp-config` (the child's
+  `Authorization` header) and a `curl --config` file the approval hook reads —
+  both created *atomically* at `0600` (no world-readable window) and deleted on
+  shutdown. The token is deliberately kept out of the hook's `curl` argv because
+  a process's command line is readable by other local users
+  (`/proc/<pid>/cmdline`, `ps`) — on a shared login node that would hand a
+  co-tenant the key to the loopback server. After a hard crash (SIGKILL), stale
+  `legion_cc_*` files may remain until the next session; the token inside is
+  already invalid by then (new session, new token) unless you pinned
+  `LEGION_VIEWER_MCP_TOKEN`.
+- **Session traces at rest.** The default-on reasoning trace
+  (`~/.legion_prof_viewer/traces/`, see the README) records untruncated tool
+  inputs/outputs — SQL, Bash commands and their output, source the agent read.
+  Its directory is created `0700` and each file `0600`, so a co-tenant cannot
+  read another user's session. Disable with `LEGION_PROF_AI_TRACE=off`.
 
 ## Prompt injection, honestly
 
