@@ -1337,8 +1337,9 @@ fn map_line(line: &str, st: &mut MapState) -> Vec<AgentEvent> {
                 .to_string();
             if api_status == Some(401) {
                 out.push(AgentEvent::Error(
-                    "Claude Code could not authenticate (401). Run `claude auth login` in a \
-                     terminal, or set ANTHROPIC_API_KEY, then start a new session."
+                    "Claude Code could not authenticate (401). Run `claude auth login` in \
+                     your terminal (not in this chat), or set ANTHROPIC_API_KEY, then \
+                     start a new session."
                         .into(),
                 ));
             } else if is_error {

@@ -111,8 +111,9 @@ and factors them into its diagnosis.
 The AI engine is your own Claude Code (≥ 2.1, plus `curl`). Install it from
 [claude.com/claude-code](https://claude.com/claude-code) —
 `npm install -g @anthropic-ai/claude-code` or the native installer — and run
-`claude auth login` once; it uses your existing Claude subscription (Pro/Max)
-or an `ANTHROPIC_API_KEY` in the environment, which the spawned CLI inherits.
+`claude auth login` once in your terminal; it uses your existing Claude
+subscription (Pro/Max) or an `ANTHROPIC_API_KEY` in the environment, which
+the spawned CLI inherits.
 
 ```sh
 $ ./target/release/legion_prof_viewer myrun_archive
@@ -122,8 +123,8 @@ Click Legion AI (top right) and ask, for example: "Give me an overview of
 this profile — what ran, where the time went, and anything unusual."
 
 If the welcome screen says Claude Code isn't signed in, run
-`claude auth login` in any terminal; the hint flips to ready within seconds,
-no restart needed.
+`claude auth login` in your terminal — not in the chat panel; the hint flips
+to ready within seconds, no restart needed.
 
 If you normally run `legion_prof view`, this binary is the AI-enabled
 replacement for that frontend: it reads the same archives, and the AI tools
@@ -206,7 +207,7 @@ Symptoms and fixes:
 
 | Symptom | Fix |
 |---|---|
-| Welcome screen: "Claude Code isn't signed in yet" | run `claude auth login` in any terminal; the hint updates within seconds |
+| Welcome screen: "Claude Code isn't signed in yet" | run `claude auth login` in your terminal (not in the chat panel); the hint updates within seconds |
 | First turn errors with 401 | same as above, then ↺ for a fresh session |
 | Panel says Claude Code isn't available although it's installed | make sure `claude` resolves on the PATH of the shell that launched the viewer; when launching from Finder or an IDE, start from a terminal instead (or symlink `claude` into `/usr/local/bin`) |
 | `cc` / `c++` not found during first build | `sudo apt-get install build-essential` (Linux) or `xcode-select --install` (macOS) |

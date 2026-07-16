@@ -1202,7 +1202,8 @@ impl ChatPanel {
                     ChatMessageKind::System,
                     format!(
                         "Legion AI runs on your Claude Code, which isn't available: {reason}. \
-                         Install Claude Code and run `claude auth login`, then try again."
+                         Install Claude Code and run `claude auth login` in your terminal, \
+                         then try again."
                     ),
                 );
             }
@@ -1279,7 +1280,8 @@ impl ChatPanel {
                                 "Legion AI {build} · started your Claude Code ({version}) \
                                  against the profiler's MCP server (port {port}, bearer-token \
                                  protected). One-time setup if the first turn fails \
-                                 to authenticate: run `claude auth login` in a terminal.",
+                                 to authenticate: run `claude auth login` in your terminal \
+                                 (not in this chat).",
                                 build = crate::ai::build_version()
                             ),
                         );
@@ -1619,7 +1621,7 @@ impl ChatPanel {
                     )
                     .on_hover_text(format!(
                         "Legion AI runs on your Claude Code: {reason}. Install it and run \
-                         `claude auth login`."
+                         `claude auth login` in your terminal."
                     ));
                 }
             });
@@ -1768,7 +1770,7 @@ impl ChatPanel {
                 "Use + → Connect Code. It allows the AI agent to read your code.".to_string()
             } else {
                 "One-time setup: Claude Code isn't signed in yet. Run `claude auth login` \
-                 in a terminal, then come back and ask away."
+                 in your terminal (not in this chat), then come back and ask away."
                     .to_string()
             })
         } else if !NATIVE_ENGINE_ENABLED {
